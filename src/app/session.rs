@@ -830,16 +830,17 @@ impl PlaybackSession {
                 }
             }
 
-            if wrote_any_audio && self.audio_clock_anchor_pts.is_none() {
-                self.audio_clock_anchor_pts = first_written_pts;
-                if self.measure_open_audio_metric {
-                    self.pending_first_audio_metric = true;
-                }
-            }
-
             if wrote_any_audio && !sink.is_started() {
                 if let Err(error) = sink.resume() {
                     audio_error = Some(error.to_string());
+                }
+            }
+
+            if wrote_any_audio && self.audio_clock_anchor_pts.is_none() && sink.is_started() {
+                self.audio_clock_anchor_pts = first_written_pts;
+                self.video_clock = None;
+                if self.measure_open_audio_metric {
+                    self.pending_first_audio_metric = true;
                 }
             }
         }
