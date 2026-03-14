@@ -1,5 +1,5 @@
 use crate::{
-    ffi::d3d11::{D3D11Device, VideoSurface},
+    ffi::d3d11::{D3D11Device, SubtitleOverlay, VideoSurface},
     media::video::{DecodedVideoFrame, SoftwareVideoFrameFormat},
     platform::window::NativeWindow,
     render::{
@@ -13,6 +13,7 @@ pub struct Presenter {
     swap_chain: SwapChainPresenter,
     surfaces: SurfaceRegistry,
     current_surface: Option<VideoSurfaceHandle>,
+    subtitle_overlay: Option<SubtitleOverlay>,
 }
 
 impl Presenter {
@@ -25,6 +26,7 @@ impl Presenter {
             swap_chain,
             surfaces: SurfaceRegistry::default(),
             current_surface: None,
+            subtitle_overlay: None,
         })
     }
 
@@ -32,13 +34,13 @@ impl Presenter {
         if let Some(handle) = self.current_surface {
             if let Some(entry) = self.surfaces.get(handle) {
                 self.swap_chain
-                    .render_surface(&self.device, &entry.surface)?;
+                    .render_surface(&self.device, &entry.surface, self.subtitle_overlay.as_ref())?;
                 return Ok(());
             }
         }
 
         self.swap_chain
-            .render(&self.device, [0.08, 0.10, 0.14, 1.0])?;
+            .render(&self.device, [0.08, 0.10, 0.14, 1.0], self.subtitle_overlay.as_ref())?;
         Ok(())
     }
 
@@ -138,6 +140,29 @@ impl Presenter {
         self.current_surface.is_some()
     }
 
+    pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+        self.swap_chain.viewport_size()
+    }
+
+    pub fn set_subtitle_overlay(
+        &mut self,
+        text: Option<&str>,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.subtitle_overlay = match text {
+            Some(text) => self
+                .device
+                .create_subtitle_overlay(text, viewport_width, viewport_height)?,
+            None => None,
+        };
+        Ok(())
+    }
+
+    pub fn clear_subtitle_overlay(&mut self) {
+        self.subtitle_overlay = None;
+    }
+
     pub fn release_surface(&mut self, handle: VideoSurfaceHandle) {
         if self.current_surface == Some(handle) {
             self.current_surface = None;
@@ -148,5 +173,6 @@ impl Presenter {
     pub fn reset_surfaces(&mut self) {
         self.current_surface = None;
         self.surfaces.clear_for_new_epoch();
+        self.subtitle_overlay = None;
     }
 }

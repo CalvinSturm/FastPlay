@@ -7,5 +7,6 @@ use crate::media::seek::SeekTarget;
 pub enum SessionCommand {
     Tick,
     TogglePause,
+    ToggleSubtitles,
     Seek(SeekTarget),
 }

@@ -1,6 +1,6 @@
 use crate::{
     ffi::{
-        d3d11::{D3D11Device, VideoSurface},
+        d3d11::{D3D11Device, SubtitleOverlay, VideoSurface},
         dxgi::DxgiSwapChain,
     },
     platform::window::NativeWindow,
@@ -24,8 +24,9 @@ impl SwapChainPresenter {
         &mut self,
         device: &D3D11Device,
         clear_color: [f32; 4],
+        subtitle_overlay: Option<&SubtitleOverlay>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.swap_chain.render(device, clear_color)?;
+        self.swap_chain.render(device, clear_color, subtitle_overlay)?;
         Ok(())
     }
 
@@ -43,8 +44,13 @@ impl SwapChainPresenter {
         &mut self,
         device: &D3D11Device,
         surface: &VideoSurface,
+        subtitle_overlay: Option<&SubtitleOverlay>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.swap_chain.render_surface(device, surface)?;
+        self.swap_chain.render_surface(device, surface, subtitle_overlay)?;
         Ok(())
+    }
+
+    pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+        self.swap_chain.viewport_size()
     }
 }

@@ -22,6 +22,7 @@ use crate::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
         seek::{PlaybackSnapshot, PositionKind, SeekTarget},
         source::MediaSource,
+        subtitle::SubtitleTrack,
         video::{DecodedVideoFrame, VideoDecodeMode, VideoDecodePreference},
     },
     platform::window::NativeWindow,
@@ -70,6 +71,11 @@ pub struct PlaybackSession {
     pending_seek_settled_metric: bool,
     seek_frame_presented_since_request: bool,
     audio_stream_expected: bool,
+    subtitle_track: Option<SubtitleTrack>,
+    subtitles_enabled: bool,
+    subtitle_clock_base: Option<Duration>,
+    active_subtitle_cue: Option<usize>,
+    active_subtitle_viewport: Option<(u32, u32)>,
     queued_video_frames: VecDeque<DecodedVideoFrame>,
     queued_audio_frames: VecDeque<QueuedAudioFrame>,
     queued_video_capacity: usize,
@@ -116,6 +122,11 @@ impl PlaybackSession {
             pending_seek_settled_metric: false,
             seek_frame_presented_since_request: false,
             audio_stream_expected: false,
+            subtitle_track: None,
+            subtitles_enabled: true,
+            subtitle_clock_base: None,
+            active_subtitle_cue: None,
+            active_subtitle_viewport: None,
             queued_video_frames: VecDeque::with_capacity(queue_defaults.decoded_video_frames),
             queued_audio_frames: VecDeque::with_capacity(queue_defaults.decoded_audio_frames),
             queued_video_capacity: queue_defaults.decoded_video_frames,
@@ -161,8 +172,26 @@ impl PlaybackSession {
         let seek_gen = self.generations.seek();
         let op_id = self.operation_clock.next();
         self.decode_preference = source.decode_preference();
+        self.subtitle_track = match SubtitleTrack::load_sidecar(&source) {
+            Ok(track) => track,
+            Err(error) => {
+                eprintln!("subtitle load failed: {error}");
+                None
+            }
+        };
+        self.subtitles_enabled = self.subtitle_track.is_some();
+        self.subtitle_clock_base = None;
+        self.active_subtitle_cue = None;
+        self.active_subtitle_viewport = None;
         self.current_source = Some(source.clone());
         self.active_decode_mode = None;
+        if let Some(track) = self.subtitle_track.as_ref() {
+            eprintln!(
+                "subtitle_track_loaded path={} cues={}",
+                track.path().display(),
+                track.len()
+            );
+        }
         self.metrics.note_open_requested(now);
         self.measure_open_audio_metric = true;
         self.begin_operation(source, None, open_gen, seek_gen, op_id, PlaybackState::Opening, true, true)?;
@@ -177,6 +206,7 @@ impl PlaybackSession {
         match command {
             SessionCommand::Tick => {}
             SessionCommand::TogglePause => self.toggle_pause(now)?,
+            SessionCommand::ToggleSubtitles => self.toggle_subtitles()?,
             SessionCommand::Seek(target) => self.seek(target, now)?,
         }
         Ok(())
@@ -221,6 +251,7 @@ impl PlaybackSession {
 
         self.submit_due_audio(now)?;
         self.advance_video_playback(now);
+        self.update_subtitle_overlay(now)?;
 
         match self.presenter.render() {
             Ok(()) => self.metrics.note_present(now),
@@ -494,6 +525,7 @@ impl PlaybackSession {
             false,
         )?;
         self.pending_seek_target = Some(target);
+        self.subtitle_clock_base = Some(target.position());
         self.pending_seek_first_frame_metric = true;
         self.pending_seek_settled_metric = true;
         self.seek_frame_presented_since_request = false;
@@ -528,6 +560,7 @@ impl PlaybackSession {
         self.clear_video_queue();
         self.queued_audio_frames.clear();
         self.presenter.reset_surfaces();
+        self.presenter.clear_subtitle_overlay();
         self.video_clock = None;
         self.paused_clock_position = None;
         self.audio_clock_anchor_pts = None;
@@ -537,6 +570,9 @@ impl PlaybackSession {
         self.video_stream_ended = false;
         self.audio_stream_ended = false;
         self.active_decode_mode = None;
+        self.subtitle_clock_base = None;
+        self.active_subtitle_cue = None;
+        self.active_subtitle_viewport = None;
         if reset_audio_expectation {
             self.audio_stream_expected = false;
         }
@@ -923,6 +959,93 @@ impl PlaybackSession {
         Ok(())
     }
 
+    fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.subtitle_track.is_none() {
+            eprintln!("subtitle toggle ignored: no external .srt sidecar was loaded");
+            return Ok(());
+        }
+
+        self.subtitles_enabled = !self.subtitles_enabled;
+        self.subtitle_clock_base = None;
+        self.active_subtitle_cue = None;
+        self.active_subtitle_viewport = None;
+        if !self.subtitles_enabled {
+            self.presenter.clear_subtitle_overlay();
+        }
+        eprintln!("subtitles_enabled={}", self.subtitles_enabled);
+        Ok(())
+    }
+
+    fn update_subtitle_overlay(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let subtitle_position = self.subtitle_position(now);
+        let Some(track) = self.subtitle_track.as_ref() else {
+            self.active_subtitle_cue = None;
+            self.active_subtitle_viewport = None;
+            self.presenter.clear_subtitle_overlay();
+            return Ok(());
+        };
+        if !self.subtitles_enabled {
+            self.active_subtitle_cue = None;
+            self.active_subtitle_viewport = None;
+            self.presenter.clear_subtitle_overlay();
+            return Ok(());
+        }
+
+        let viewport = self.presenter.viewport_size()?;
+        if viewport.0 == 0 || viewport.1 == 0 {
+            return Ok(());
+        }
+
+        let cue = track.cue_at(subtitle_position);
+        let next_index = cue.map(|(index, _)| index);
+        if self.active_subtitle_cue == next_index && self.active_subtitle_viewport == Some(viewport) {
+            return Ok(());
+        }
+
+        match cue {
+            Some((index, cue)) => {
+                self.presenter
+                    .set_subtitle_overlay(Some(&cue.text), viewport.0, viewport.1)?;
+                self.active_subtitle_cue = Some(index);
+                self.active_subtitle_viewport = Some(viewport);
+                eprintln!(
+                    "subtitle_cue index={} start_ms={} end_ms={}",
+                    index,
+                    cue.start.as_millis(),
+                    cue.end.as_millis()
+                );
+            }
+            None => {
+                if self.active_subtitle_cue.take().is_some() {
+                    eprintln!("subtitle_cue cleared");
+                }
+                self.active_subtitle_viewport = Some(viewport);
+                self.presenter.clear_subtitle_overlay();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn subtitle_position(&mut self, now: Instant) -> Duration {
+        if let Some(target) = self.pending_seek_target {
+            return target.position();
+        }
+
+        let master = self.master_clock_position(now).unwrap_or(Duration::ZERO);
+        if let Some(base) = self.subtitle_clock_base {
+            if master.saturating_add(Duration::from_secs(1)) < base {
+                return base.saturating_add(master);
+            }
+            self.subtitle_clock_base = None;
+        }
+
+        master
+    }
+
     fn master_clock_position(&self, now: Instant) -> Option<Duration> {
         if let Some(paused) = self.paused_clock_position {
             return Some(paused);
@@ -978,6 +1101,7 @@ impl PlaybackSession {
             true,
             false,
         )?;
+        self.subtitle_clock_base = Some(restart_target);
         Ok(())
     }
 
@@ -1008,6 +1132,7 @@ impl PlaybackSession {
             false,
             false,
         )?;
+        self.subtitle_clock_base = Some(restart_target);
         if let Some(elapsed) = self.metrics.note_device_recovered(now) {
             eprintln!("device_recovery_ms={}", elapsed.as_millis());
         }

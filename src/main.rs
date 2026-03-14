@@ -40,6 +40,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::TogglePause => {
                     session.apply_command(SessionCommand::TogglePause, Instant::now())?;
                 }
+                InputEvent::ToggleSubtitles => {
+                    session.apply_command(SessionCommand::ToggleSubtitles, Instant::now())?;
+                }
                 InputEvent::SeekRelativeSeconds(offset_seconds) => {
                     let snapshot = session.snapshot(Instant::now());
                     let next_position = if offset_seconds >= 0 {

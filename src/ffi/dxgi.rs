@@ -35,7 +35,7 @@ use windows::{
 };
 
 use crate::{
-    ffi::d3d11::{D3D11Device, RenderTargetView, VideoSurface},
+    ffi::d3d11::{D3D11Device, RenderTargetView, SubtitleOverlay, SubtitleRenderer, VideoSurface},
     platform::input::InputEvent,
 };
 
@@ -185,6 +185,7 @@ pub struct DxgiSwapChain {
     render_target: Option<RenderTargetView>,
     width: u32,
     height: u32,
+    subtitle_renderer: Option<SubtitleRenderer>,
 }
 
 impl DxgiSwapChain {
@@ -227,6 +228,7 @@ impl DxgiSwapChain {
             render_target: Some(render_target),
             width: 0,
             height: 0,
+            subtitle_renderer: None,
         })
     }
 
@@ -234,6 +236,7 @@ impl DxgiSwapChain {
         &mut self,
         device: &D3D11Device,
         clear_color: [f32; 4],
+        subtitle_overlay: Option<&SubtitleOverlay>,
     ) -> Result<(), Box<dyn Error>> {
         let render_target = self
             .render_target
@@ -241,6 +244,10 @@ impl DxgiSwapChain {
             .ok_or_else(|| DxgiError("swap-chain backbuffer is not bound".into()))?;
 
         device.clear_render_target(render_target, clear_color);
+        if let Some(overlay) = subtitle_overlay {
+            let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(renderer, overlay, render_target)?;
+        }
 
         // SAFETY:
         // - swap chain is live and bound to the current window
@@ -257,6 +264,7 @@ impl DxgiSwapChain {
         &mut self,
         device: &D3D11Device,
         surface: &VideoSurface,
+        subtitle_overlay: Option<&SubtitleOverlay>,
     ) -> Result<(), Box<dyn Error>> {
         let backbuffer = self
             .backbuffer
@@ -270,6 +278,14 @@ impl DxgiSwapChain {
         };
 
         device.render_video_surface(surface, backbuffer, output_width, output_height)?;
+        if let Some(overlay) = subtitle_overlay {
+            let render_target = self
+                .render_target
+                .as_ref()
+                .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
+            let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(renderer, overlay, render_target)?;
+        }
 
         unsafe {
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
@@ -312,6 +328,18 @@ impl DxgiSwapChain {
         self.width = width;
         self.height = height;
         Ok(())
+    }
+
+    pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn Error>> {
+        if self.width != 0 && self.height != 0 {
+            return Ok((self.width, self.height));
+        }
+
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("swap-chain backbuffer texture is not bound".into()))?;
+        current_backbuffer_size(backbuffer)
     }
 }
 
@@ -440,6 +468,9 @@ unsafe extern "system" fn window_proc(
                 match wparam.0 as u32 {
                     key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE.0 as u32 => {
                         state.input_events.borrow_mut().push(InputEvent::TogglePause);
+                    }
+                    0x53 => {
+                        state.input_events.borrow_mut().push(InputEvent::ToggleSubtitles);
                     }
                     key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
                         state
