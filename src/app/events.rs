@@ -1,0 +1,24 @@
+#![allow(dead_code)]
+
+use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
+
+/// All asynchronous completions flow through this enum so the coordinator stays
+/// the only state owner.
+#[derive(Clone, Debug)]
+pub enum SessionEvent {
+    OpenFailed {
+        open_gen: OpenGeneration,
+        op_id: OperationId,
+        error: String,
+    },
+    DeviceLost {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+    },
+    AudioEndpointChanged {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+    },
+}
