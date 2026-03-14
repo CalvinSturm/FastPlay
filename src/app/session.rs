@@ -40,6 +40,36 @@ use crate::{
 const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
 
+#[derive(Clone, Copy, Debug)]
+enum VideoDropCause {
+    QueueOverflow,
+    SurfaceMismatch,
+    SchedulerLate,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct VideoDropBuckets {
+    queue_overflow: u64,
+    surface_mismatch: u64,
+    scheduler_late: u64,
+}
+
+impl VideoDropBuckets {
+    fn note(&mut self, cause: VideoDropCause) {
+        match cause {
+            VideoDropCause::QueueOverflow => {
+                self.queue_overflow = self.queue_overflow.saturating_add(1);
+            }
+            VideoDropCause::SurfaceMismatch => {
+                self.surface_mismatch = self.surface_mismatch.saturating_add(1);
+            }
+            VideoDropCause::SchedulerLate => {
+                self.scheduler_late = self.scheduler_late.saturating_add(1);
+            }
+        }
+    }
+}
+
 struct QueuedAudioFrame {
     frame: DecodedAudioFrame,
     submitted_frames: u32,
@@ -63,6 +93,7 @@ pub struct PlaybackSession {
     event_rx: Receiver<SessionEvent>,
     metrics: PlaybackMetrics,
     video_clock: Option<PlaybackClock>,
+    media_time_origin_pts: Option<Duration>,
     paused_clock_position: Option<Duration>,
     audio_clock_anchor_pts: Option<Duration>,
     audio_submitted_frames: u64,
@@ -80,6 +111,7 @@ pub struct PlaybackSession {
     queued_audio_frames: VecDeque<QueuedAudioFrame>,
     queued_video_capacity: usize,
     queued_audio_capacity: usize,
+    drop_buckets: VideoDropBuckets,
     measure_open_audio_metric: bool,
     pending_first_frame_metric: bool,
     pending_first_audio_metric: bool,
@@ -87,6 +119,7 @@ pub struct PlaybackSession {
     audio_stream_ended: bool,
     active_decode_mode: Option<VideoDecodeMode>,
     last_error: Option<String>,
+    present_needed: bool,
 }
 
 impl PlaybackSession {
@@ -114,6 +147,7 @@ impl PlaybackSession {
             event_rx,
             metrics: PlaybackMetrics::default(),
             video_clock: None,
+            media_time_origin_pts: None,
             paused_clock_position: None,
             audio_clock_anchor_pts: None,
             audio_submitted_frames: 0,
@@ -131,6 +165,7 @@ impl PlaybackSession {
             queued_audio_frames: VecDeque::with_capacity(queue_defaults.decoded_audio_frames),
             queued_video_capacity: queue_defaults.decoded_video_frames,
             queued_audio_capacity: queue_defaults.decoded_audio_frames,
+            drop_buckets: VideoDropBuckets::default(),
             measure_open_audio_metric: false,
             pending_first_frame_metric: false,
             pending_first_audio_metric: false,
@@ -138,15 +173,12 @@ impl PlaybackSession {
             audio_stream_ended: false,
             active_decode_mode: None,
             last_error: None,
+            present_needed: true,
         })
     }
 
     pub fn window(&self) -> &NativeWindow {
         &self.window
-    }
-
-    pub fn window_mut(&mut self) -> &mut NativeWindow {
-        &mut self.window
     }
 
     pub fn snapshot(&self, now: Instant) -> PlaybackSnapshot {
@@ -232,16 +264,16 @@ impl PlaybackSession {
         self.submit_due_audio(now)?;
 
         loop {
-            match self.event_rx.try_recv() {
-                Ok(event) => self.handle_event(event, now)?,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
-
             if self.queued_video_frames.len() >= self.queued_video_capacity
                 || self.queued_audio_frames.len() >= self.queued_audio_capacity
             {
                 break;
+            }
+
+            match self.event_rx.try_recv() {
+                Ok(event) => self.handle_event(event, now)?,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
             }
         }
 
@@ -253,12 +285,19 @@ impl PlaybackSession {
         self.advance_video_playback(now);
         self.update_subtitle_overlay(now)?;
 
-        match self.presenter.render() {
-            Ok(()) => self.metrics.note_present(now),
-            Err(error) => {
-                self.recover_device(now, format!("present failed: {error}"))?;
-                return Ok(());
+        if self.present_needed {
+            match self.presenter.render() {
+                Ok(()) => {
+                    self.present_needed = false;
+                    self.metrics.note_present(now);
+                }
+                Err(error) => {
+                    self.recover_device(now, format!("present failed: {error}"))?;
+                    return Ok(());
+                }
             }
+        } else {
+            thread::sleep(Duration::from_millis(1));
         }
 
         if self.pending_first_frame_metric && self.presenter.has_selected_surface() {
@@ -295,7 +334,7 @@ impl PlaybackSession {
             self.state = PlaybackState::Ended;
             self.metrics.note_ended(now);
             eprintln!(
-                "playback_summary decode_mode={} hw_fallback_count={} presented_frames={} dropped_video_frames={} audio_underruns={}",
+                "playback_summary decode_mode={} hw_fallback_count={} presented_frames={} dropped_video_frames={} audio_underruns={} drop_queue_overflow={} drop_surface_mismatch={} drop_scheduler_late={}",
                 self.metrics
                     .decode_mode()
                     .map(VideoDecodeMode::label)
@@ -303,7 +342,10 @@ impl PlaybackSession {
                 self.metrics.hw_fallback_count(),
                 self.metrics.presented_video_frames(),
                 self.metrics.dropped_video_frames(),
-                self.metrics.audio_underruns()
+                self.metrics.audio_underruns(),
+                self.drop_buckets.queue_overflow,
+                self.drop_buckets.surface_mismatch,
+                self.drop_buckets.scheduler_late
             );
         }
 
@@ -353,6 +395,7 @@ impl PlaybackSession {
                         height,
                         surface,
                     } => {
+                        self.observe_media_time_origin(pts);
                         let handle = self.presenter.register_surface(open_gen, seek_gen, surface);
                         self.push_video_frame(DecodedVideoFrame::D3D11 {
                             open_gen,
@@ -375,6 +418,7 @@ impl PlaybackSession {
                         planes,
                         strides,
                     } => {
+                        self.observe_media_time_origin(pts);
                         let software_frame = DecodedVideoFrame::Software {
                             open_gen,
                             seek_gen,
@@ -408,6 +452,7 @@ impl PlaybackSession {
                 }
 
                 self.audio_stream_expected = true;
+                self.observe_media_time_origin(frame.pts);
                 if self.audio_sink.is_none() {
                     let message = self
                         .audio_sink_error
@@ -562,9 +607,11 @@ impl PlaybackSession {
         self.presenter.reset_surfaces();
         self.presenter.clear_subtitle_overlay();
         self.video_clock = None;
+        self.media_time_origin_pts = None;
         self.paused_clock_position = None;
         self.audio_clock_anchor_pts = None;
         self.audio_submitted_frames = 0;
+        self.drop_buckets = VideoDropBuckets::default();
         self.pending_first_frame_metric = false;
         self.pending_first_audio_metric = false;
         self.video_stream_ended = false;
@@ -717,6 +764,7 @@ impl PlaybackSession {
 
         match self.presenter.resize(size.width, size.height) {
             Ok(()) => {
+                self.present_needed = true;
                 if let Some(elapsed) = self.metrics.note_resize_recovered(now) {
                     eprintln!("resize_recover_ms={}", elapsed.as_millis());
                 }
@@ -724,6 +772,7 @@ impl PlaybackSession {
             }
             Err(error) => {
                 if self.presenter.rebuild_swap_chain(&self.window).is_ok() {
+                    self.present_needed = true;
                     if let Some(elapsed) = self.metrics.note_resize_recovered(now) {
                         eprintln!("resize_recover_ms={}", elapsed.as_millis());
                     }
@@ -834,21 +883,38 @@ impl PlaybackSession {
                 let Some(audio_clock) = self.master_clock_position(now) else {
                     return;
                 };
-                if next_frame.pts() > audio_clock {
+                let next_frame_time = self.media_time_for_pts(next_frame.pts());
+                if next_frame_time > audio_clock {
                     return;
                 }
 
-                let lateness = audio_clock.saturating_sub(next_frame.pts());
+                let lateness = audio_clock.saturating_sub(next_frame_time);
                 if lateness > VERY_LATE_VIDEO_THRESHOLD && self.queued_video_frames.len() > 1 {
                     let dropped = self
                         .queued_video_frames
                         .pop_front()
                         .expect("front frame existed");
-                    self.drop_video_frame(dropped);
+                    self.drop_video_frame(dropped, VideoDropCause::SchedulerLate);
                     continue;
                 }
+
+                while self.queued_video_frames.len() > 1 {
+                    let Some(upcoming_frame) = self.queued_video_frames.get(1) else {
+                        break;
+                    };
+                    let upcoming_time = self.media_time_for_pts(upcoming_frame.pts());
+                    if upcoming_time > audio_clock {
+                        break;
+                    }
+
+                    let dropped = self
+                        .queued_video_frames
+                        .pop_front()
+                        .expect("front frame existed");
+                    self.drop_video_frame(dropped, VideoDropCause::SchedulerLate);
+                }
             } else if let Some(clock) = self.video_clock {
-                let due_at = clock.deadline_for(next_frame.pts());
+                let due_at = clock.deadline_for(self.media_time_for_pts(next_frame.pts()));
                 if now < due_at {
                     return;
                 }
@@ -865,14 +931,14 @@ impl PlaybackSession {
 
     fn present_video_frame(&mut self, frame: DecodedVideoFrame, now: Instant) {
         if self.video_clock.is_none() && self.audio_clock_anchor_pts.is_none() {
-            self.video_clock = Some(PlaybackClock::new(now, frame.pts()));
+            self.video_clock = Some(PlaybackClock::new(now, self.media_time_for_pts(frame.pts())));
         }
 
         if !self
             .presenter
             .surface_matches(frame.surface(), frame.open_gen(), frame.seek_gen())
         {
-            self.drop_video_frame(frame);
+            self.drop_video_frame(frame, VideoDropCause::SurfaceMismatch);
             return;
         }
 
@@ -883,6 +949,7 @@ impl PlaybackSession {
             }
         }
 
+        self.present_needed = true;
         self.metrics.note_video_frame_presented();
         self.pending_first_frame_metric |= self.metrics.presented_video_frames() == 1;
         self.seek_frame_presented_since_request |= self.pending_seek_settled_metric;
@@ -891,8 +958,9 @@ impl PlaybackSession {
         }
     }
 
-    fn drop_video_frame(&mut self, frame: DecodedVideoFrame) {
+    fn drop_video_frame(&mut self, frame: DecodedVideoFrame, cause: VideoDropCause) {
         self.presenter.release_surface(frame.surface());
+        self.drop_buckets.note(cause);
         self.metrics.note_video_frame_dropped();
     }
 
@@ -912,7 +980,7 @@ impl PlaybackSession {
 
         while self.queued_video_frames.len() > self.queued_video_capacity {
             if let Some(dropped) = self.queued_video_frames.pop_back() {
-                self.drop_video_frame(dropped);
+                self.drop_video_frame(dropped, VideoDropCause::QueueOverflow);
             }
         }
     }
@@ -1005,6 +1073,7 @@ impl PlaybackSession {
             return Ok(());
         }
 
+        self.present_needed = true;
         match cue {
             Some((index, cue)) => {
                 self.presenter
@@ -1058,12 +1127,22 @@ impl PlaybackSession {
                 let sample_rate = sink.format().sample_rate;
                 if sample_rate > 0 {
                     let played = Duration::from_secs_f64(played_frames as f64 / sample_rate as f64);
-                    return Some(anchor_pts.saturating_add(played));
+                    return Some(self.media_time_for_pts(anchor_pts).saturating_add(played));
                 }
             }
         }
 
         self.video_clock.map(|clock| clock.position_at(now))
+    }
+
+    fn observe_media_time_origin(&mut self, pts: Duration) {
+        if self.media_time_origin_pts.is_none() {
+            self.media_time_origin_pts = Some(pts);
+        }
+    }
+
+    fn media_time_for_pts(&self, pts: Duration) -> Duration {
+        pts.saturating_sub(self.media_time_origin_pts.unwrap_or(pts))
     }
 
     fn seek_is_settled(&self) -> bool {

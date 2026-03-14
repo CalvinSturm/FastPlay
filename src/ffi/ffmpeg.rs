@@ -26,6 +26,8 @@ use crate::{
 include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
 
 const SWS_BILINEAR_FLAGS: i32 = 2;
+const AV_NOPTS_SENTINEL: i64 = i64::MIN;
+const AV_TIME_BASE_MICROS: i128 = 1_000_000;
 
 #[derive(Debug)]
 pub(crate) enum PendingVideoFrame {
@@ -275,6 +277,7 @@ where
 struct VideoDecoder {
     stream_index: usize,
     codec: CodecContext,
+    pts_time_base: AVRational,
     output: VideoDecoderOutput,
     mode: VideoDecodeMode,
     hw_fallback_count: u64,
@@ -288,6 +291,7 @@ enum VideoDecoderOutput {
 struct AudioDecoder {
     stream_index: usize,
     codec: CodecContext,
+    pts_time_base: AVRational,
     resampler: Resampler,
     output_format: AudioStreamFormat,
 }
@@ -369,7 +373,8 @@ unsafe fn open_hardware_video_decoder(
         avcodec_parameters_to_context(codec.0, codec_parameters),
         "avcodec_parameters_to_context(video)",
     )?;
-    (*codec.0).pkt_timebase = fastplay_ffmpeg_stream_time_base(stream);
+    let pts_time_base = fastplay_ffmpeg_stream_time_base(stream);
+    (*codec.0).pkt_timebase = pts_time_base;
     (*codec.0).get_format = Some(select_d3d11_pixel_format);
     configure_hw_device(codec.0, device, decoder)?;
     ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(video)")?;
@@ -377,6 +382,7 @@ unsafe fn open_hardware_video_decoder(
     Ok(VideoDecoder {
         stream_index,
         codec,
+        pts_time_base,
         output: VideoDecoderOutput::Hardware,
         mode: VideoDecodeMode::HardwareD3D11,
         hw_fallback_count: 0,
@@ -418,12 +424,14 @@ unsafe fn open_software_video_decoder(
         avcodec_parameters_to_context(codec.0, codec_parameters),
         "avcodec_parameters_to_context(video)",
     )?;
-    (*codec.0).pkt_timebase = fastplay_ffmpeg_stream_time_base(stream);
+    let pts_time_base = fastplay_ffmpeg_stream_time_base(stream);
+    (*codec.0).pkt_timebase = pts_time_base;
     ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(video)")?;
 
     Ok(VideoDecoder {
         stream_index,
         codec,
+        pts_time_base,
         output: VideoDecoderOutput::Software(SoftwareVideoConverter::default()),
         mode: VideoDecodeMode::Software,
         hw_fallback_count: 0,
@@ -468,7 +476,8 @@ unsafe fn open_audio_decoder(
         avcodec_parameters_to_context(codec.0, codec_parameters),
         "avcodec_parameters_to_context(audio)",
     )?;
-    (*codec.0).pkt_timebase = fastplay_ffmpeg_stream_time_base(stream);
+    let pts_time_base = fastplay_ffmpeg_stream_time_base(stream);
+    (*codec.0).pkt_timebase = pts_time_base;
     ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(audio)")?;
 
     let input_channel_layout = &(*codec.0).ch_layout;
@@ -486,6 +495,7 @@ unsafe fn open_audio_decoder(
     Ok(Some(AudioDecoder {
         stream_index,
         codec,
+        pts_time_base,
         resampler,
         output_format,
     }))
@@ -535,7 +545,7 @@ where
                     open_gen,
                     seek_gen,
                     op_id,
-                    pts: frame_pts((*frame).best_effort_timestamp, (*frame).time_base),
+                    pts: decoded_frame_pts(frame, video.pts_time_base),
                     width: (*frame).width as u32,
                     height: (*frame).height as u32,
                     surface,
@@ -547,7 +557,7 @@ where
                     open_gen,
                     seek_gen,
                     op_id,
-                    pts: frame_pts((*frame).best_effort_timestamp, (*frame).time_base),
+                    pts: decoded_frame_pts(frame, video.pts_time_base),
                     width: (*frame).width as u32,
                     height: (*frame).height as u32,
                     format: converted.format,
@@ -688,7 +698,7 @@ where
         }
         ffmpeg_check(status, "avcodec_receive_frame(audio)")?;
 
-        let pts = frame_pts((*frame).best_effort_timestamp, (*frame).time_base);
+        let pts = decoded_frame_pts(frame, audio.pts_time_base);
         let data = audio.resampler.convert(frame)?;
         let frame_count = (data.len() / audio.output_format.bytes_per_frame() as usize) as u32;
         av_frame_unref(frame);
@@ -932,12 +942,30 @@ unsafe extern "C" fn select_d3d11_pixel_format(
 }
 
 fn frame_pts(value: i64, time_base: AVRational) -> Duration {
-    if value <= 0 || time_base.den == 0 || time_base.num == 0 {
+    if value == AV_NOPTS_SENTINEL || time_base.den == 0 || time_base.num == 0 {
         return Duration::ZERO;
     }
 
-    let seconds = (value as f64) * (time_base.num as f64) / (time_base.den as f64);
-    Duration::from_secs_f64(seconds.max(0.0))
+    let micros = (value as i128)
+        .saturating_mul(time_base.num as i128)
+        .saturating_mul(AV_TIME_BASE_MICROS)
+        / (time_base.den as i128);
+    if micros <= 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_micros(micros.min(u64::MAX as i128) as u64)
+    }
+}
+
+fn decoded_frame_pts(frame: *mut AVFrame, time_base: AVRational) -> Duration {
+    unsafe {
+        let best_effort = (*frame).best_effort_timestamp;
+        if best_effort != AV_NOPTS_SENTINEL {
+            return frame_pts(best_effort, time_base);
+        }
+
+        frame_pts((*frame).pts, time_base)
+    }
 }
 
 fn ffmpeg_check(status: i32, operation: &str) -> Result<i32, String> {

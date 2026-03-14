@@ -6,7 +6,7 @@ mod platform;
 mod playback;
 mod render;
 
-use std::time::Instant;
+use std::{ffi::c_void, time::Instant};
 
 use app::commands::SessionCommand;
 use app::session::PlaybackSession;
@@ -17,6 +17,16 @@ use media::{
 };
 use platform::input::InputEvent;
 use platform::window::NativeWindow;
+
+/// Trampoline called by the Win32 modal move/resize timer.
+///
+/// # Safety
+///
+/// `ctx` must point to a live `PlaybackSession` on the current thread.
+unsafe fn modal_tick_trampoline(ctx: *mut c_void) {
+    let session = &mut *(ctx as *mut PlaybackSession);
+    let _ = session.tick(Instant::now());
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -29,12 +39,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let media_path = parse_media_source_from_args()?;
     let window = NativeWindow::create("FastPlay", 1280, 720)?;
     let mut session = PlaybackSession::new(window)?;
+
+    // SAFETY: `session` lives on this stack frame for the entire main loop.
+    // The callback is cleared before `session` is dropped.
+    unsafe {
+        let ctx = &mut session as *mut PlaybackSession as *mut c_void;
+        session.window().install_modal_tick(ctx, modal_tick_trampoline);
+    }
+
     if let Some(source) = media_path {
         session.open(source, Instant::now())?;
     }
 
     while session.window().is_open() {
-        session.window_mut().pump_messages()?;
+        session.window().pump_messages()?;
         for input in session.window().take_input_events() {
             match input {
                 InputEvent::TogglePause => {
@@ -61,6 +79,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         session.tick(Instant::now())?;
     }
 
+    session.window().clear_modal_tick();
     Ok(())
 }
 

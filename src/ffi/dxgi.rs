@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     error::Error,
-    ffi::OsStr,
+    ffi::{c_void, OsStr},
     fmt,
     os::windows::ffi::OsStrExt,
     ptr::null_mut,
@@ -28,7 +28,8 @@ use windows::{
             GetClientRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
             SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
             CW_USEDEFAULT, GWLP_USERDATA, HMENU, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
-            WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_NCCREATE, WM_SIZE, WNDCLASSW,
+            WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ENTERSIZEMOVE,
+            WM_EXITSIZEMOVE, WM_KEYDOWN, WM_NCCREATE, WM_SIZE, WM_TIMER, WNDCLASSW,
             WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     },
@@ -38,6 +39,10 @@ use crate::{
     ffi::d3d11::{D3D11Device, RenderTargetView, SubtitleOverlay, SubtitleRenderer, VideoSurface},
     platform::input::InputEvent,
 };
+
+const MAX_MESSAGES_PER_PUMP: usize = 64;
+const MODAL_TICK_TIMER_ID: usize = 1;
+const MODAL_TICK_INTERVAL_MS: u32 = 16;
 
 #[derive(Debug)]
 pub struct DxgiError(String);
@@ -60,6 +65,8 @@ struct WindowState {
     is_open: Cell<bool>,
     resize_request: Cell<Option<ResizeRequest>>,
     input_events: RefCell<Vec<InputEvent>>,
+    modal_tick_fn: Cell<Option<unsafe fn(*mut c_void)>>,
+    modal_tick_ctx: Cell<*mut c_void>,
 }
 
 pub struct NativeWindowInner {
@@ -78,6 +85,8 @@ impl NativeWindowInner {
             is_open: Cell::new(true),
             resize_request: Cell::new(None),
             input_events: RefCell::new(Vec::new()),
+            modal_tick_fn: Cell::new(None),
+            modal_tick_ctx: Cell::new(null_mut()),
         });
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
@@ -121,10 +130,11 @@ impl NativeWindowInner {
         Ok(Self { hwnd, state })
     }
 
-    pub fn pump_messages(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn pump_messages(&self) -> Result<(), Box<dyn Error>> {
         let mut message = MSG::default();
+        let mut processed = 0usize;
 
-        loop {
+        while processed < MAX_MESSAGES_PER_PUMP {
             // SAFETY:
             // - `message` points to valid writable storage
             // - null HWND means messages for the current thread
@@ -144,6 +154,8 @@ impl NativeWindowInner {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+
+            processed = processed.saturating_add(1);
         }
 
         Ok(())
@@ -157,6 +169,25 @@ impl NativeWindowInner {
         let request = self.state.resize_request.get();
         self.state.resize_request.set(None);
         request
+    }
+
+    /// # Safety
+    ///
+    /// `ctx` must remain valid for as long as the callback is installed.
+    /// The callback will be invoked on the UI thread during the Win32
+    /// modal move/resize loop via `WM_TIMER`.
+    pub unsafe fn install_modal_tick(
+        &self,
+        ctx: *mut c_void,
+        tick_fn: unsafe fn(*mut c_void),
+    ) {
+        self.state.modal_tick_fn.set(Some(tick_fn));
+        self.state.modal_tick_ctx.set(ctx);
+    }
+
+    pub fn clear_modal_tick(&self) {
+        self.state.modal_tick_fn.set(None);
+        self.state.modal_tick_ctx.set(null_mut());
     }
 
     pub fn take_input_events(&self) -> Vec<InputEvent> {
@@ -466,9 +497,6 @@ unsafe extern "system" fn window_proc(
         WM_KEYDOWN => {
             if let Some(state) = window_state(hwnd) {
                 match wparam.0 as u32 {
-                    key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE.0 as u32 => {
-                        state.input_events.borrow_mut().push(InputEvent::TogglePause);
-                    }
                     0x53 => {
                         state.input_events.borrow_mut().push(InputEvent::ToggleSubtitles);
                     }
@@ -485,6 +513,46 @@ unsafe extern "system" fn window_proc(
                             .push(InputEvent::SeekRelativeSeconds(5));
                     }
                     _ => {}
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            if let Some(state) = window_state(hwnd) {
+                if wparam.0 as u32 == ' ' as u32 {
+                    state.input_events.borrow_mut().push(InputEvent::TogglePause);
+                    return LRESULT(0);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        WM_ENTERSIZEMOVE => {
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                    hwnd,
+                    MODAL_TICK_TIMER_ID,
+                    MODAL_TICK_INTERVAL_MS,
+                    None,
+                );
+            }
+            LRESULT(0)
+        }
+        WM_EXITSIZEMOVE => {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                    hwnd,
+                    MODAL_TICK_TIMER_ID,
+                );
+            }
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            if wparam.0 == MODAL_TICK_TIMER_ID {
+                if let Some(state) = window_state(hwnd) {
+                    if let Some(tick_fn) = state.modal_tick_fn.get() {
+                        let ctx = state.modal_tick_ctx.get();
+                        tick_fn(ctx);
+                    }
                 }
             }
             LRESULT(0)

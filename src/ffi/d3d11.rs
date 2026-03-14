@@ -190,12 +190,51 @@ impl D3D11Device {
         width: u32,
         height: u32,
     ) -> Result<VideoSurface, Box<dyn Error>> {
-        let borrowed = ID3D11Texture2D::from_raw_borrowed(&texture)
+        let source = ID3D11Texture2D::from_raw_borrowed(&texture)
             .ok_or(D3D11Error("decoded frame exposed a null D3D11 texture"))?;
 
-        Ok(VideoSurface {
-            texture: borrowed.clone(),
+        let mut source_desc = D3D11_TEXTURE2D_DESC::default();
+        source.GetDesc(&mut source_desc);
+
+        let copy_desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: source_desc.Format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_DECODER.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+
+        let mut owned_texture = None;
+        self.device
+            .CreateTexture2D(&copy_desc, None, Some(&mut owned_texture))?;
+        let owned_texture = owned_texture
+            .ok_or(D3D11Error("CreateTexture2D returned no copy texture"))?;
+
+        // SAFETY: both textures belong to the same D3D11 device. The source
+        // subresource index selects one slice from the decoder's texture
+        // array; the destination is a standalone single-slice texture.
+        self.context.CopySubresourceRegion(
+            &owned_texture,
+            0,
+            0,
+            0,
+            0,
+            source,
             subresource_index,
+            None,
+        );
+
+        Ok(VideoSurface {
+            texture: owned_texture,
+            subresource_index: 0,
             width,
             height,
         })
@@ -234,6 +273,18 @@ impl D3D11Device {
                 .video_device
                 .CreateVideoProcessorEnumerator(&content_desc)?;
             let processor = self.video_device.CreateVideoProcessor(&enumerator, 0)?;
+            let source_rect = RECT {
+                left: 0,
+                top: 0,
+                right: surface.width as i32,
+                bottom: surface.height as i32,
+            };
+            let dest_rect = aspect_fit_rect(
+                surface.width,
+                surface.height,
+                output_width,
+                output_height,
+            );
 
             let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
                 FourCC: 0,
@@ -293,6 +344,28 @@ impl D3D11Device {
                 D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
                 BOOL(0),
                 None,
+            );
+            self.video_context.VideoProcessorSetStreamSourceRect(
+                &processor,
+                0,
+                BOOL(1),
+                Some(&source_rect),
+            );
+            self.video_context.VideoProcessorSetStreamDestRect(
+                &processor,
+                0,
+                BOOL(1),
+                Some(&dest_rect),
+            );
+            self.video_context.VideoProcessorSetOutputTargetRect(
+                &processor,
+                BOOL(1),
+                Some(&RECT {
+                    left: 0,
+                    top: 0,
+                    right: output_width as i32,
+                    bottom: output_height as i32,
+                }),
             );
             self.video_context
                 .VideoProcessorBlt(&processor, &output_view, 0, &[stream])?;
@@ -637,6 +710,44 @@ fn subtitle_quad_vertices(
         SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
         SubtitleVertex { position: [right, bottom, 0.0], texcoord: [1.0, 1.0] },
     ]
+}
+
+fn aspect_fit_rect(
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+) -> RECT {
+    if source_width == 0 || source_height == 0 || output_width == 0 || output_height == 0 {
+        return RECT {
+            left: 0,
+            top: 0,
+            right: output_width as i32,
+            bottom: output_height as i32,
+        };
+    }
+
+    let source_aspect = source_width as f32 / source_height as f32;
+    let output_aspect = output_width as f32 / output_height as f32;
+
+    let (dest_width, dest_height) = if output_aspect > source_aspect {
+        let height = output_height as f32;
+        let width = height * source_aspect;
+        (width.round() as i32, output_height as i32)
+    } else {
+        let width = output_width as f32;
+        let height = width / source_aspect;
+        (output_width as i32, height.round() as i32)
+    };
+
+    let left = ((output_width as i32 - dest_width) / 2).max(0);
+    let top = ((output_height as i32 - dest_height) / 2).max(0);
+    RECT {
+        left,
+        top,
+        right: left + dest_width.max(1),
+        bottom: top + dest_height.max(1),
+    }
 }
 
 fn compile_shader(
