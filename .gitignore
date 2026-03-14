@@ -1,3 +1,4 @@
 target/
 validation/*.log
 validation/*.mp4
+.claude/
