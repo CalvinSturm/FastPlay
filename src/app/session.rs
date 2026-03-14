@@ -39,6 +39,7 @@ use crate::{
 
 const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
+const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
 
 #[derive(Clone, Copy, Debug)]
 enum VideoDropCause {
@@ -97,7 +98,9 @@ pub struct PlaybackSession {
     paused_clock_position: Option<Duration>,
     audio_clock_anchor_pts: Option<Duration>,
     audio_submitted_frames: u64,
+    media_duration: Option<Duration>,
     pending_seek_target: Option<SeekTarget>,
+    seek_discard_before_pts: Option<Duration>,
     pending_seek_first_frame_metric: bool,
     pending_seek_settled_metric: bool,
     seek_frame_presented_since_request: bool,
@@ -120,9 +123,15 @@ pub struct PlaybackSession {
     active_decode_mode: Option<VideoDecodeMode>,
     last_error: Option<String>,
     present_needed: bool,
+    volume_overlay_until: Option<Instant>,
     view_zoom: f32,
     view_pan_x: f32,
     view_pan_y: f32,
+    view_rotation_quarter_turns: u8,
+    needs_initial_resize: bool,
+    auto_replay: bool,
+    replay_indicator_until: Option<Instant>,
+    pause_after_seek: bool,
 }
 
 impl PlaybackSession {
@@ -154,7 +163,9 @@ impl PlaybackSession {
             paused_clock_position: None,
             audio_clock_anchor_pts: None,
             audio_submitted_frames: 0,
+            media_duration: None,
             pending_seek_target: None,
+            seek_discard_before_pts: None,
             pending_seek_first_frame_metric: false,
             pending_seek_settled_metric: false,
             seek_frame_presented_since_request: false,
@@ -177,9 +188,15 @@ impl PlaybackSession {
             active_decode_mode: None,
             last_error: None,
             present_needed: true,
+            volume_overlay_until: None,
             view_zoom: 1.0,
             view_pan_x: 0.0,
             view_pan_y: 0.0,
+            view_rotation_quarter_turns: 0,
+            needs_initial_resize: false,
+            auto_replay: false,
+            replay_indicator_until: None,
+            pause_after_seek: false,
         })
     }
 
@@ -199,6 +216,45 @@ impl PlaybackSession {
             position: self.master_clock_position(now).unwrap_or(Duration::ZERO),
             kind: PositionKind::SettledPlaybackClock,
         }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.state == PlaybackState::Paused
+    }
+
+    pub fn media_duration(&self) -> Option<Duration> {
+        self.media_duration
+    }
+
+    pub fn auto_replay(&self) -> bool {
+        self.auto_replay
+    }
+
+    pub fn replay_indicator_until(&self) -> Option<Instant> {
+        self.replay_indicator_until
+    }
+
+    pub fn set_timeline_overlay(
+        &mut self,
+        model: Option<crate::render::timeline::TimelineOverlayModel>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.presenter.set_timeline_overlay(model)? {
+            self.present_needed = true;
+        }
+        Ok(())
+    }
+
+    pub fn refresh_volume_overlay(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.volume_overlay_until.is_some_and(|until| now > until) {
+            if self.presenter.set_volume_overlay(None, 0, 0)? {
+                self.present_needed = true;
+            }
+            self.volume_overlay_until = None;
+        }
+        Ok(())
     }
 
     pub fn open(
@@ -222,6 +278,7 @@ impl PlaybackSession {
         self.active_subtitle_cue = None;
         self.active_subtitle_viewport = None;
         self.current_source = Some(source.clone());
+        self.media_duration = None;
         self.active_decode_mode = None;
         if let Some(track) = self.subtitle_track.as_ref() {
             eprintln!(
@@ -230,10 +287,21 @@ impl PlaybackSession {
                 track.len()
             );
         }
+        self.needs_initial_resize = true;
         self.metrics.note_open_requested(now);
         self.measure_open_audio_metric = true;
         self.begin_operation(source, None, open_gen, seek_gen, op_id, PlaybackState::Opening, true, true)?;
         Ok(())
+    }
+
+    pub fn scrub_seek(
+        &mut self,
+        target: SeekTarget,
+        pause_after: bool,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.pause_after_seek = pause_after;
+        self.seek(target, now)
     }
 
     pub fn apply_command(
@@ -246,6 +314,9 @@ impl PlaybackSession {
             SessionCommand::TogglePause => self.toggle_pause(now)?,
             SessionCommand::ToggleSubtitles => self.toggle_subtitles()?,
             SessionCommand::Seek(target) => self.seek(target, now)?,
+            SessionCommand::AdjustVolumeSteps(steps) => self.adjust_volume_steps(steps),
+            SessionCommand::RotateClockwise => self.rotate_view(1),
+            SessionCommand::RotateCounterClockwise => self.rotate_view(3),
             SessionCommand::ToggleBorderlessFullscreen => {
                 self.window.toggle_borderless_fullscreen();
             }
@@ -255,8 +326,31 @@ impl PlaybackSession {
             SessionCommand::ResetView => {
                 self.reset_view();
             }
+            SessionCommand::ToggleAutoReplay => {
+                self.auto_replay = !self.auto_replay;
+                self.replay_indicator_until = Some(now + Duration::from_millis(1500));
+            }
         }
         Ok(())
+    }
+
+    fn adjust_volume_steps(&mut self, steps: i16) {
+        let Some(sink) = self.audio_sink.as_mut() else {
+            return;
+        };
+        sink.adjust_volume_steps(steps);
+        let volume_percent = sink.volume_percent();
+        if let Ok((viewport_width, viewport_height)) = self.presenter.viewport_size() {
+            if self
+                .presenter
+                .set_volume_overlay(Some(&format!("{volume_percent}%")), viewport_width, viewport_height)
+                .unwrap_or(false)
+            {
+                self.present_needed = true;
+            }
+        }
+        self.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
+        eprintln!("volume={volume_percent}");
     }
 
     pub fn tick(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
@@ -299,12 +393,14 @@ impl PlaybackSession {
         self.submit_due_audio(now)?;
         self.advance_video_playback(now);
         self.update_subtitle_overlay(now)?;
+        self.refresh_volume_overlay(now)?;
 
         if self.present_needed {
             let view = crate::render::ViewTransform {
                 zoom: self.view_zoom,
                 pan_x: self.view_pan_x,
                 pan_y: self.view_pan_y,
+                rotation_quarter_turns: self.view_rotation_quarter_turns,
             };
             match self.presenter.render(&view) {
                 Ok(()) => {
@@ -351,7 +447,6 @@ impl PlaybackSession {
         }
 
         if self.can_finish_playback()? {
-            self.state = PlaybackState::Ended;
             self.metrics.note_ended(now);
             eprintln!(
                 "playback_summary decode_mode={} hw_fallback_count={} presented_frames={} dropped_video_frames={} audio_underruns={} drop_queue_overflow={} drop_surface_mismatch={} drop_scheduler_late={}",
@@ -367,6 +462,11 @@ impl PlaybackSession {
                 self.drop_buckets.surface_mismatch,
                 self.drop_buckets.scheduler_late
             );
+            if self.auto_replay {
+                self.replay(now)?;
+            } else {
+                self.state = PlaybackState::Ended;
+            }
         }
 
         Ok(())
@@ -400,9 +500,41 @@ impl PlaybackSession {
                     self.metrics.hw_fallback_count()
                 );
             }
+            SessionEvent::MediaDurationKnown {
+                open_gen,
+                seek_gen,
+                op_id,
+                duration,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                self.media_duration = Some(duration);
+            }
             SessionEvent::VideoFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen(), frame.seek_gen(), frame.op_id()) {
                     return Ok(());
+                }
+
+                // Precise seek: discard pre-keyframe frames decoded before
+                // the actual seek target so playback starts at the right spot.
+                if let Some(discard_pts) = self.seek_discard_before_pts {
+                    if frame.pts() < discard_pts {
+                        return Ok(());
+                    }
+                }
+
+                // On the first frame of a new file, resize the window to
+                // match the video's native aspect ratio (portrait or landscape).
+                if self.needs_initial_resize {
+                    self.needs_initial_resize = false;
+                    let (fw, fh) = match &frame {
+                        ffmpeg::PendingVideoFrame::D3D11 { width, height, .. }
+                        | ffmpeg::PendingVideoFrame::Software { width, height, .. } => {
+                            (*width, *height)
+                        }
+                    };
+                    self.window.resize_for_content(fw, fh);
                 }
 
                 match frame {
@@ -469,6 +601,13 @@ impl PlaybackSession {
             SessionEvent::AudioFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen, frame.seek_gen, frame.op_id) {
                     return Ok(());
+                }
+
+                // Precise seek: discard audio decoded before the seek target.
+                if let Some(discard_pts) = self.seek_discard_before_pts {
+                    if frame.pts < discard_pts {
+                        return Ok(());
+                    }
                 }
 
                 self.audio_stream_expected = true;
@@ -579,17 +718,16 @@ impl PlaybackSession {
         let op_id = self.operation_clock.next();
         self.metrics.note_seek_requested(now);
         self.measure_open_audio_metric = false;
-        self.begin_operation(
-            source,
-            Some(target.position()),
-            open_gen,
-            seek_gen,
-            op_id,
-            PlaybackState::Seeking,
-            false,
-            false,
-        )?;
+        let absolute_target = self.absolute_media_position(target.position());
+        // Keep the last presented surface alive during seeks so the user sees
+        // the previous frame until the new one arrives, avoiding a grey flash.
+        self.prepare_runtime_for_operation_inner(false, false, false)?;
+        self.state = PlaybackState::Seeking;
+        self.active_operation_id = Some(op_id);
+        self.last_error = None;
+        self.spawn_stream_worker(source, Some(absolute_target), open_gen, seek_gen, op_id);
         self.pending_seek_target = Some(target);
+        self.seek_discard_before_pts = Some(absolute_target);
         self.subtitle_clock_base = Some(target.position());
         self.pending_seek_first_frame_metric = true;
         self.pending_seek_settled_metric = true;
@@ -621,13 +759,29 @@ impl PlaybackSession {
         rebuild_audio_sink: bool,
         reset_audio_expectation: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.prepare_runtime_for_operation_inner(rebuild_audio_sink, reset_audio_expectation, true)
+    }
+
+    fn prepare_runtime_for_operation_inner(
+        &mut self,
+        rebuild_audio_sink: bool,
+        reset_audio_expectation: bool,
+        reset_surfaces: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.cancel_active_worker();
         self.clear_video_queue();
         self.queued_audio_frames.clear();
-        self.presenter.reset_surfaces();
+        if reset_surfaces {
+            self.presenter.reset_surfaces();
+        }
         self.presenter.clear_subtitle_overlay();
+        self.presenter.set_timeline_overlay(None)?;
+        self.presenter.set_volume_overlay(None, 0, 0)?;
         self.video_clock = None;
-        self.media_time_origin_pts = None;
+        if reset_audio_expectation {
+            self.media_time_origin_pts = None;
+            self.seek_discard_before_pts = None;
+        }
         self.paused_clock_position = None;
         self.audio_clock_anchor_pts = None;
         self.audio_submitted_frames = 0;
@@ -637,6 +791,7 @@ impl PlaybackSession {
         self.video_stream_ended = false;
         self.audio_stream_ended = false;
         self.active_decode_mode = None;
+        self.volume_overlay_until = None;
         self.subtitle_clock_base = None;
         self.active_subtitle_cue = None;
         self.active_subtitle_viewport = None;
@@ -705,6 +860,19 @@ impl PlaybackSession {
                             op_id,
                             mode,
                             hw_fallback_count,
+                        })
+                        .map_err(|_| WORKER_CANCELLED.to_string())
+                },
+                |duration| {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                        return Err(WORKER_CANCELLED.to_string());
+                    }
+                    sender
+                        .send(SessionEvent::MediaDurationKnown {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                            duration,
                         })
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },
@@ -806,7 +974,7 @@ impl PlaybackSession {
     }
 
     fn submit_due_audio(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        if self.state == PlaybackState::Paused {
+        if self.state == PlaybackState::Paused || self.pause_after_seek {
             return Ok(());
         }
 
@@ -975,7 +1143,13 @@ impl PlaybackSession {
         self.pending_first_frame_metric |= self.metrics.presented_video_frames() == 1;
         self.seek_frame_presented_since_request |= self.pending_seek_settled_metric;
         if !self.audio_stream_expected || self.audio_clock_anchor_pts.is_some() {
-            self.state = PlaybackState::Playing;
+            if self.pause_after_seek {
+                self.pause_after_seek = false;
+                self.paused_clock_position = self.pending_seek_target.map(|t| t.position());
+                self.state = PlaybackState::Paused;
+            } else {
+                self.state = PlaybackState::Playing;
+            }
         }
     }
 
@@ -1042,10 +1216,17 @@ impl PlaybackSession {
                     PlaybackState::Priming
                 };
             }
+            PlaybackState::Ended => {
+                self.replay(now)?;
+            }
             _ => {}
         }
 
         Ok(())
+    }
+
+    fn replay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
+        self.seek(SeekTarget::new(Duration::ZERO), now)
     }
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1101,10 +1282,17 @@ impl PlaybackSession {
         self.present_needed = true;
     }
 
+    fn rotate_view(&mut self, delta_quarter_turns: u8) {
+        self.view_rotation_quarter_turns =
+            self.view_rotation_quarter_turns.wrapping_add(delta_quarter_turns) % 4;
+        self.present_needed = true;
+    }
+
     fn reset_view(&mut self) {
         self.view_zoom = 1.0;
         self.view_pan_x = 0.0;
         self.view_pan_y = 0.0;
+        self.view_rotation_quarter_turns = 0;
         self.present_needed = true;
     }
 
@@ -1215,9 +1403,17 @@ impl PlaybackSession {
     }
 
     fn desired_restart_position(&self, now: Instant) -> Duration {
-        self.pending_seek_target
-            .map(SeekTarget::position)
-            .unwrap_or_else(|| self.snapshot(now).position)
+        self.absolute_media_position(
+            self.pending_seek_target
+                .map(SeekTarget::position)
+                .unwrap_or_else(|| self.snapshot(now).position),
+        )
+    }
+
+    fn absolute_media_position(&self, normalized_position: Duration) -> Duration {
+        self.media_time_origin_pts
+            .map(|origin| origin.saturating_add(normalized_position))
+            .unwrap_or(normalized_position)
     }
 
     fn recover_audio_endpoint(

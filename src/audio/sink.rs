@@ -9,6 +9,7 @@ pub struct AudioSink {
     inner: WasapiAudioSink,
     format: AudioStreamFormat,
     started: bool,
+    volume: f32,
 }
 
 impl AudioSink {
@@ -18,6 +19,7 @@ impl AudioSink {
             inner,
             format,
             started: false,
+            volume: 1.0,
         })
     }
 
@@ -55,8 +57,21 @@ impl AudioSink {
             return Ok(0);
         }
 
+        if (self.volume - 1.0).abs() < f32::EPSILON {
+            return self
+                .inner
+                .write_interleaved(&frame.data[start..], remaining_frames, self.format);
+        }
+
+        let mut scaled = frame.data[start..].to_vec();
+        for sample in scaled.chunks_exact_mut(4) {
+            let value = f32::from_ne_bytes([sample[0], sample[1], sample[2], sample[3]]);
+            let scaled_value = (value * self.volume).clamp(-1.0, 1.0);
+            sample.copy_from_slice(&scaled_value.to_ne_bytes());
+        }
+
         self.inner
-            .write_interleaved(&frame.data[start..], remaining_frames, self.format)
+            .write_interleaved(&scaled, remaining_frames, self.format)
     }
 
     pub fn playback_position(&self) -> Result<Duration, Box<dyn std::error::Error>> {
@@ -66,6 +81,20 @@ impl AudioSink {
     pub fn buffered_frames(&self) -> Result<u32, Box<dyn std::error::Error>> {
         self.inner.buffered_frames()
     }
+
+    pub fn adjust_volume_steps(&mut self, steps: i16) {
+        let delta = 0.05 * steps as f32;
+        self.volume = (self.volume + delta).clamp(0.0, 1.5);
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    pub fn volume_percent(&self) -> u32 {
+        (self.volume * 100.0).round().max(0.0) as u32
+    }
+
     pub fn is_started(&self) -> bool {
         self.started
     }

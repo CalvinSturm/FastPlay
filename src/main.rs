@@ -17,6 +17,132 @@ use media::{
 };
 use platform::input::InputEvent;
 use platform::window::NativeWindow;
+use render::timeline::{self, TimelineOverlayModel};
+
+struct TimelineUiState {
+    was_left_button_down: bool,
+    scrubbing: bool,
+    scrub_was_paused: bool,
+    preview_target: Option<std::time::Duration>,
+    last_overlay: Option<TimelineOverlayModel>,
+}
+
+impl TimelineUiState {
+    fn new() -> Self {
+        Self {
+            was_left_button_down: false,
+            scrubbing: false,
+            scrub_was_paused: false,
+            preview_target: None,
+            last_overlay: None,
+        }
+    }
+
+    fn update(
+        &mut self,
+        session: &mut PlaybackSession,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(duration) = session.media_duration() else {
+            self.scrubbing = false;
+            self.preview_target = None;
+            self.sync_overlay(session, None)?;
+            self.was_left_button_down = session.window().is_left_button_down();
+            return Ok(());
+        };
+
+        let is_borderless = session.window().is_borderless();
+        let (viewport_width, viewport_height) = session.window().client_size()?;
+        let cursor = session.window().cursor_client_position()?;
+        let left_button_down = session.window().is_left_button_down();
+        let hovered = cursor
+            .is_some_and(|(x, y)| timeline::activation_hit_test(viewport_width, viewport_height, x, y));
+
+        if is_borderless {
+            self.scrubbing = false;
+            self.preview_target = None;
+        } else if !self.was_left_button_down && left_button_down {
+            if let Some((x, y)) = cursor {
+                if timeline::scrub_hit_test(viewport_width, viewport_height, x, y) {
+                    self.scrubbing = true;
+                    self.scrub_was_paused = session.is_paused();
+                    let target = timeline::scrub_target_from_cursor(
+                        viewport_width,
+                        viewport_height,
+                        duration,
+                        x,
+                    );
+                    self.preview_target = Some(target);
+                    self.scrub_seek(session, target, now)?;
+                }
+            }
+        } else if self.scrubbing && left_button_down {
+            if let Some((x, _)) = cursor {
+                let target = timeline::scrub_target_from_cursor(
+                    viewport_width,
+                    viewport_height,
+                    duration,
+                    x,
+                );
+                if self.preview_target != Some(target) {
+                    self.preview_target = Some(target);
+                    self.scrub_seek(session, target, now)?;
+                }
+            }
+        } else if self.scrubbing && self.was_left_button_down && !left_button_down {
+            if let Some(target) = self.preview_target.take() {
+                self.scrub_seek(session, target, now)?;
+            }
+            self.scrubbing = false;
+        }
+
+        let replay_indicator_active = session
+            .replay_indicator_until()
+            .is_some_and(|until| now < until);
+        let visible = !is_borderless
+            && duration > std::time::Duration::ZERO
+            && (hovered || self.scrubbing || replay_indicator_active);
+        let snapshot = session.snapshot(now);
+        let overlay = if visible {
+            timeline::build_overlay_model(
+                viewport_width,
+                viewport_height,
+                snapshot.position.min(duration),
+                self.preview_target,
+                duration,
+                session.auto_replay(),
+            )
+        } else {
+            None
+        };
+        self.sync_overlay(session, overlay)?;
+        self.was_left_button_down = left_button_down;
+        Ok(())
+    }
+
+    fn scrub_seek(
+        &self,
+        session: &mut PlaybackSession,
+        target: std::time::Duration,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        session.scrub_seek(SeekTarget::new(target), self.scrub_was_paused, now)
+    }
+
+    fn sync_overlay(
+        &mut self,
+        session: &mut PlaybackSession,
+        overlay: Option<TimelineOverlayModel>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.last_overlay == overlay {
+            return Ok(());
+        }
+
+        session.set_timeline_overlay(overlay)?;
+        self.last_overlay = overlay;
+        Ok(())
+    }
+}
 
 /// Trampoline called by the Win32 modal move/resize timer.
 ///
@@ -39,6 +165,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let media_path = parse_media_source_from_args()?;
     let window = NativeWindow::create("FastPlay", 1280, 720)?;
     let mut session = PlaybackSession::new(window)?;
+    let mut timeline_ui = TimelineUiState::new();
 
     // SAFETY: `session` lives on this stack frame for the entire main loop.
     // The callback is cleared before `session` is dropped.
@@ -74,6 +201,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), Instant::now())?;
                 }
+                InputEvent::AdjustVolumeSteps(steps) => {
+                    session.apply_command(SessionCommand::AdjustVolumeSteps(steps), Instant::now())?;
+                }
+                InputEvent::RotateClockwise => {
+                    session.apply_command(SessionCommand::RotateClockwise, Instant::now())?;
+                }
+                InputEvent::RotateCounterClockwise => {
+                    session.apply_command(SessionCommand::RotateCounterClockwise, Instant::now())?;
+                }
                 InputEvent::ToggleBorderlessFullscreen => {
                     session.apply_command(SessionCommand::ToggleBorderlessFullscreen, Instant::now())?;
                 }
@@ -83,9 +219,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::ResetView => {
                     session.apply_command(SessionCommand::ResetView, Instant::now())?;
                 }
+                InputEvent::ToggleAutoReplay => {
+                    session.apply_command(SessionCommand::ToggleAutoReplay, Instant::now())?;
+                }
             }
         }
-        session.tick(Instant::now())?;
+        let now = Instant::now();
+        timeline_ui.update(&mut session, now)?;
+        session.tick(now)?;
     }
 
     session.window().clear_modal_tick();

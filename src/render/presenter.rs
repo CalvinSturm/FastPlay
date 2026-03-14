@@ -5,15 +5,20 @@ use crate::{
     render::{
         surface_registry::{SurfaceRegistry, VideoSurfaceHandle},
         swapchain::SwapChainPresenter,
+        timeline::TimelineOverlayModel,
     },
 };
 
 pub struct Presenter {
     device: D3D11Device,
-    swap_chain: SwapChainPresenter,
+    swap_chain: Option<SwapChainPresenter>,
     surfaces: SurfaceRegistry,
     current_surface: Option<VideoSurfaceHandle>,
     subtitle_overlay: Option<SubtitleOverlay>,
+    timeline_overlay: Option<SubtitleOverlay>,
+    timeline_model: Option<TimelineOverlayModel>,
+    volume_overlay: Option<SubtitleOverlay>,
+    volume_text: Option<String>,
 }
 
 impl Presenter {
@@ -23,10 +28,14 @@ impl Presenter {
 
         Ok(Self {
             device,
-            swap_chain,
+            swap_chain: Some(swap_chain),
             surfaces: SurfaceRegistry::default(),
             current_surface: None,
             subtitle_overlay: None,
+            timeline_overlay: None,
+            timeline_model: None,
+            volume_overlay: None,
+            volume_text: None,
         })
     }
 
@@ -34,25 +43,34 @@ impl Presenter {
         &mut self,
         view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let sc = self.swap_chain.as_mut().expect("swap chain unavailable");
         if let Some(handle) = self.current_surface {
             if let Some(entry) = self.surfaces.get(handle) {
-                self.swap_chain.render_surface(
+                sc.render_surface(
                     &self.device,
                     &entry.surface,
                     self.subtitle_overlay.as_ref(),
+                    self.timeline_overlay.as_ref(),
+                    self.volume_overlay.as_ref(),
                     view,
                 )?;
                 return Ok(());
             }
         }
 
-        self.swap_chain
-            .render(&self.device, [0.08, 0.10, 0.14, 1.0], self.subtitle_overlay.as_ref())?;
+        sc.render(
+            &self.device,
+            [0.08, 0.10, 0.14, 1.0],
+            self.subtitle_overlay.as_ref(),
+            self.timeline_overlay.as_ref(),
+            self.volume_overlay.as_ref(),
+        )?;
         Ok(())
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
-        self.swap_chain.resize(&self.device, width, height)?;
+        let sc = self.swap_chain.as_mut().expect("swap chain unavailable");
+        sc.resize(&self.device, width, height)?;
         Ok(())
     }
 
@@ -60,7 +78,9 @@ impl Presenter {
         &mut self,
         window: &NativeWindow,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.swap_chain = SwapChainPresenter::new(window, &self.device)?;
+        // Drop the old swap chain first — DXGI only allows one per HWND.
+        self.swap_chain = None;
+        self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
         Ok(())
     }
 
@@ -68,8 +88,10 @@ impl Presenter {
         &mut self,
         window: &NativeWindow,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Drop the old swap chain first — DXGI only allows one per HWND.
+        self.swap_chain = None;
         self.device = D3D11Device::create()?;
-        self.swap_chain = SwapChainPresenter::new(window, &self.device)?;
+        self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
         self.reset_surfaces();
         Ok(())
     }
@@ -148,7 +170,8 @@ impl Presenter {
     }
 
     pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {
-        self.swap_chain.viewport_size()
+        let sc = self.swap_chain.as_ref().expect("swap chain unavailable");
+        sc.viewport_size()
     }
 
     pub fn set_subtitle_overlay(
@@ -170,6 +193,43 @@ impl Presenter {
         self.subtitle_overlay = None;
     }
 
+    pub fn set_timeline_overlay(
+        &mut self,
+        model: Option<TimelineOverlayModel>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.timeline_model == model {
+            return Ok(false);
+        }
+
+        self.timeline_overlay = match model {
+            Some(model) => self.device.create_timeline_overlay(&model)?,
+            None => None,
+        };
+        self.timeline_model = model;
+        Ok(true)
+    }
+
+    pub fn set_volume_overlay(
+        &mut self,
+        text: Option<&str>,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let next_text = text.map(str::to_owned);
+        if self.volume_text == next_text {
+            return Ok(false);
+        }
+
+        self.volume_overlay = match text {
+            Some(text) => self
+                .device
+                .create_volume_overlay(text, viewport_width, viewport_height)?,
+            None => None,
+        };
+        self.volume_text = next_text;
+        Ok(true)
+    }
+
     pub fn release_surface(&mut self, handle: VideoSurfaceHandle) {
         if self.current_surface == Some(handle) {
             self.current_surface = None;
@@ -181,5 +241,9 @@ impl Presenter {
         self.current_surface = None;
         self.surfaces.clear_for_new_epoch();
         self.subtitle_overlay = None;
+        self.timeline_overlay = None;
+        self.timeline_model = None;
+        self.volume_overlay = None;
+        self.volume_text = None;
     }
 }

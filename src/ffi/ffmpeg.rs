@@ -71,6 +71,12 @@ impl PendingVideoFrame {
             Self::D3D11 { op_id, .. } | Self::Software { op_id, .. } => *op_id,
         }
     }
+
+    pub fn pts(&self) -> Duration {
+        match self {
+            Self::D3D11 { pts, .. } | Self::Software { pts, .. } => *pts,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -109,6 +115,7 @@ pub(crate) fn stream_media<V, A, C>(
     seek_gen: SeekGeneration,
     op_id: OperationId,
     mut on_decode_mode: impl FnMut(VideoDecodeMode, u64) -> Result<(), String>,
+    mut on_duration: impl FnMut(Duration) -> Result<(), String>,
     mut should_cancel: C,
     mut on_video: V,
     mut on_audio: A,
@@ -156,6 +163,13 @@ where
             decode_mode: video.mode,
             hw_fallback_count: video.hw_fallback_count,
         };
+        let total_duration = frame_pts(fastplay_ffmpeg_duration_micros(input.0), AVRational {
+            num: 1,
+            den: 1_000_000,
+        });
+        if !total_duration.is_zero() {
+            on_duration(total_duration)?;
+        }
 
         if let Some(target) = start_position {
             seek_and_flush(input.0, &video, audio.as_ref(), target)?;
@@ -303,8 +317,14 @@ unsafe fn seek_and_flush(
     target: Duration,
 ) -> Result<(), String> {
     let target_micros = target.as_micros().min(i64::MAX as u128) as i64;
+    let start_time_micros = fastplay_ffmpeg_start_time_micros(format_context);
+    let absolute_target_micros = if start_time_micros == AV_NOPTS_SENTINEL {
+        target_micros
+    } else {
+        start_time_micros.saturating_add(target_micros)
+    };
     ffmpeg_check(
-        fastplay_ffmpeg_seek_to_micros(format_context, target_micros),
+        fastplay_ffmpeg_seek_to_micros(format_context, absolute_target_micros),
         "av_seek_frame",
     )?;
     fastplay_ffmpeg_flush_codec(video.codec.0);
