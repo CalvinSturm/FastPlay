@@ -30,11 +30,18 @@ impl Presenter {
         })
     }
 
-    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn render(
+        &mut self,
+        view: &crate::render::ViewTransform,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(handle) = self.current_surface {
             if let Some(entry) = self.surfaces.get(handle) {
-                self.swap_chain
-                    .render_surface(&self.device, &entry.surface, self.subtitle_overlay.as_ref())?;
+                self.swap_chain.render_surface(
+                    &self.device,
+                    &entry.surface,
+                    self.subtitle_overlay.as_ref(),
+                    view,
+                )?;
                 return Ok(());
             }
         }

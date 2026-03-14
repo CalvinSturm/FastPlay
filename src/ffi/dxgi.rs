@@ -11,7 +11,7 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
-        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
@@ -21,16 +21,24 @@ use windows::{
                 DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
                 DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
+            Gdi::{GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST},
         },
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{
-            AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-            GetClientRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
-            SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-            CW_USEDEFAULT, GWLP_USERDATA, HMENU, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
-            WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ENTERSIZEMOVE,
-            WM_EXITSIZEMOVE, WM_KEYDOWN, WM_NCCREATE, WM_SIZE, WM_TIMER, WNDCLASSW,
-            WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        UI::{
+            Input::KeyboardAndMouse::GetKeyState,
+            WindowsAndMessaging::{
+                AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
+                DispatchMessageW, GetClientRect, GetWindowLongPtrW, GetWindowPlacement,
+                LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
+                SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow,
+                TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+                GWL_STYLE, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW, MSG,
+                PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
+                WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_CHAR, WM_CLOSE, WM_DESTROY,
+                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCCREATE,
+                WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+                WS_VISIBLE,
+            },
         },
     },
 };
@@ -72,6 +80,9 @@ struct WindowState {
 pub struct NativeWindowInner {
     hwnd: HWND,
     state: Rc<WindowState>,
+    is_borderless: Cell<bool>,
+    saved_placement: Cell<WINDOWPLACEMENT>,
+    saved_style: Cell<u32>,
 }
 
 impl NativeWindowInner {
@@ -127,7 +138,16 @@ impl NativeWindowInner {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
 
-        Ok(Self { hwnd, state })
+        let mut placement = WINDOWPLACEMENT::default();
+        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+
+        Ok(Self {
+            hwnd,
+            state,
+            is_borderless: Cell::new(false),
+            saved_placement: Cell::new(placement),
+            saved_style: Cell::new(WS_OVERLAPPEDWINDOW.0),
+        })
     }
 
     pub fn pump_messages(&self) -> Result<(), Box<dyn Error>> {
@@ -192,6 +212,70 @@ impl NativeWindowInner {
 
     pub fn take_input_events(&self) -> Vec<InputEvent> {
         std::mem::take(&mut *self.state.input_events.borrow_mut())
+    }
+
+    pub fn is_borderless(&self) -> bool {
+        self.is_borderless.get()
+    }
+
+    pub fn toggle_borderless_fullscreen(&self) {
+        // SAFETY:
+        // - hwnd is a live top-level window owned by this wrapper
+        // - GetWindowLongPtrW / SetWindowLongPtrW / SetWindowPos are safe with valid HWND
+        // - MonitorFromWindow / GetMonitorInfoW use system-provided handles
+        unsafe {
+            if self.is_borderless.get() {
+                // Restore windowed mode.
+                let style = self.saved_style.get();
+                SetWindowLongPtrW(self.hwnd, GWL_STYLE, style as isize);
+                let _ = SetWindowPlacement(self.hwnd, &self.saved_placement.get());
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED
+                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
+                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
+                );
+                self.is_borderless.set(false);
+            } else {
+                // Save current placement and style.
+                let mut placement = WINDOWPLACEMENT::default();
+                placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+                let _ = GetWindowPlacement(self.hwnd, &mut placement);
+                self.saved_placement.set(placement);
+
+                let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32;
+                self.saved_style.set(style);
+
+                // Remove window chrome, apply popup style.
+                let borderless_style = (style & !WS_OVERLAPPEDWINDOW.0) | WS_POPUP.0;
+                SetWindowLongPtrW(self.hwnd, GWL_STYLE, borderless_style as isize);
+
+                // Fill the current monitor.
+                let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+                let mut info = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                    let rc = info.rcMonitor;
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        HWND_TOP,
+                        rc.left,
+                        rc.top,
+                        rc.right - rc.left,
+                        rc.bottom - rc.top,
+                        SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                }
+                self.is_borderless.set(true);
+            }
+        }
     }
 
     pub(crate) fn hwnd(&self) -> HWND {
@@ -296,6 +380,7 @@ impl DxgiSwapChain {
         device: &D3D11Device,
         surface: &VideoSurface,
         subtitle_overlay: Option<&SubtitleOverlay>,
+        view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn Error>> {
         let backbuffer = self
             .backbuffer
@@ -308,7 +393,7 @@ impl DxgiSwapChain {
             (self.width, self.height)
         };
 
-        device.render_video_surface(surface, backbuffer, output_width, output_height)?;
+        device.render_video_surface(surface, backbuffer, output_width, output_height, view)?;
         if let Some(overlay) = subtitle_overlay {
             let render_target = self
                 .render_target
@@ -496,17 +581,44 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN => {
             if let Some(state) = window_state(hwnd) {
+                let ctrl_held = (GetKeyState(
+                    windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL.0 as i32,
+                ) as u16
+                    & 0x8000)
+                    != 0;
+
                 match wparam.0 as u32 {
-                    0x53 => {
-                        state.input_events.borrow_mut().push(InputEvent::ToggleSubtitles);
+                    // Ctrl+H → toggle borderless fullscreen
+                    0x48 if ctrl_held => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ToggleBorderlessFullscreen);
                     }
-                    key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
+                    // Ctrl+0 → reset view
+                    0x30 if ctrl_held => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ResetView);
+                    }
+                    0x53 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ToggleSubtitles);
+                    }
+                    key if key
+                        == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 =>
+                    {
                         state
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::SeekRelativeSeconds(-5));
                     }
-                    key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT.0 as u32 => {
+                    key if key
+                        == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT.0 as u32 =>
+                    {
                         state
                             .input_events
                             .borrow_mut()
@@ -517,10 +629,36 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_MOUSEWHEEL => {
+            if let Some(state) = window_state(hwnd) {
+                let fw_keys = (wparam.0 & 0xFFFF) as u16;
+                let ctrl_held = (fw_keys & 0x0008) != 0;
+                if ctrl_held {
+                    let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
+                    // WM_MOUSEWHEEL lparam is in screen coordinates; convert to client.
+                    let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
+                    let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                    let mut pt = POINT {
+                        x: screen_x,
+                        y: screen_y,
+                    };
+                    let _ = ScreenToClient(hwnd, &mut pt);
+                    state.input_events.borrow_mut().push(InputEvent::ZoomAtCursor {
+                        delta,
+                        cursor_x: pt.x,
+                        cursor_y: pt.y,
+                    });
+                }
+            }
+            LRESULT(0)
+        }
         WM_CHAR => {
             if let Some(state) = window_state(hwnd) {
                 if wparam.0 as u32 == ' ' as u32 {
-                    state.input_events.borrow_mut().push(InputEvent::TogglePause);
+                    state
+                        .input_events
+                        .borrow_mut()
+                        .push(InputEvent::TogglePause);
                     return LRESULT(0);
                 }
             }

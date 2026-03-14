@@ -74,6 +74,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), Instant::now())?;
                 }
+                InputEvent::ToggleBorderlessFullscreen => {
+                    session.apply_command(SessionCommand::ToggleBorderlessFullscreen, Instant::now())?;
+                }
+                InputEvent::ZoomAtCursor { delta, cursor_x, cursor_y } => {
+                    session.apply_command(SessionCommand::ZoomAtCursor { delta, cursor_x, cursor_y }, Instant::now())?;
+                }
+                InputEvent::ResetView => {
+                    session.apply_command(SessionCommand::ResetView, Instant::now())?;
+                }
             }
         }
         session.tick(Instant::now())?;

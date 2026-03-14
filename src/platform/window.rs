@@ -52,6 +52,14 @@ impl NativeWindow {
         self.inner.take_input_events()
     }
 
+    pub fn toggle_borderless_fullscreen(&self) {
+        self.inner.toggle_borderless_fullscreen();
+    }
+
+    pub fn is_borderless(&self) -> bool {
+        self.inner.is_borderless()
+    }
+
     pub(crate) fn raw_window(&self) -> &NativeWindowInner {
         &self.inner
     }

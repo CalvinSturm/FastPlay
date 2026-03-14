@@ -45,8 +45,9 @@ impl SwapChainPresenter {
         device: &D3D11Device,
         surface: &VideoSurface,
         subtitle_overlay: Option<&SubtitleOverlay>,
+        view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.swap_chain.render_surface(device, surface, subtitle_overlay)?;
+        self.swap_chain.render_surface(device, surface, subtitle_overlay, view)?;
         Ok(())
     }
 

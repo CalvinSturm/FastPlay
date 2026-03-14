@@ -246,6 +246,7 @@ impl D3D11Device {
         backbuffer: &ID3D11Texture2D,
         output_width: u32,
         output_height: u32,
+        view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn Error>> {
         let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -273,13 +274,15 @@ impl D3D11Device {
                 .video_device
                 .CreateVideoProcessorEnumerator(&content_desc)?;
             let processor = self.video_device.CreateVideoProcessor(&enumerator, 0)?;
-            let source_rect = RECT {
-                left: 0,
-                top: 0,
-                right: surface.width as i32,
-                bottom: surface.height as i32,
-            };
-            let dest_rect = aspect_fit_rect(
+            let base_rect = aspect_fit_rect(
+                surface.width,
+                surface.height,
+                output_width,
+                output_height,
+            );
+            let (source_rect, dest_rect) = compute_zoomed_rects(
+                &base_rect,
+                view,
                 surface.width,
                 surface.height,
                 output_width,
@@ -748,6 +751,83 @@ fn aspect_fit_rect(
         right: left + dest_width.max(1),
         bottom: top + dest_height.max(1),
     }
+}
+
+/// Computes clamped source and dest rects for the D3D11 video processor.
+///
+/// The video processor requires both rects to stay within their respective
+/// texture bounds. When the view transform would push the dest rect outside
+/// the output, we clip it and adjust the source rect proportionally so only
+/// the visible portion of the video is sampled.
+fn compute_zoomed_rects(
+    base: &RECT,
+    view: &crate::render::ViewTransform,
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+) -> (RECT, RECT) {
+    let full_source = RECT {
+        left: 0,
+        top: 0,
+        right: source_width as i32,
+        bottom: source_height as i32,
+    };
+
+    if view.zoom == 1.0 && view.pan_x == 0.0 && view.pan_y == 0.0 {
+        return (full_source, *base);
+    }
+
+    let bw = (base.right - base.left) as f32;
+    let bh = (base.bottom - base.top) as f32;
+    let cx = base.left as f32 + bw * 0.5;
+    let cy = base.top as f32 + bh * 0.5;
+
+    // Virtual dest rect (may exceed output bounds).
+    let vw = bw * view.zoom;
+    let vh = bh * view.zoom;
+    let vl = cx - vw * 0.5 + view.pan_x;
+    let vt = cy - vh * 0.5 + view.pan_y;
+
+    // Clip the virtual rect to the output bounds.
+    let out_w = output_width as f32;
+    let out_h = output_height as f32;
+    let cl = vl.max(0.0);
+    let ct = vt.max(0.0);
+    let cr = (vl + vw).min(out_w);
+    let cb = (vt + vh).min(out_h);
+
+    if cr <= cl || cb <= ct {
+        // Entirely off-screen — present nothing.
+        return (
+            RECT { left: 0, top: 0, right: 1, bottom: 1 },
+            RECT { left: 0, top: 0, right: 0, bottom: 0 },
+        );
+    }
+
+    // Map the clipped region back to source texture coordinates.
+    let sw = source_width as f32;
+    let sh = source_height as f32;
+    let sl = ((cl - vl) / vw) * sw;
+    let st = ((ct - vt) / vh) * sh;
+    let sr = ((cr - vl) / vw) * sw;
+    let sb = ((cb - vt) / vh) * sh;
+
+    let source_rect = RECT {
+        left: (sl.round() as i32).clamp(0, source_width as i32),
+        top: (st.round() as i32).clamp(0, source_height as i32),
+        right: (sr.round() as i32).clamp(1, source_width as i32),
+        bottom: (sb.round() as i32).clamp(1, source_height as i32),
+    };
+
+    let dest_rect = RECT {
+        left: cl.round() as i32,
+        top: ct.round() as i32,
+        right: cr.round() as i32,
+        bottom: cb.round() as i32,
+    };
+
+    (source_rect, dest_rect)
 }
 
 fn compile_shader(

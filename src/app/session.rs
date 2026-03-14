@@ -120,6 +120,9 @@ pub struct PlaybackSession {
     active_decode_mode: Option<VideoDecodeMode>,
     last_error: Option<String>,
     present_needed: bool,
+    view_zoom: f32,
+    view_pan_x: f32,
+    view_pan_y: f32,
 }
 
 impl PlaybackSession {
@@ -174,6 +177,9 @@ impl PlaybackSession {
             active_decode_mode: None,
             last_error: None,
             present_needed: true,
+            view_zoom: 1.0,
+            view_pan_x: 0.0,
+            view_pan_y: 0.0,
         })
     }
 
@@ -240,6 +246,15 @@ impl PlaybackSession {
             SessionCommand::TogglePause => self.toggle_pause(now)?,
             SessionCommand::ToggleSubtitles => self.toggle_subtitles()?,
             SessionCommand::Seek(target) => self.seek(target, now)?,
+            SessionCommand::ToggleBorderlessFullscreen => {
+                self.window.toggle_borderless_fullscreen();
+            }
+            SessionCommand::ZoomAtCursor { delta, cursor_x, cursor_y } => {
+                self.zoom_at_cursor(delta, cursor_x, cursor_y);
+            }
+            SessionCommand::ResetView => {
+                self.reset_view();
+            }
         }
         Ok(())
     }
@@ -286,7 +301,12 @@ impl PlaybackSession {
         self.update_subtitle_overlay(now)?;
 
         if self.present_needed {
-            match self.presenter.render() {
+            let view = crate::render::ViewTransform {
+                zoom: self.view_zoom,
+                pan_x: self.view_pan_x,
+                pan_y: self.view_pan_y,
+            };
+            match self.presenter.render(&view) {
                 Ok(()) => {
                     self.present_needed = false;
                     self.metrics.note_present(now);
@@ -1043,6 +1063,49 @@ impl PlaybackSession {
         }
         eprintln!("subtitles_enabled={}", self.subtitles_enabled);
         Ok(())
+    }
+
+    fn zoom_at_cursor(&mut self, delta: i16, cursor_x: i32, cursor_y: i32) {
+        let factor = if delta > 0 { 1.125f32 } else { 1.0 / 1.125 };
+        let new_zoom = (self.view_zoom * factor).clamp(1.0, 8.0);
+
+        if (new_zoom - self.view_zoom).abs() < f32::EPSILON {
+            return;
+        }
+
+        // Compute the viewport size for cursor-centered zoom.
+        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1, 1));
+        let cx = vw as f32 * 0.5;
+        let cy = vh as f32 * 0.5;
+
+        // Pixel under cursor in content space: content_pt = (cursor - center - pan) / zoom
+        // New pan keeps that content point under the cursor.
+        let dx = cursor_x as f32 - cx;
+        let dy = cursor_y as f32 - cy;
+        let content_x = (dx - self.view_pan_x) / self.view_zoom;
+        let content_y = (dy - self.view_pan_y) / self.view_zoom;
+        let new_pan_x = dx - content_x * new_zoom;
+        let new_pan_y = dy - content_y * new_zoom;
+
+        self.view_zoom = new_zoom;
+
+        // Clamp at zoom == 1.0: no pan drift.
+        if new_zoom <= 1.0 {
+            self.view_pan_x = 0.0;
+            self.view_pan_y = 0.0;
+        } else {
+            self.view_pan_x = new_pan_x;
+            self.view_pan_y = new_pan_y;
+        }
+
+        self.present_needed = true;
+    }
+
+    fn reset_view(&mut self) {
+        self.view_zoom = 1.0;
+        self.view_pan_x = 0.0;
+        self.view_pan_y = 0.0;
+        self.present_needed = true;
     }
 
     fn update_subtitle_overlay(
