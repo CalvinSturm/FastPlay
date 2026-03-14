@@ -1,4 +1,7 @@
-use crate::ffi::dxgi::{NativeWindowInner, ResizeRequest};
+use crate::{
+    ffi::dxgi::{NativeWindowInner, ResizeRequest},
+    platform::input::InputEvent,
+};
 
 pub struct NativeWindow {
     inner: NativeWindowInner,
@@ -26,6 +29,10 @@ impl NativeWindow {
 
     pub fn take_resize_request(&self) -> Option<ResizeRequest> {
         self.inner.take_resize_request()
+    }
+
+    pub fn take_input_events(&self) -> Vec<InputEvent> {
+        self.inner.take_input_events()
     }
 
     pub(crate) fn raw_window(&self) -> &NativeWindowInner {

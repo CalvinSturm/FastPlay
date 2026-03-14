@@ -15,8 +15,8 @@ impl Default for QueueDefaults {
         Self {
             video_packets: 48,
             audio_packets: 96,
-            decoded_video_frames: 4,
-            decoded_audio_frames: 12,
+            decoded_video_frames: 16,
+            decoded_audio_frames: 128,
         }
     }
 }

@@ -1,5 +1,11 @@
 use std::{
-    cell::Cell, error::Error, ffi::OsStr, fmt, os::windows::ffi::OsStrExt, ptr::null_mut, rc::Rc,
+    cell::{Cell, RefCell},
+    error::Error,
+    ffi::OsStr,
+    fmt,
+    os::windows::ffi::OsStrExt,
+    ptr::null_mut,
+    rc::Rc,
 };
 
 use windows::{
@@ -22,13 +28,16 @@ use windows::{
             GetClientRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
             SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
             CW_USEDEFAULT, GWLP_USERDATA, HMENU, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
-            WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_NCCREATE, WM_SIZE, WNDCLASSW,
+            WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_NCCREATE, WM_SIZE, WNDCLASSW,
             WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     },
 };
 
-use crate::ffi::d3d11::{D3D11Device, RenderTargetView, VideoSurface};
+use crate::{
+    ffi::d3d11::{D3D11Device, RenderTargetView, VideoSurface},
+    platform::input::InputEvent,
+};
 
 #[derive(Debug)]
 pub struct DxgiError(String);
@@ -50,6 +59,7 @@ pub struct ResizeRequest {
 struct WindowState {
     is_open: Cell<bool>,
     resize_request: Cell<Option<ResizeRequest>>,
+    input_events: RefCell<Vec<InputEvent>>,
 }
 
 pub struct NativeWindowInner {
@@ -67,6 +77,7 @@ impl NativeWindowInner {
         let state = Rc::new(WindowState {
             is_open: Cell::new(true),
             resize_request: Cell::new(None),
+            input_events: RefCell::new(Vec::new()),
         });
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
@@ -146,6 +157,10 @@ impl NativeWindowInner {
         let request = self.state.resize_request.get();
         self.state.resize_request.set(None);
         request
+    }
+
+    pub fn take_input_events(&self) -> Vec<InputEvent> {
+        std::mem::take(&mut *self.state.input_events.borrow_mut())
     }
 
     pub(crate) fn hwnd(&self) -> HWND {
@@ -417,6 +432,14 @@ unsafe extern "system" fn window_proc(
             }
             unsafe {
                 let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            if let Some(state) = window_state(hwnd) {
+                if wparam.0 as u32 == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE.0 as u32 {
+                    state.input_events.borrow_mut().push(InputEvent::TogglePause);
+                }
             }
             LRESULT(0)
         }

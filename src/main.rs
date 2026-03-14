@@ -1,4 +1,5 @@
 mod app;
+mod audio;
 mod ffi;
 mod media;
 mod platform;
@@ -7,8 +8,10 @@ mod render;
 
 use std::time::Instant;
 
+use app::commands::SessionCommand;
 use app::session::PlaybackSession;
 use media::source::MediaSource;
+use platform::input::InputEvent;
 use platform::window::NativeWindow;
 
 fn main() {
@@ -28,6 +31,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     while session.window().is_open() {
         session.window_mut().pump_messages()?;
+        for input in session.window().take_input_events() {
+            match input {
+                InputEvent::TogglePause => {
+                    session.apply_command(SessionCommand::TogglePause, Instant::now())?;
+                }
+            }
+        }
         session.tick(Instant::now())?;
     }
 

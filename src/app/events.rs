@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::ffi::ffmpeg::PendingVideoFrame;
+use crate::ffi::ffmpeg::{PendingAudioFrame, PendingVideoFrame};
 use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 
 /// All asynchronous completions flow through this enum so the coordinator stays
@@ -8,7 +8,13 @@ use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 #[derive(Debug)]
 pub enum SessionEvent {
     VideoFrameReady(PendingVideoFrame),
+    AudioFrameReady(PendingAudioFrame),
     VideoStreamEnded {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+    },
+    AudioStreamEnded {
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,
         op_id: OperationId,

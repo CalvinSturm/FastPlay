@@ -32,3 +32,72 @@ int fastplay_ffmpeg_error_eagain(void) {
 int fastplay_ffmpeg_error_eof(void) {
     return AVERROR_EOF;
 }
+
+int fastplay_ffmpeg_error_stream_not_found(void) {
+    return AVERROR_STREAM_NOT_FOUND;
+}
+
+uint64_t fastplay_ffmpeg_channel_layout_mask_or_default(const AVChannelLayout *layout) {
+    if (!layout) {
+        return 0;
+    }
+
+    if (layout->order == AV_CHANNEL_ORDER_NATIVE && layout->u.mask != 0) {
+        return layout->u.mask;
+    }
+
+    AVChannelLayout fallback = {0};
+    av_channel_layout_default(&fallback, layout->nb_channels);
+    return fallback.u.mask;
+}
+
+uint64_t fastplay_ffmpeg_stereo_layout_mask(void) {
+    AVChannelLayout layout = AV_CHANNEL_LAYOUT_STEREO;
+    return layout.u.mask;
+}
+
+SwrContext *fastplay_ffmpeg_create_float_resampler(
+    const AVChannelLayout *input_layout,
+    enum AVSampleFormat input_sample_fmt,
+    int input_sample_rate,
+    uint64_t output_channel_mask,
+    int output_channels,
+    int output_sample_rate
+) {
+    if (!input_layout) {
+        return NULL;
+    }
+
+    AVChannelLayout output_layout = {0};
+    if (output_channel_mask != 0) {
+        if (av_channel_layout_from_mask(&output_layout, output_channel_mask) < 0) {
+            return NULL;
+        }
+    } else {
+        av_channel_layout_default(&output_layout, output_channels);
+    }
+
+    SwrContext *ctx = NULL;
+    if (swr_alloc_set_opts2(
+            &ctx,
+            &output_layout,
+            AV_SAMPLE_FMT_FLT,
+            output_sample_rate,
+            input_layout,
+            input_sample_fmt,
+            input_sample_rate,
+            0,
+            NULL) < 0) {
+        if (ctx) {
+            swr_free(&ctx);
+        }
+        return NULL;
+    }
+
+    if (swr_init(ctx) < 0) {
+        swr_free(&ctx);
+        return NULL;
+    }
+
+    return ctx;
+}

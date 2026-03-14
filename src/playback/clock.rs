@@ -26,4 +26,9 @@ impl PlaybackClock {
 
         self.anchor_instant + pts.saturating_sub(self.anchor_pts)
     }
+
+    pub fn position_at(&self, now: Instant) -> Duration {
+        self.anchor_pts
+            .saturating_add(now.saturating_duration_since(self.anchor_instant))
+    }
 }
