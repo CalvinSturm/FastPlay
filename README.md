@@ -136,6 +136,9 @@ The subtitle sidecar will be auto-loaded if present.
 * `Left` — seek backward
 * `Right` — seek forward
 * `S` — toggle subtitles on/off
+* `Ctrl+H` — toggle borderless fullscreen
+* `Ctrl+MouseWheel` — zoom at cursor (1× – 8×)
+* `Ctrl+0` — reset zoom / pan
 
 ## Validation notes
 
