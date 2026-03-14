@@ -46,6 +46,24 @@ impl Presenter {
         Ok(())
     }
 
+    pub fn rebuild_swap_chain(
+        &mut self,
+        window: &NativeWindow,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.swap_chain = SwapChainPresenter::new(window, &self.device)?;
+        Ok(())
+    }
+
+    pub fn rebuild_device(
+        &mut self,
+        window: &NativeWindow,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.device = D3D11Device::create()?;
+        self.swap_chain = SwapChainPresenter::new(window, &self.device)?;
+        self.reset_surfaces();
+        Ok(())
+    }
+
     pub fn device(&self) -> &D3D11Device {
         &self.device
     }
@@ -60,7 +78,22 @@ impl Presenter {
     }
 
     pub fn select_surface(&mut self, handle: VideoSurfaceHandle) -> Option<VideoSurfaceHandle> {
+        if !self.surfaces.contains(handle) {
+            return self.current_surface;
+        }
         self.current_surface.replace(handle)
+    }
+
+    pub fn surface_matches(
+        &self,
+        handle: VideoSurfaceHandle,
+        open_gen: crate::playback::generations::OpenGeneration,
+        seek_gen: crate::playback::generations::SeekGeneration,
+    ) -> bool {
+        matches!(
+            self.surfaces.get(handle),
+            Some(entry) if entry.open_gen == open_gen && entry.seek_gen == seek_gen
+        )
     }
 
     pub fn has_selected_surface(&self) -> bool {

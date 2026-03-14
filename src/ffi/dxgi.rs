@@ -437,8 +437,23 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN => {
             if let Some(state) = window_state(hwnd) {
-                if wparam.0 as u32 == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE.0 as u32 {
-                    state.input_events.borrow_mut().push(InputEvent::TogglePause);
+                match wparam.0 as u32 {
+                    key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE.0 as u32 => {
+                        state.input_events.borrow_mut().push(InputEvent::TogglePause);
+                    }
+                    key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::SeekRelativeSeconds(-5));
+                    }
+                    key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT.0 as u32 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::SeekRelativeSeconds(5));
+                    }
+                    _ => {}
                 }
             }
             LRESULT(0)

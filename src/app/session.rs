@@ -1,7 +1,11 @@
 use std::{
     cell::Cell,
     collections::VecDeque,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
+        Arc,
+    },
     thread::{self, ThreadId},
     time::{Duration, Instant},
 };
@@ -13,9 +17,10 @@ use crate::{
         state::PlaybackState,
     },
     audio::sink::AudioSink,
-    ffi::ffmpeg,
+    ffi::{dxgi::ResizeRequest, ffmpeg::{self, StreamStatus}},
     media::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
+        seek::{PlaybackSnapshot, PositionKind, SeekTarget},
         source::MediaSource,
         video::DecodedVideoFrame,
     },
@@ -31,8 +36,8 @@ use crate::{
     render::presenter::Presenter,
 };
 
-const SLIGHTLY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(30);
 const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
+const WORKER_CANCELLED: &str = "fastplay operation cancelled";
 
 struct QueuedAudioFrame {
     frame: DecodedAudioFrame,
@@ -50,6 +55,8 @@ pub struct PlaybackSession {
     generations: GenerationState,
     operation_clock: OperationClock,
     active_operation_id: Option<OperationId>,
+    current_source: Option<MediaSource>,
+    worker_nonce: Arc<AtomicU64>,
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
     metrics: PlaybackMetrics,
@@ -57,15 +64,20 @@ pub struct PlaybackSession {
     paused_clock_position: Option<Duration>,
     audio_clock_anchor_pts: Option<Duration>,
     audio_submitted_frames: u64,
+    pending_seek_target: Option<SeekTarget>,
+    pending_seek_first_frame_metric: bool,
+    pending_seek_settled_metric: bool,
+    seek_frame_presented_since_request: bool,
+    audio_stream_expected: bool,
     queued_video_frames: VecDeque<DecodedVideoFrame>,
     queued_audio_frames: VecDeque<QueuedAudioFrame>,
     queued_video_capacity: usize,
     queued_audio_capacity: usize,
+    measure_open_audio_metric: bool,
     pending_first_frame_metric: bool,
     pending_first_audio_metric: bool,
     video_stream_ended: bool,
     audio_stream_ended: bool,
-    audio_stream_seen: bool,
     last_error: Option<String>,
 }
 
@@ -87,6 +99,8 @@ impl PlaybackSession {
             generations: GenerationState::default(),
             operation_clock: OperationClock::default(),
             active_operation_id: None,
+            current_source: None,
+            worker_nonce: Arc::new(AtomicU64::new(0)),
             event_tx,
             event_rx,
             metrics: PlaybackMetrics::default(),
@@ -94,15 +108,20 @@ impl PlaybackSession {
             paused_clock_position: None,
             audio_clock_anchor_pts: None,
             audio_submitted_frames: 0,
+            pending_seek_target: None,
+            pending_seek_first_frame_metric: false,
+            pending_seek_settled_metric: false,
+            seek_frame_presented_since_request: false,
+            audio_stream_expected: false,
             queued_video_frames: VecDeque::with_capacity(queue_defaults.decoded_video_frames),
             queued_audio_frames: VecDeque::with_capacity(queue_defaults.decoded_audio_frames),
             queued_video_capacity: queue_defaults.decoded_video_frames,
             queued_audio_capacity: queue_defaults.decoded_audio_frames,
+            measure_open_audio_metric: false,
             pending_first_frame_metric: false,
             pending_first_audio_metric: false,
             video_stream_ended: false,
             audio_stream_ended: false,
-            audio_stream_seen: false,
             last_error: None,
         })
     }
@@ -115,6 +134,20 @@ impl PlaybackSession {
         &mut self.window
     }
 
+    pub fn snapshot(&self, now: Instant) -> PlaybackSnapshot {
+        if let Some(target) = self.pending_seek_target {
+            return PlaybackSnapshot {
+                position: target.position(),
+                kind: PositionKind::PendingSeekTarget,
+            };
+        }
+
+        PlaybackSnapshot {
+            position: self.master_clock_position(now).unwrap_or(Duration::ZERO),
+            kind: PositionKind::SettledPlaybackClock,
+        }
+    }
+
     pub fn open(
         &mut self,
         source: MediaSource,
@@ -123,99 +156,10 @@ impl PlaybackSession {
         let open_gen = self.generations.bump_open();
         let seek_gen = self.generations.seek();
         let op_id = self.operation_clock.next();
-        let sender = self.event_tx.clone();
-        let device = self.presenter.device().clone();
-
-        self.presenter.reset_surfaces();
-        self.audio_sink = match AudioSink::create_shared_default() {
-            Ok(sink) => Some(sink),
-            Err(error) => {
-                self.audio_sink_error = Some(error.to_string());
-                None
-            }
-        };
-        if self.audio_sink.is_some() {
-            self.audio_sink_error = None;
-        }
-        let audio_format = self
-            .audio_sink
-            .as_ref()
-            .map(|sink| sink.format())
-            .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
-
-        self.queued_video_frames.clear();
-        self.queued_audio_frames.clear();
-        self.video_clock = None;
-        self.paused_clock_position = None;
-        self.audio_clock_anchor_pts = None;
-        self.audio_submitted_frames = 0;
-        self.pending_first_frame_metric = false;
-        self.pending_first_audio_metric = false;
-        self.video_stream_ended = false;
-        self.audio_stream_ended = false;
-        self.audio_stream_seen = false;
-        self.state = PlaybackState::Opening;
-        self.active_operation_id = Some(op_id);
-        self.last_error = None;
+        self.current_source = Some(source.clone());
         self.metrics.note_open_requested(now);
-
-        thread::spawn(move || {
-            let mut produced_video = false;
-            let mut produced_audio = false;
-            let decode_result = ffmpeg::stream_media(
-                &source,
-                &device,
-                audio_format,
-                open_gen,
-                seek_gen,
-                op_id,
-                |frame| {
-                    produced_video = true;
-                    sender
-                        .send(SessionEvent::VideoFrameReady(frame))
-                        .map_err(|_| "session event channel closed".to_string())
-                },
-                |frame| {
-                    produced_audio = true;
-                    sender
-                        .send(SessionEvent::AudioFrameReady(frame))
-                        .map_err(|_| "session event channel closed".to_string())
-                },
-            );
-
-            match decode_result {
-                Ok(summary) => {
-                    let _ = sender.send(SessionEvent::VideoStreamEnded {
-                        open_gen,
-                        seek_gen,
-                        op_id,
-                    });
-                    if summary.had_audio_stream {
-                        let _ = sender.send(SessionEvent::AudioStreamEnded {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                        });
-                    }
-                }
-                Err(error) if !produced_video && !produced_audio => {
-                    let _ = sender.send(SessionEvent::OpenFailed {
-                        open_gen,
-                        op_id,
-                        error,
-                    });
-                }
-                Err(error) => {
-                    let _ = sender.send(SessionEvent::PlaybackFailed {
-                        open_gen,
-                        seek_gen,
-                        op_id,
-                        error,
-                    });
-                }
-            }
-        });
-
+        self.measure_open_audio_metric = true;
+        self.begin_operation(source, None, open_gen, seek_gen, op_id, PlaybackState::Opening, true, true)?;
         Ok(())
     }
 
@@ -227,18 +171,11 @@ impl PlaybackSession {
         match command {
             SessionCommand::Tick => {}
             SessionCommand::TogglePause => self.toggle_pause(now)?,
+            SessionCommand::Seek(target) => self.seek(target, now)?,
         }
         Ok(())
     }
 
-    /// UI-thread-only coordinator entrypoint.
-    ///
-    /// Safety and ownership contract:
-    /// - must only run on the thread that owns the window, presenter, and WASAPI sink
-    /// - must not be entered recursively
-    /// - must stay non-blocking and avoid worker waits or disk I/O
-    /// - M3 drains media completions, submits due audio, and schedules video
-    ///   against the audio master clock when audio exists
     pub fn tick(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             self.ui_thread_id,
@@ -260,29 +197,32 @@ impl PlaybackSession {
 
         loop {
             match self.event_rx.try_recv() {
-                Ok(event) => {
-                    self.handle_event(event)?;
-                    if self.queued_video_frames.len() >= self.queued_video_capacity
-                        || self.queued_audio_frames.len() >= self.queued_audio_capacity
-                    {
-                        break;
-                    }
-                }
+                Ok(event) => self.handle_event(event, now)?,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
+            }
+
+            if self.queued_video_frames.len() >= self.queued_video_capacity
+                || self.queued_audio_frames.len() >= self.queued_audio_capacity
+            {
+                break;
             }
         }
 
         if let Some(size) = self.window.take_resize_request() {
-            self.presenter.resize(size.width, size.height)?;
-            self.metrics.note_resize(now);
+            self.handle_resize(size, now)?;
         }
 
         self.submit_due_audio(now)?;
         self.advance_video_playback(now);
 
-        self.presenter.render()?;
-        self.metrics.note_present(now);
+        match self.presenter.render() {
+            Ok(()) => self.metrics.note_present(now),
+            Err(error) => {
+                self.recover_device(now, format!("present failed: {error}"))?;
+                return Ok(());
+            }
+        }
 
         if self.pending_first_frame_metric && self.presenter.has_selected_surface() {
             if let Some(elapsed) = self.metrics.note_first_frame_presented(now) {
@@ -296,6 +236,22 @@ impl PlaybackSession {
                 eprintln!("open_to_first_audio_ms={}", elapsed.as_millis());
             }
             self.pending_first_audio_metric = false;
+            self.measure_open_audio_metric = false;
+        }
+
+        if self.pending_seek_first_frame_metric && self.presenter.has_selected_surface() {
+            if let Some(elapsed) = self.metrics.note_seek_first_frame_presented(now) {
+                eprintln!("seek_to_first_frame_ms={}", elapsed.as_millis());
+            }
+            self.pending_seek_first_frame_metric = false;
+        }
+
+        if self.pending_seek_settled_metric && self.seek_is_settled() {
+            if let Some(elapsed) = self.metrics.note_seek_av_settled(now) {
+                eprintln!("seek_to_av_settled_ms={}", elapsed.as_millis());
+            }
+            self.pending_seek_settled_metric = false;
+            self.pending_seek_target = None;
         }
 
         if self.can_finish_playback()? {
@@ -312,7 +268,11 @@ impl PlaybackSession {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: SessionEvent) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_event(
+        &mut self,
+        event: SessionEvent,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match event {
             SessionEvent::VideoFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen, frame.seek_gen, frame.op_id) {
@@ -322,7 +282,7 @@ impl PlaybackSession {
                 let handle = self
                     .presenter
                     .register_surface(frame.open_gen, frame.seek_gen, frame.surface);
-                let decoded = DecodedVideoFrame::D3D11 {
+                self.push_video_frame(DecodedVideoFrame::D3D11 {
                     open_gen: frame.open_gen,
                     seek_gen: frame.seek_gen,
                     op_id: frame.op_id,
@@ -330,9 +290,8 @@ impl PlaybackSession {
                     width: frame.width,
                     height: frame.height,
                     surface: handle,
-                };
-                self.push_video_frame(decoded);
-                if self.state == PlaybackState::Opening {
+                });
+                if matches!(self.state, PlaybackState::Opening | PlaybackState::Seeking) {
                     self.state = PlaybackState::Priming;
                 }
             }
@@ -341,7 +300,7 @@ impl PlaybackSession {
                     return Ok(());
                 }
 
-                self.audio_stream_seen = true;
+                self.audio_stream_expected = true;
                 if self.audio_sink.is_none() {
                     let message = self
                         .audio_sink_error
@@ -351,7 +310,7 @@ impl PlaybackSession {
                     return Ok(());
                 }
 
-                let decoded = DecodedAudioFrame {
+                self.push_audio_frame(DecodedAudioFrame {
                     open_gen: frame.open_gen,
                     seek_gen: frame.seek_gen,
                     op_id: frame.op_id,
@@ -359,9 +318,8 @@ impl PlaybackSession {
                     format: frame.format,
                     frame_count: frame.frame_count,
                     data: frame.data,
-                };
-                self.push_audio_frame(decoded);
-                if self.state == PlaybackState::Opening {
+                });
+                if matches!(self.state, PlaybackState::Opening | PlaybackState::Seeking) {
                     self.state = PlaybackState::Priming;
                 }
             }
@@ -386,6 +344,7 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
+                self.audio_stream_expected = true;
                 self.audio_stream_ended = true;
             }
             SessionEvent::OpenFailed {
@@ -409,36 +368,243 @@ impl PlaybackSession {
                 }
                 self.fail_playback(error);
             }
-            SessionEvent::DeviceLost { .. } | SessionEvent::AudioEndpointChanged { .. } => {}
+            SessionEvent::DeviceLost {
+                open_gen,
+                seek_gen,
+                op_id,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                self.recover_device(now, "device lost event".to_string())?;
+            }
+            SessionEvent::AudioEndpointChanged {
+                open_gen,
+                seek_gen,
+                op_id,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                self.recover_audio_endpoint(now, "audio endpoint changed event".to_string())?;
+            }
         }
 
         Ok(())
     }
 
-    fn push_video_frame(&mut self, frame: DecodedVideoFrame) {
-        let insert_at = self
-            .queued_video_frames
-            .iter()
-            .position(|queued| frame.pts() < queued.pts())
-            .unwrap_or(self.queued_video_frames.len());
-        self.queued_video_frames.insert(insert_at, frame);
+    fn seek(
+        &mut self,
+        target: SeekTarget,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(source) = self.current_source.clone() else {
+            return Ok(());
+        };
 
-        while self.queued_video_frames.len() > self.queued_video_capacity {
-            if let Some(dropped) = self.queued_video_frames.pop_back() {
-                self.drop_video_frame(dropped);
-            }
-        }
+        let open_gen = self.generations.open();
+        let seek_gen = self.generations.bump_seek();
+        let op_id = self.operation_clock.next();
+        self.metrics.note_seek_requested(now);
+        self.measure_open_audio_metric = false;
+        self.begin_operation(
+            source,
+            Some(target.position()),
+            open_gen,
+            seek_gen,
+            op_id,
+            PlaybackState::Seeking,
+            false,
+            false,
+        )?;
+        self.pending_seek_target = Some(target);
+        self.pending_seek_first_frame_metric = true;
+        self.pending_seek_settled_metric = true;
+        self.seek_frame_presented_since_request = false;
+        Ok(())
     }
 
-    fn push_audio_frame(&mut self, frame: DecodedAudioFrame) {
-        if self.queued_audio_frames.len() >= self.queued_audio_capacity {
-            return;
+    fn begin_operation(
+        &mut self,
+        source: MediaSource,
+        start_position: Option<Duration>,
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        next_state: PlaybackState,
+        rebuild_audio_sink: bool,
+        reset_audio_expectation: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.prepare_runtime_for_operation(rebuild_audio_sink, reset_audio_expectation)?;
+        self.state = next_state;
+        self.active_operation_id = Some(op_id);
+        self.last_error = None;
+        self.spawn_stream_worker(source, start_position, open_gen, seek_gen, op_id);
+        Ok(())
+    }
+
+    fn prepare_runtime_for_operation(
+        &mut self,
+        rebuild_audio_sink: bool,
+        reset_audio_expectation: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.cancel_active_worker();
+        self.clear_video_queue();
+        self.queued_audio_frames.clear();
+        self.presenter.reset_surfaces();
+        self.video_clock = None;
+        self.paused_clock_position = None;
+        self.audio_clock_anchor_pts = None;
+        self.audio_submitted_frames = 0;
+        self.pending_first_frame_metric = false;
+        self.pending_first_audio_metric = false;
+        self.video_stream_ended = false;
+        self.audio_stream_ended = false;
+        if reset_audio_expectation {
+            self.audio_stream_expected = false;
         }
 
-        self.queued_audio_frames.push_back(QueuedAudioFrame {
-            frame,
-            submitted_frames: 0,
+        if rebuild_audio_sink {
+            self.audio_sink = match AudioSink::create_shared_default() {
+                Ok(sink) => {
+                    self.audio_sink_error = None;
+                    Some(sink)
+                }
+                Err(error) => {
+                    self.audio_sink_error = Some(error.to_string());
+                    None
+                }
+            };
+        } else if let Some(sink) = self.audio_sink.as_mut() {
+            if let Err(error) = sink.reset() {
+                self.audio_sink_error = Some(error.to_string());
+                self.audio_sink = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn spawn_stream_worker(
+        &mut self,
+        source: MediaSource,
+        start_position: Option<Duration>,
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+    ) {
+        let sender = self.event_tx.clone();
+        let device = self.presenter.device().clone();
+        let audio_format = self
+            .audio_sink
+            .as_ref()
+            .map(|sink| sink.format())
+            .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
+        let worker_nonce = self.worker_nonce.clone();
+        let expected_nonce = self.reserve_worker_nonce();
+
+        thread::spawn(move || {
+            let decode_result = ffmpeg::stream_media(
+                &source,
+                &device,
+                audio_format,
+                start_position,
+                open_gen,
+                seek_gen,
+                op_id,
+                || worker_nonce.load(Ordering::Acquire) != expected_nonce,
+                |frame| {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                        return Err(WORKER_CANCELLED.to_string());
+                    }
+                    sender
+                        .send(SessionEvent::VideoFrameReady(frame))
+                        .map_err(|_| WORKER_CANCELLED.to_string())
+                },
+                |frame| {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                        return Err(WORKER_CANCELLED.to_string());
+                    }
+                    sender
+                        .send(SessionEvent::AudioFrameReady(frame))
+                        .map_err(|_| WORKER_CANCELLED.to_string())
+                },
+            );
+
+            match decode_result {
+                Ok(StreamStatus::Completed(summary)) => {
+                    let _ = sender.send(SessionEvent::VideoStreamEnded {
+                        open_gen,
+                        seek_gen,
+                        op_id,
+                    });
+                    if summary.had_audio_stream {
+                        let _ = sender.send(SessionEvent::AudioStreamEnded {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                        });
+                    }
+                }
+                Ok(StreamStatus::Cancelled) => {}
+                Err(error) if error == WORKER_CANCELLED => {}
+                Err(error) => {
+                    let _ = sender.send(if start_position.is_some() {
+                        SessionEvent::PlaybackFailed {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                            error,
+                        }
+                    } else {
+                        SessionEvent::OpenFailed {
+                            open_gen,
+                            op_id,
+                            error,
+                        }
+                    });
+                }
+            }
         });
+    }
+
+    fn reserve_worker_nonce(&self) -> u64 {
+        self.worker_nonce
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    fn cancel_active_worker(&self) {
+        let _ = self.worker_nonce.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn handle_resize(
+        &mut self,
+        size: ResizeRequest,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.metrics.note_resize(now);
+        self.metrics.note_resize_recovery_started(now);
+
+        match self.presenter.resize(size.width, size.height) {
+            Ok(()) => {
+                if let Some(elapsed) = self.metrics.note_resize_recovered(now) {
+                    eprintln!("resize_recover_ms={}", elapsed.as_millis());
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if self.presenter.rebuild_swap_chain(&self.window).is_ok() {
+                    if let Some(elapsed) = self.metrics.note_resize_recovered(now) {
+                        eprintln!("resize_recover_ms={}", elapsed.as_millis());
+                    }
+                    return Ok(());
+                }
+                eprintln!("resize recovery deferred: {error}");
+                let _ = self.metrics.note_resize_recovered(now);
+                Ok(())
+            }
+        }
     }
 
     fn submit_due_audio(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
@@ -446,48 +612,69 @@ impl PlaybackSession {
             return Ok(());
         }
 
-        let Some(sink) = self.audio_sink.as_mut() else {
-            return Ok(());
-        };
-
-        let mut wrote_any_audio = false;
         let mut first_written_pts = None;
+        let mut wrote_any_audio = false;
+        let mut audio_error = None;
 
-        loop {
-            let Some(front) = self.queued_audio_frames.front_mut() else {
-                break;
+        {
+            let Some(sink) = self.audio_sink.as_mut() else {
+                return Ok(());
             };
 
-            let written = sink.write_frame(&front.frame, front.submitted_frames)?;
-            if written == 0 {
-                break;
+            loop {
+                let Some(front) = self.queued_audio_frames.front_mut() else {
+                    break;
+                };
+
+                let written = match sink.write_frame(&front.frame, front.submitted_frames) {
+                    Ok(written) => written,
+                    Err(error) => {
+                        audio_error = Some(error.to_string());
+                        break;
+                    }
+                };
+                if written == 0 {
+                    break;
+                }
+
+                if first_written_pts.is_none() {
+                    let offset = Duration::from_secs_f64(
+                        front.submitted_frames as f64 / front.frame.format.sample_rate as f64,
+                    );
+                    first_written_pts = Some(front.frame.pts().saturating_add(offset));
+                }
+
+                wrote_any_audio = true;
+                self.audio_submitted_frames = self.audio_submitted_frames.saturating_add(written as u64);
+                front.submitted_frames = front.submitted_frames.saturating_add(written);
+                if front.submitted_frames >= front.frame.frame_count() {
+                    self.queued_audio_frames.pop_front();
+                }
             }
 
-            if first_written_pts.is_none() {
-                let offset = Duration::from_secs_f64(
-                    front.submitted_frames as f64 / front.frame.format.sample_rate as f64,
-                );
-                first_written_pts = Some(front.frame.pts().saturating_add(offset));
+            if wrote_any_audio && self.audio_clock_anchor_pts.is_none() {
+                self.audio_clock_anchor_pts = first_written_pts;
+                if self.measure_open_audio_metric {
+                    self.pending_first_audio_metric = true;
+                }
             }
 
-            wrote_any_audio = true;
-            self.audio_submitted_frames = self.audio_submitted_frames.saturating_add(written as u64);
-            front.submitted_frames = front.submitted_frames.saturating_add(written);
-            if front.submitted_frames >= front.frame.frame_count() {
-                self.queued_audio_frames.pop_front();
+            if wrote_any_audio && !sink.is_started() {
+                if let Err(error) = sink.resume() {
+                    audio_error = Some(error.to_string());
+                }
             }
         }
 
-        if wrote_any_audio && self.audio_clock_anchor_pts.is_none() {
-            self.audio_clock_anchor_pts = first_written_pts;
-            self.pending_first_audio_metric = true;
+        if let Some(error) = audio_error {
+            self.recover_audio_endpoint(now, error)?;
+            return Ok(());
         }
 
-        if wrote_any_audio && !sink.is_started() {
-            sink.resume()?;
-        }
-
-        if self.audio_stream_seen
+        let Some(sink) = self.audio_sink.as_ref() else {
+            return Ok(());
+        };
+        if self.audio_stream_expected
             && self.state != PlaybackState::Paused
             && sink.is_started()
             && self.queued_audio_frames.is_empty()
@@ -497,11 +684,10 @@ impl PlaybackSession {
             self.metrics.note_audio_underrun();
         }
 
-        if self.audio_stream_seen && self.audio_clock_anchor_pts.is_some() && self.state == PlaybackState::Priming {
+        if self.audio_stream_expected && self.audio_clock_anchor_pts.is_some() && self.state == PlaybackState::Priming {
             self.state = PlaybackState::Playing;
         }
 
-        let _ = now;
         Ok(())
     }
 
@@ -532,11 +718,6 @@ impl PlaybackSession {
                     self.drop_video_frame(dropped);
                     continue;
                 }
-
-                if lateness > SLIGHTLY_LATE_VIDEO_THRESHOLD && self.metrics.audio_underruns() == 0 {
-                    // M3 tolerates modest lateness while the audio sink is stable to avoid
-                    // over-dropping on normal scheduling jitter.
-                }
             } else if let Some(clock) = self.video_clock {
                 let due_at = clock.deadline_for(next_frame.pts());
                 if now < due_at {
@@ -558,15 +739,25 @@ impl PlaybackSession {
             self.video_clock = Some(PlaybackClock::new(now, frame.pts()));
         }
 
+        if !self
+            .presenter
+            .surface_matches(frame.surface(), frame.open_gen(), frame.seek_gen())
+        {
+            self.drop_video_frame(frame);
+            return;
+        }
+
         let handle = frame.surface();
         if let Some(previous) = self.presenter.select_surface(handle) {
             if previous != handle {
                 self.presenter.release_surface(previous);
             }
         }
+
         self.metrics.note_video_frame_presented();
         self.pending_first_frame_metric |= self.metrics.presented_video_frames() == 1;
-        if !self.audio_stream_seen || self.audio_clock_anchor_pts.is_some() {
+        self.seek_frame_presented_since_request |= self.pending_seek_settled_metric;
+        if !self.audio_stream_expected || self.audio_clock_anchor_pts.is_some() {
             self.state = PlaybackState::Playing;
         }
     }
@@ -574,6 +765,38 @@ impl PlaybackSession {
     fn drop_video_frame(&mut self, frame: DecodedVideoFrame) {
         self.presenter.release_surface(frame.surface());
         self.metrics.note_video_frame_dropped();
+    }
+
+    fn clear_video_queue(&mut self) {
+        while let Some(frame) = self.queued_video_frames.pop_front() {
+            self.presenter.release_surface(frame.surface());
+        }
+    }
+
+    fn push_video_frame(&mut self, frame: DecodedVideoFrame) {
+        let insert_at = self
+            .queued_video_frames
+            .iter()
+            .position(|queued| frame.pts() < queued.pts())
+            .unwrap_or(self.queued_video_frames.len());
+        self.queued_video_frames.insert(insert_at, frame);
+
+        while self.queued_video_frames.len() > self.queued_video_capacity {
+            if let Some(dropped) = self.queued_video_frames.pop_back() {
+                self.drop_video_frame(dropped);
+            }
+        }
+    }
+
+    fn push_audio_frame(&mut self, frame: DecodedAudioFrame) {
+        if self.queued_audio_frames.len() >= self.queued_audio_capacity {
+            return;
+        }
+
+        self.queued_audio_frames.push_back(QueuedAudioFrame {
+            frame,
+            submitted_frames: 0,
+        });
     }
 
     fn toggle_pause(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
@@ -616,7 +839,7 @@ impl PlaybackSession {
             if sink.is_started() {
                 let buffered_frames = sink.buffered_frames().ok()? as u64;
                 let played_frames = self.audio_submitted_frames.saturating_sub(buffered_frames);
-                let sample_rate = self.audio_sample_rate();
+                let sample_rate = sink.format().sample_rate;
                 if sample_rate > 0 {
                     let played = Duration::from_secs_f64(played_frames as f64 / sample_rate as f64);
                     return Some(anchor_pts.saturating_add(played));
@@ -627,11 +850,75 @@ impl PlaybackSession {
         self.video_clock.map(|clock| clock.position_at(now))
     }
 
-    fn audio_sample_rate(&self) -> u32 {
-        self.audio_sink
-            .as_ref()
-            .map(|sink| sink.format().sample_rate)
-            .unwrap_or(0)
+    fn seek_is_settled(&self) -> bool {
+        self.seek_frame_presented_since_request
+            && (!self.audio_stream_expected || self.audio_clock_anchor_pts.is_some())
+    }
+
+    fn desired_restart_position(&self, now: Instant) -> Duration {
+        self.pending_seek_target
+            .map(SeekTarget::position)
+            .unwrap_or_else(|| self.snapshot(now).position)
+    }
+
+    fn recover_audio_endpoint(
+        &mut self,
+        now: Instant,
+        reason: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(source) = self.current_source.clone() else {
+            return Ok(());
+        };
+        let restart_target = self.desired_restart_position(now);
+        let open_gen = self.generations.open();
+        let seek_gen = self.generations.bump_seek();
+        let op_id = self.operation_clock.next();
+        eprintln!("audio endpoint recovery: {reason}");
+        self.measure_open_audio_metric = false;
+        self.begin_operation(
+            source,
+            Some(restart_target),
+            open_gen,
+            seek_gen,
+            op_id,
+            PlaybackState::Seeking,
+            true,
+            false,
+        )?;
+        Ok(())
+    }
+
+    fn recover_device(
+        &mut self,
+        now: Instant,
+        reason: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(source) = self.current_source.clone() else {
+            return Ok(());
+        };
+
+        self.metrics.note_device_recovery_started(now);
+        eprintln!("device recovery: {reason}");
+        self.presenter.rebuild_device(&self.window)?;
+        let restart_target = self.desired_restart_position(now);
+        let open_gen = self.generations.open();
+        let seek_gen = self.generations.bump_seek();
+        let op_id = self.operation_clock.next();
+        self.measure_open_audio_metric = false;
+        self.begin_operation(
+            source,
+            Some(restart_target),
+            open_gen,
+            seek_gen,
+            op_id,
+            PlaybackState::Seeking,
+            false,
+            false,
+        )?;
+        if let Some(elapsed) = self.metrics.note_device_recovered(now) {
+            eprintln!("device_recovery_ms={}", elapsed.as_millis());
+        }
+        Ok(())
     }
 
     fn can_finish_playback(&self) -> Result<bool, Box<dyn std::error::Error>> {
@@ -639,7 +926,7 @@ impl PlaybackSession {
             return Ok(false);
         }
 
-        if self.audio_stream_seen {
+        if self.audio_stream_expected {
             if !self.audio_stream_ended || !self.queued_audio_frames.is_empty() {
                 return Ok(false);
             }
@@ -657,6 +944,8 @@ impl PlaybackSession {
     }
 
     fn fail_open(&mut self, error: String) {
+        self.cancel_active_worker();
+        self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
         self.state = PlaybackState::Error;
@@ -664,6 +953,8 @@ impl PlaybackSession {
     }
 
     fn fail_playback(&mut self, error: String) {
+        self.cancel_active_worker();
+        self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
         self.state = PlaybackState::Error;

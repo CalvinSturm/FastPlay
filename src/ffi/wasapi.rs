@@ -136,6 +136,15 @@ impl WasapiAudioSink {
         Ok(())
     }
 
+    pub fn reset(&self) -> Result<(), Box<dyn Error>> {
+        unsafe {
+            self.audio_client.Stop()?;
+            self.audio_client.Reset()?;
+        }
+        self.clock_origin.set(None);
+        Ok(())
+    }
+
     pub fn write_interleaved(
         &mut self,
         data: &[u8],

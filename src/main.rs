@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use app::commands::SessionCommand;
 use app::session::PlaybackSession;
-use media::source::MediaSource;
+use media::{seek::SeekTarget, source::MediaSource};
 use platform::input::InputEvent;
 use platform::window::NativeWindow;
 
@@ -35,6 +35,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             match input {
                 InputEvent::TogglePause => {
                     session.apply_command(SessionCommand::TogglePause, Instant::now())?;
+                }
+                InputEvent::SeekRelativeSeconds(offset_seconds) => {
+                    let snapshot = session.snapshot(Instant::now());
+                    let next_position = if offset_seconds >= 0 {
+                        snapshot
+                            .position
+                            .saturating_add(std::time::Duration::from_secs(offset_seconds as u64))
+                    } else {
+                        snapshot
+                            .position
+                            .saturating_sub(std::time::Duration::from_secs((-offset_seconds) as u64))
+                    };
+                    session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), Instant::now())?;
                 }
             }
         }

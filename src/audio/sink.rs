@@ -37,6 +37,12 @@ impl AudioSink {
         Ok(())
     }
 
+    pub fn reset(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.inner.reset()?;
+        self.started = false;
+        Ok(())
+    }
+
     pub fn write_frame(
         &mut self,
         frame: &DecodedAudioFrame,

@@ -37,6 +37,20 @@ int fastplay_ffmpeg_error_stream_not_found(void) {
     return AVERROR_STREAM_NOT_FOUND;
 }
 
+int fastplay_ffmpeg_seek_to_micros(AVFormatContext *ctx, int64_t timestamp_micros) {
+    if (!ctx) {
+        return AVERROR(EINVAL);
+    }
+
+    return av_seek_frame(ctx, -1, timestamp_micros, AVSEEK_FLAG_BACKWARD);
+}
+
+void fastplay_ffmpeg_flush_codec(AVCodecContext *ctx) {
+    if (ctx) {
+        avcodec_flush_buffers(ctx);
+    }
+}
+
 uint64_t fastplay_ffmpeg_channel_layout_mask_or_default(const AVChannelLayout *layout) {
     if (!layout) {
         return 0;

@@ -50,19 +50,28 @@ pub(crate) struct StreamSummary {
     pub produced_audio_frames: u64,
 }
 
-pub(crate) fn stream_media<V, A>(
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StreamStatus {
+    Completed(StreamSummary),
+    Cancelled,
+}
+
+pub(crate) fn stream_media<V, A, C>(
     source: &MediaSource,
     device: &D3D11Device,
     audio_output_format: AudioStreamFormat,
+    start_position: Option<Duration>,
     open_gen: OpenGeneration,
     seek_gen: SeekGeneration,
     op_id: OperationId,
+    mut should_cancel: C,
     mut on_video: V,
     mut on_audio: A,
-) -> Result<StreamSummary, String>
+) -> Result<StreamStatus, String>
 where
     V: FnMut(PendingVideoFrame) -> Result<(), String>,
     A: FnMut(PendingAudioFrame) -> Result<(), String>,
+    C: FnMut() -> bool,
 {
     let source_path = source
         .path()
@@ -100,6 +109,10 @@ where
             produced_audio_frames: 0,
         };
 
+        if let Some(target) = start_position {
+            seek_and_flush(input.0, &video, audio.as_ref(), target)?;
+        }
+
         let packet = av_packet_alloc();
         if packet.is_null() {
             return Err("av_packet_alloc returned null".into());
@@ -113,6 +126,10 @@ where
         let frame = Frame(frame);
 
         loop {
+            if should_cancel() {
+                return Ok(StreamStatus::Cancelled);
+            }
+
             let read_status = av_read_frame(input.0, packet.0);
             if read_status == fastplay_ffmpeg_error_eof() {
                 break;
@@ -162,6 +179,10 @@ where
             av_packet_unref(packet.0);
         }
 
+        if should_cancel() {
+            return Ok(StreamStatus::Cancelled);
+        }
+
         ffmpeg_check(
             avcodec_send_packet(video.codec.0, null()),
             "avcodec_send_packet(video flush)",
@@ -201,7 +222,7 @@ where
             return Err("no decodable video frame was produced".into());
         }
 
-        Ok(summary)
+        Ok(StreamStatus::Completed(summary))
     }
 }
 
@@ -215,6 +236,24 @@ struct AudioDecoder {
     codec: CodecContext,
     resampler: Resampler,
     output_format: AudioStreamFormat,
+}
+
+unsafe fn seek_and_flush(
+    format_context: *mut AVFormatContext,
+    video: &VideoDecoder,
+    audio: Option<&AudioDecoder>,
+    target: Duration,
+) -> Result<(), String> {
+    let target_micros = target.as_micros().min(i64::MAX as u128) as i64;
+    ffmpeg_check(
+        fastplay_ffmpeg_seek_to_micros(format_context, target_micros),
+        "av_seek_frame",
+    )?;
+    fastplay_ffmpeg_flush_codec(video.codec.0);
+    if let Some(audio) = audio {
+        fastplay_ffmpeg_flush_codec(audio.codec.0);
+    }
+    Ok(())
 }
 
 unsafe fn open_video_decoder(
