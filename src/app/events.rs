@@ -1,12 +1,22 @@
 #![allow(dead_code)]
 
-use crate::ffi::ffmpeg::{PendingAudioFrame, PendingVideoFrame};
+use crate::{
+    ffi::ffmpeg::{PendingAudioFrame, PendingVideoFrame},
+    media::video::VideoDecodeMode,
+};
 use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 
 /// All asynchronous completions flow through this enum so the coordinator stays
 /// the only state owner.
 #[derive(Debug)]
 pub enum SessionEvent {
+    DecodeModeSelected {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        mode: VideoDecodeMode,
+        hw_fallback_count: u64,
+    },
     VideoFrameReady(PendingVideoFrame),
     AudioFrameReady(PendingAudioFrame),
     VideoStreamEnded {

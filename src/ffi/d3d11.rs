@@ -9,6 +9,7 @@ use windows::{
             Direct3D11::{
                 D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
                 ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+                D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA,
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEX2D_VPIV,
                 D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
                 D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
@@ -16,8 +17,9 @@ use windows::{
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
                 D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
                 D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+                D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
             },
-            Dxgi::Common::DXGI_RATIONAL,
+            Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC},
         },
     },
 };
@@ -253,5 +255,79 @@ impl D3D11Device {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn upload_nv12_surface(
+        &self,
+        width: u32,
+        height: u32,
+        y_plane: &[u8],
+        y_stride: usize,
+        uv_plane: &[u8],
+        uv_stride: usize,
+    ) -> Result<VideoSurface, Box<dyn Error>> {
+        if width == 0 || height == 0 {
+            return Err(Box::new(D3D11Error("software upload requires non-zero dimensions")));
+        }
+        if width % 2 != 0 || height % 2 != 0 {
+            return Err(Box::new(D3D11Error(
+                "software NV12 upload currently requires even frame dimensions",
+            )));
+        }
+        if y_stride != uv_stride {
+            return Err(Box::new(D3D11Error(
+                "software NV12 upload requires equal luma/chroma strides",
+            )));
+        }
+
+        let expected_y_len = y_stride.saturating_mul(height as usize);
+        let expected_uv_len = uv_stride.saturating_mul((height / 2) as usize);
+        if y_plane.len() < expected_y_len || uv_plane.len() < expected_uv_len {
+            return Err(Box::new(D3D11Error(
+                "software NV12 planes were smaller than the declared stride/height",
+            )));
+        }
+
+        let mut upload = Vec::with_capacity(expected_y_len.saturating_add(expected_uv_len));
+        upload.extend_from_slice(&y_plane[..expected_y_len]);
+        upload.extend_from_slice(&uv_plane[..expected_uv_len]);
+
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_DECODER.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: upload.as_ptr().cast(),
+            SysMemPitch: y_stride as u32,
+            SysMemSlicePitch: upload.len() as u32,
+        };
+        let mut texture = None;
+
+        // SAFETY:
+        // - the upload buffer stays alive for the duration of CreateTexture2D
+        // - the NV12 planes are laid out contiguously as required for a single-subresource upload
+        // - the created texture remains owned by the returned VideoSurface
+        unsafe {
+            self.device
+                .CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))?;
+        }
+
+        Ok(VideoSurface {
+            texture: texture.ok_or(D3D11Error("CreateTexture2D returned no software texture"))?,
+            subresource_index: 0,
+            width,
+            height,
+        })
     }
 }

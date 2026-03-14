@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use crate::media::video::VideoDecodeMode;
+
 #[derive(Debug, Default)]
 pub struct PlaybackMetrics {
     last_present_at: Option<Instant>,
@@ -12,6 +14,8 @@ pub struct PlaybackMetrics {
     seek_av_settled_at: Option<Instant>,
     resize_recovery_started_at: Option<Instant>,
     device_recovery_started_at: Option<Instant>,
+    decode_mode: Option<VideoDecodeMode>,
+    hw_fallback_count: u64,
     presented_video_frames: u64,
     dropped_video_frames: u64,
     audio_underruns: u64,
@@ -28,6 +32,8 @@ impl PlaybackMetrics {
         self.seek_av_settled_at = None;
         self.resize_recovery_started_at = None;
         self.device_recovery_started_at = None;
+        self.decode_mode = None;
+        self.hw_fallback_count = 0;
         self.presented_video_frames = 0;
         self.dropped_video_frames = 0;
         self.audio_underruns = 0;
@@ -99,6 +105,15 @@ impl PlaybackMetrics {
         Some(now.saturating_duration_since(started))
     }
 
+    pub fn note_decode_mode_selected(
+        &mut self,
+        mode: VideoDecodeMode,
+        hw_fallback_count: u64,
+    ) {
+        self.decode_mode = Some(mode);
+        self.hw_fallback_count = self.hw_fallback_count.saturating_add(hw_fallback_count);
+    }
+
     pub fn note_video_frame_presented(&mut self) {
         self.presented_video_frames = self.presented_video_frames.saturating_add(1);
     }
@@ -125,5 +140,13 @@ impl PlaybackMetrics {
 
     pub fn audio_underruns(&self) -> u64 {
         self.audio_underruns
+    }
+
+    pub fn decode_mode(&self) -> Option<VideoDecodeMode> {
+        self.decode_mode
+    }
+
+    pub fn hw_fallback_count(&self) -> u64 {
+        self.hw_fallback_count
     }
 }

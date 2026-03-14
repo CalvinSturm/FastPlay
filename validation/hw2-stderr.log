@@ -1,0 +1,5 @@
+resize_recover_ms=0
+decode_mode=HW:D3D11 hw_fallback_count=0
+open_to_first_frame_ms=60
+open_to_first_audio_ms=76
+playback_summary decode_mode=HW:D3D11 hw_fallback_count=0 presented_frames=79 dropped_video_frames=11 audio_underruns=0

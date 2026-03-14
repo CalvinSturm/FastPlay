@@ -15,21 +15,60 @@ use std::{
 
 use crate::{
     ffi::d3d11::{D3D11Device, VideoSurface},
-    media::{audio::AudioStreamFormat, source::MediaSource},
+    media::{
+        audio::AudioStreamFormat,
+        source::MediaSource,
+        video::{SoftwareVideoFrameFormat, VideoDecodeMode, VideoDecodePreference},
+    },
     playback::generations::{OpenGeneration, OperationId, SeekGeneration},
 };
 
 include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
 
+const SWS_BILINEAR_FLAGS: i32 = 2;
+
 #[derive(Debug)]
-pub(crate) struct PendingVideoFrame {
-    pub open_gen: OpenGeneration,
-    pub seek_gen: SeekGeneration,
-    pub op_id: OperationId,
-    pub pts: Duration,
-    pub width: u32,
-    pub height: u32,
-    pub surface: VideoSurface,
+pub(crate) enum PendingVideoFrame {
+    D3D11 {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        pts: Duration,
+        width: u32,
+        height: u32,
+        surface: VideoSurface,
+    },
+    Software {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        pts: Duration,
+        width: u32,
+        height: u32,
+        format: SoftwareVideoFrameFormat,
+        planes: Vec<Vec<u8>>,
+        strides: Vec<usize>,
+    },
+}
+
+impl PendingVideoFrame {
+    pub fn open_gen(&self) -> OpenGeneration {
+        match self {
+            Self::D3D11 { open_gen, .. } | Self::Software { open_gen, .. } => *open_gen,
+        }
+    }
+
+    pub fn seek_gen(&self) -> SeekGeneration {
+        match self {
+            Self::D3D11 { seek_gen, .. } | Self::Software { seek_gen, .. } => *seek_gen,
+        }
+    }
+
+    pub fn op_id(&self) -> OperationId {
+        match self {
+            Self::D3D11 { op_id, .. } | Self::Software { op_id, .. } => *op_id,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -43,11 +82,13 @@ pub(crate) struct PendingAudioFrame {
     pub data: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct StreamSummary {
     pub had_audio_stream: bool,
     pub produced_video_frames: u64,
     pub produced_audio_frames: u64,
+    pub decode_mode: VideoDecodeMode,
+    pub hw_fallback_count: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -61,9 +102,11 @@ pub(crate) fn stream_media<V, A, C>(
     device: &D3D11Device,
     audio_output_format: AudioStreamFormat,
     start_position: Option<Duration>,
+    decode_preference: VideoDecodePreference,
     open_gen: OpenGeneration,
     seek_gen: SeekGeneration,
     op_id: OperationId,
+    mut on_decode_mode: impl FnMut(VideoDecodeMode, u64) -> Result<(), String>,
     mut should_cancel: C,
     mut on_video: V,
     mut on_audio: A,
@@ -98,15 +141,18 @@ where
             "avformat_find_stream_info",
         )?;
 
-        let video = open_video_decoder(input.0, device)?;
+        let mut video = open_video_decoder(input.0, device, decode_preference)?;
         let audio = open_audio_decoder(input.0, audio_output_format)?;
         let mut audio_batch = audio
             .as_ref()
             .map(|audio| AudioBatcher::new(audio.output_format));
+        on_decode_mode(video.mode, video.hw_fallback_count)?;
         let mut summary = StreamSummary {
             had_audio_stream: audio.is_some(),
             produced_video_frames: 0,
             produced_audio_frames: 0,
+            decode_mode: video.mode,
+            hw_fallback_count: video.hw_fallback_count,
         };
 
         if let Some(target) = start_position {
@@ -143,7 +189,7 @@ where
                 )?;
                 av_packet_unref(packet.0);
                 receive_video_frames(
-                    video.codec.0,
+                    &mut video,
                     frame.0,
                     device,
                     open_gen,
@@ -188,7 +234,7 @@ where
             "avcodec_send_packet(video flush)",
         )?;
         receive_video_frames(
-            video.codec.0,
+            &mut video,
             frame.0,
             device,
             open_gen,
@@ -229,6 +275,14 @@ where
 struct VideoDecoder {
     stream_index: usize,
     codec: CodecContext,
+    output: VideoDecoderOutput,
+    mode: VideoDecodeMode,
+    hw_fallback_count: u64,
+}
+
+enum VideoDecoderOutput {
+    Hardware,
+    Software(SoftwareVideoConverter),
 }
 
 struct AudioDecoder {
@@ -257,6 +311,29 @@ unsafe fn seek_and_flush(
 }
 
 unsafe fn open_video_decoder(
+    format_context: *mut AVFormatContext,
+    device: &D3D11Device,
+    decode_preference: VideoDecodePreference,
+) -> Result<VideoDecoder, String> {
+    match decode_preference {
+        VideoDecodePreference::ForceSoftware => open_software_video_decoder(format_context),
+        VideoDecodePreference::Auto => match open_hardware_video_decoder(format_context, device) {
+            Ok(decoder) => Ok(decoder),
+            Err(hw_error) => match open_software_video_decoder(format_context) {
+                Ok(mut decoder) => {
+                    decoder.hw_fallback_count = 1;
+                    eprintln!("video decode fallback: {hw_error}");
+                    Ok(decoder)
+                }
+                Err(sw_error) => Err(format!(
+                    "hardware decode unavailable ({hw_error}); software fallback failed ({sw_error})"
+                )),
+            },
+        },
+    }
+}
+
+unsafe fn open_hardware_video_decoder(
     format_context: *mut AVFormatContext,
     device: &D3D11Device,
 ) -> Result<VideoDecoder, String> {
@@ -297,7 +374,60 @@ unsafe fn open_video_decoder(
     configure_hw_device(codec.0, device, decoder)?;
     ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(video)")?;
 
-    Ok(VideoDecoder { stream_index, codec })
+    Ok(VideoDecoder {
+        stream_index,
+        codec,
+        output: VideoDecoderOutput::Hardware,
+        mode: VideoDecodeMode::HardwareD3D11,
+        hw_fallback_count: 0,
+    })
+}
+
+unsafe fn open_software_video_decoder(
+    format_context: *mut AVFormatContext,
+) -> Result<VideoDecoder, String> {
+    let mut decoder: *const AVCodec = null();
+    let stream_index = ffmpeg_check(
+        av_find_best_stream(
+            format_context,
+            AVMediaType_AVMEDIA_TYPE_VIDEO,
+            -1,
+            -1,
+            &mut decoder,
+            0,
+        ),
+        "av_find_best_stream(video)",
+    )? as usize;
+    if decoder.is_null() {
+        return Err("no decoder found for selected video stream".into());
+    }
+
+    let stream = selected_stream(format_context, stream_index)?;
+    let codec_context = avcodec_alloc_context3(decoder);
+    if codec_context.is_null() {
+        return Err("avcodec_alloc_context3(video) returned null".into());
+    }
+    let codec = CodecContext(codec_context);
+
+    let codec_parameters = fastplay_ffmpeg_stream_codecpar(stream);
+    if codec_parameters.is_null() {
+        return Err("selected video stream codec parameters were null".into());
+    }
+
+    ffmpeg_check(
+        avcodec_parameters_to_context(codec.0, codec_parameters),
+        "avcodec_parameters_to_context(video)",
+    )?;
+    (*codec.0).pkt_timebase = fastplay_ffmpeg_stream_time_base(stream);
+    ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(video)")?;
+
+    Ok(VideoDecoder {
+        stream_index,
+        codec,
+        output: VideoDecoderOutput::Software(SoftwareVideoConverter::default()),
+        mode: VideoDecodeMode::Software,
+        hw_fallback_count: 0,
+    })
 }
 
 unsafe fn open_audio_decoder(
@@ -362,7 +492,7 @@ unsafe fn open_audio_decoder(
 }
 
 unsafe fn receive_video_frames<F>(
-    codec_context: *mut AVCodecContext,
+    video: &mut VideoDecoder,
     frame: *mut AVFrame,
     device: &D3D11Device,
     open_gen: OpenGeneration,
@@ -375,42 +505,166 @@ where
     F: FnMut(PendingVideoFrame) -> Result<(), String>,
 {
     loop {
-        let status = avcodec_receive_frame(codec_context, frame);
+        let status = avcodec_receive_frame(video.codec.0, frame);
         if status == fastplay_ffmpeg_error_eagain() || status == fastplay_ffmpeg_error_eof() {
             return Ok(());
         }
         ffmpeg_check(status, "avcodec_receive_frame(video)")?;
 
-        let pixel_format = (*frame).format as AVPixelFormat;
-        if pixel_format != AVPixelFormat_AV_PIX_FMT_D3D11 {
-            av_frame_unref(frame);
-            return Err(format!(
-                "decoder produced unexpected pixel format {} instead of AV_PIX_FMT_D3D11",
-                (*frame).format
-            ));
-        }
+        let result = match &mut video.output {
+            VideoDecoderOutput::Hardware => {
+                let pixel_format = (*frame).format as AVPixelFormat;
+                if pixel_format != AVPixelFormat_AV_PIX_FMT_D3D11 {
+                    av_frame_unref(frame);
+                    return Err(format!(
+                        "decoder produced unexpected pixel format {} instead of AV_PIX_FMT_D3D11",
+                        (*frame).format
+                    ));
+                }
 
-        let surface = device
-            .surface_from_raw_texture(
-                (*frame).data[0].cast::<c_void>(),
-                (*frame).data[1] as usize as u32,
-                (*frame).width as u32,
-                (*frame).height as u32,
-            )
-            .map_err(|error| error.to_string())?;
+                let surface = device
+                    .surface_from_raw_texture(
+                        (*frame).data[0].cast::<c_void>(),
+                        (*frame).data[1] as usize as u32,
+                        (*frame).width as u32,
+                        (*frame).height as u32,
+                    )
+                    .map_err(|error| error.to_string())?;
 
-        let result = PendingVideoFrame {
-            open_gen,
-            seek_gen,
-            op_id,
-            pts: frame_pts((*frame).best_effort_timestamp, (*frame).time_base),
-            width: (*frame).width as u32,
-            height: (*frame).height as u32,
-            surface,
+                PendingVideoFrame::D3D11 {
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                    pts: frame_pts((*frame).best_effort_timestamp, (*frame).time_base),
+                    width: (*frame).width as u32,
+                    height: (*frame).height as u32,
+                    surface,
+                }
+            }
+            VideoDecoderOutput::Software(converter) => {
+                let converted = converter.convert(frame)?;
+                PendingVideoFrame::Software {
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                    pts: frame_pts((*frame).best_effort_timestamp, (*frame).time_base),
+                    width: (*frame).width as u32,
+                    height: (*frame).height as u32,
+                    format: converted.format,
+                    planes: converted.planes,
+                    strides: converted.strides,
+                }
+            }
         };
         av_frame_unref(frame);
         *produced_frames = (*produced_frames).saturating_add(1);
         on_frame(result)?;
+    }
+}
+
+#[derive(Default)]
+struct SoftwareVideoConverter {
+    context: *mut SwsContext,
+    source_width: i32,
+    source_height: i32,
+    source_format: AVPixelFormat,
+}
+
+struct ConvertedSoftwareFrame {
+    format: SoftwareVideoFrameFormat,
+    planes: Vec<Vec<u8>>,
+    strides: Vec<usize>,
+}
+
+impl SoftwareVideoConverter {
+    unsafe fn convert(&mut self, frame: *mut AVFrame) -> Result<ConvertedSoftwareFrame, String> {
+        let width = (*frame).width;
+        let height = (*frame).height;
+        if width <= 0 || height <= 0 {
+            return Err("software decode produced invalid frame dimensions".into());
+        }
+        if width % 2 != 0 || height % 2 != 0 {
+            return Err("software fallback currently supports only even-sized frames".into());
+        }
+
+        let source_format = (*frame).format as AVPixelFormat;
+        if self.context.is_null()
+            || self.source_width != width
+            || self.source_height != height
+            || self.source_format != source_format
+        {
+            self.recreate(width, height, source_format)?;
+        }
+
+        let y_stride = width as usize;
+        let uv_stride = width as usize;
+        let mut y_plane = vec![0u8; y_stride * height as usize];
+        let mut uv_plane = vec![0u8; uv_stride * (height as usize / 2)];
+        let mut dst_data = [y_plane.as_mut_ptr(), uv_plane.as_mut_ptr(), null_mut(), null_mut()];
+        let mut dst_linesize = [y_stride as i32, uv_stride as i32, 0, 0];
+
+        let scaled = sws_scale(
+            self.context,
+            (*frame).data.as_ptr().cast(),
+            (*frame).linesize.as_ptr(),
+            0,
+            height,
+            dst_data.as_mut_ptr(),
+            dst_linesize.as_mut_ptr(),
+        );
+        ffmpeg_check(scaled, "sws_scale(video)")?;
+
+        Ok(ConvertedSoftwareFrame {
+            format: SoftwareVideoFrameFormat::Nv12,
+            planes: vec![y_plane, uv_plane],
+            strides: vec![y_stride, uv_stride],
+        })
+    }
+
+    unsafe fn recreate(
+        &mut self,
+        width: i32,
+        height: i32,
+        source_format: AVPixelFormat,
+    ) -> Result<(), String> {
+        if !self.context.is_null() {
+            sws_freeContext(self.context);
+            self.context = null_mut();
+        }
+
+        self.context = sws_getContext(
+            width,
+            height,
+            source_format,
+            width,
+            height,
+            AVPixelFormat_AV_PIX_FMT_NV12,
+            SWS_BILINEAR_FLAGS,
+            null_mut(),
+            null_mut(),
+            null(),
+        );
+        if self.context.is_null() {
+            return Err(format!(
+                "failed to create software video converter from pixel format {} to NV12",
+                source_format
+            ));
+        }
+
+        self.source_width = width;
+        self.source_height = height;
+        self.source_format = source_format;
+        Ok(())
+    }
+}
+
+impl Drop for SoftwareVideoConverter {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.context.is_null() {
+                sws_freeContext(self.context);
+            }
+        }
     }
 }
 

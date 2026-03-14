@@ -22,7 +22,7 @@ use crate::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
         seek::{PlaybackSnapshot, PositionKind, SeekTarget},
         source::MediaSource,
-        video::DecodedVideoFrame,
+        video::{DecodedVideoFrame, VideoDecodeMode, VideoDecodePreference},
     },
     platform::window::NativeWindow,
     playback::{
@@ -56,6 +56,7 @@ pub struct PlaybackSession {
     operation_clock: OperationClock,
     active_operation_id: Option<OperationId>,
     current_source: Option<MediaSource>,
+    decode_preference: VideoDecodePreference,
     worker_nonce: Arc<AtomicU64>,
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
@@ -78,6 +79,7 @@ pub struct PlaybackSession {
     pending_first_audio_metric: bool,
     video_stream_ended: bool,
     audio_stream_ended: bool,
+    active_decode_mode: Option<VideoDecodeMode>,
     last_error: Option<String>,
 }
 
@@ -100,6 +102,7 @@ impl PlaybackSession {
             operation_clock: OperationClock::default(),
             active_operation_id: None,
             current_source: None,
+            decode_preference: VideoDecodePreference::Auto,
             worker_nonce: Arc::new(AtomicU64::new(0)),
             event_tx,
             event_rx,
@@ -122,6 +125,7 @@ impl PlaybackSession {
             pending_first_audio_metric: false,
             video_stream_ended: false,
             audio_stream_ended: false,
+            active_decode_mode: None,
             last_error: None,
         })
     }
@@ -156,7 +160,9 @@ impl PlaybackSession {
         let open_gen = self.generations.bump_open();
         let seek_gen = self.generations.seek();
         let op_id = self.operation_clock.next();
+        self.decode_preference = source.decode_preference();
         self.current_source = Some(source.clone());
+        self.active_decode_mode = None;
         self.metrics.note_open_requested(now);
         self.measure_open_audio_metric = true;
         self.begin_operation(source, None, open_gen, seek_gen, op_id, PlaybackState::Opening, true, true)?;
@@ -258,7 +264,12 @@ impl PlaybackSession {
             self.state = PlaybackState::Ended;
             self.metrics.note_ended(now);
             eprintln!(
-                "playback_summary presented_frames={} dropped_video_frames={} audio_underruns={}",
+                "playback_summary decode_mode={} hw_fallback_count={} presented_frames={} dropped_video_frames={} audio_underruns={}",
+                self.metrics
+                    .decode_mode()
+                    .map(VideoDecodeMode::label)
+                    .unwrap_or("unknown"),
+                self.metrics.hw_fallback_count(),
                 self.metrics.presented_video_frames(),
                 self.metrics.dropped_video_frames(),
                 self.metrics.audio_underruns()
@@ -274,23 +285,88 @@ impl PlaybackSession {
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match event {
+            SessionEvent::DecodeModeSelected {
+                open_gen,
+                seek_gen,
+                op_id,
+                mode,
+                hw_fallback_count,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                self.active_decode_mode = Some(mode);
+                self.metrics
+                    .note_decode_mode_selected(mode, hw_fallback_count);
+                if mode == VideoDecodeMode::Software {
+                    self.decode_preference = VideoDecodePreference::ForceSoftware;
+                }
+                eprintln!(
+                    "decode_mode={} hw_fallback_count={}",
+                    mode.label(),
+                    self.metrics.hw_fallback_count()
+                );
+            }
             SessionEvent::VideoFrameReady(frame) => {
-                if !self.is_current_frame(frame.open_gen, frame.seek_gen, frame.op_id) {
+                if !self.is_current_frame(frame.open_gen(), frame.seek_gen(), frame.op_id()) {
                     return Ok(());
                 }
 
-                let handle = self
-                    .presenter
-                    .register_surface(frame.open_gen, frame.seek_gen, frame.surface);
-                self.push_video_frame(DecodedVideoFrame::D3D11 {
-                    open_gen: frame.open_gen,
-                    seek_gen: frame.seek_gen,
-                    op_id: frame.op_id,
-                    pts: frame.pts,
-                    width: frame.width,
-                    height: frame.height,
-                    surface: handle,
-                });
+                match frame {
+                    ffmpeg::PendingVideoFrame::D3D11 {
+                        open_gen,
+                        seek_gen,
+                        op_id,
+                        pts,
+                        width,
+                        height,
+                        surface,
+                    } => {
+                        let handle = self.presenter.register_surface(open_gen, seek_gen, surface);
+                        self.push_video_frame(DecodedVideoFrame::D3D11 {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                            pts,
+                            width,
+                            height,
+                            surface: handle,
+                        });
+                    }
+                    ffmpeg::PendingVideoFrame::Software {
+                        open_gen,
+                        seek_gen,
+                        op_id,
+                        pts,
+                        width,
+                        height,
+                        format,
+                        planes,
+                        strides,
+                    } => {
+                        let software_frame = DecodedVideoFrame::Software {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                            pts,
+                            width,
+                            height,
+                            format,
+                            planes,
+                            strides,
+                        };
+                        let handle = self.presenter.upload_software_frame(&software_frame)?;
+                        self.push_video_frame(DecodedVideoFrame::D3D11 {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                            pts,
+                            width,
+                            height,
+                            surface: handle,
+                        });
+                    }
+                }
                 if matches!(self.state, PlaybackState::Opening | PlaybackState::Seeking) {
                     self.state = PlaybackState::Priming;
                 }
@@ -460,6 +536,7 @@ impl PlaybackSession {
         self.pending_first_audio_metric = false;
         self.video_stream_ended = false;
         self.audio_stream_ended = false;
+        self.active_decode_mode = None;
         if reset_audio_expectation {
             self.audio_stream_expected = false;
         }
@@ -500,6 +577,7 @@ impl PlaybackSession {
             .as_ref()
             .map(|sink| sink.format())
             .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
+        let decode_preference = self.decode_preference;
         let worker_nonce = self.worker_nonce.clone();
         let expected_nonce = self.reserve_worker_nonce();
 
@@ -509,9 +587,24 @@ impl PlaybackSession {
                 &device,
                 audio_format,
                 start_position,
+                decode_preference,
                 open_gen,
                 seek_gen,
                 op_id,
+                |mode, hw_fallback_count| {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                        return Err(WORKER_CANCELLED.to_string());
+                    }
+                    sender
+                        .send(SessionEvent::DecodeModeSelected {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                            mode,
+                            hw_fallback_count,
+                        })
+                        .map_err(|_| WORKER_CANCELLED.to_string())
+                },
                 || worker_nonce.load(Ordering::Acquire) != expected_nonce,
                 |frame| {
                     if worker_nonce.load(Ordering::Acquire) != expected_nonce {
@@ -948,6 +1041,7 @@ impl PlaybackSession {
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
+        self.active_decode_mode = None;
         self.state = PlaybackState::Error;
         eprintln!("open failed: {error}");
     }
@@ -957,6 +1051,7 @@ impl PlaybackSession {
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
+        self.active_decode_mode = None;
         self.state = PlaybackState::Error;
         eprintln!("playback failed: {error}");
     }

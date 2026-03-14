@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rustc-link-search=native={}", ffmpeg.lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=avcodec");
     println!("cargo:rustc-link-lib=dylib=avformat");
+    println!("cargo:rustc-link-lib=dylib=swscale");
     println!("cargo:rustc-link-lib=dylib=swresample");
     println!("cargo:rustc-link-lib=dylib=avutil");
 
@@ -176,6 +177,7 @@ fn generate_ffmpeg_bindings(include_dir: &Path) -> Result<(), Box<dyn Error>> {
         .allowlist_type("AV.*")
         .allowlist_type("AVD3D11VA.*")
         .allowlist_type("ID3D11.*")
+        .allowlist_type("SwsContext")
         .allowlist_type("SwrContext")
         .allowlist_function("av_buffer_ref")
         .allowlist_function("av_buffer_unref")
@@ -201,6 +203,7 @@ fn generate_ffmpeg_bindings(include_dir: &Path) -> Result<(), Box<dyn Error>> {
         .allowlist_function("avformat_close_input")
         .allowlist_function("avformat_find_stream_info")
         .allowlist_function("avformat_open_input")
+        .allowlist_function("sws_.*")
         .allowlist_function("swr_.*")
         .allowlist_function("fastplay_ffmpeg_.*")
         .allowlist_var("AV_CH_LAYOUT_.*")
@@ -210,6 +213,7 @@ fn generate_ffmpeg_bindings(include_dir: &Path) -> Result<(), Box<dyn Error>> {
         .allowlist_var("AV_SAMPLE_FMT_.*")
         .allowlist_var("AV_HWDEVICE_TYPE_.*")
         .allowlist_var("AV_CODEC_HW_CONFIG_METHOD_.*")
+        .allowlist_var("SWS_.*")
         .derive_debug(false)
         .layout_tests(false)
         .generate_comments(true)

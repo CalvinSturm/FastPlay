@@ -1,5 +1,6 @@
 use crate::{
     ffi::d3d11::{D3D11Device, VideoSurface},
+    media::video::{DecodedVideoFrame, SoftwareVideoFrameFormat},
     platform::window::NativeWindow,
     render::{
         surface_registry::{SurfaceRegistry, VideoSurfaceHandle},
@@ -82,6 +83,43 @@ impl Presenter {
             return self.current_surface;
         }
         self.current_surface.replace(handle)
+    }
+
+    pub fn upload_software_frame(
+        &mut self,
+        frame: &DecodedVideoFrame,
+    ) -> Result<VideoSurfaceHandle, Box<dyn std::error::Error>> {
+        let DecodedVideoFrame::Software {
+            open_gen,
+            seek_gen,
+            width,
+            height,
+            format,
+            planes,
+            strides,
+            ..
+        } = frame
+        else {
+            return Err("upload_software_frame requires a software frame".into());
+        };
+
+        let surface = match format {
+            SoftwareVideoFrameFormat::Nv12 => {
+                if planes.len() != 2 || strides.len() != 2 {
+                    return Err("NV12 software upload requires two planes and two strides".into());
+                }
+                self.device.upload_nv12_surface(
+                    *width,
+                    *height,
+                    &planes[0],
+                    strides[0],
+                    &planes[1],
+                    strides[1],
+                )?
+            }
+        };
+
+        Ok(self.register_surface(*open_gen, *seek_gen, surface))
     }
 
     pub fn surface_matches(

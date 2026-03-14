@@ -6,6 +6,7 @@
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/samplefmt.h>
+#include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 
 AVStream *fastplay_ffmpeg_stream_at(AVFormatContext *ctx, unsigned int index);

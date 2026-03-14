@@ -1,0 +1,5 @@
+resize_recover_ms=0
+decode_mode=SW hw_fallback_count=0
+open_to_first_frame_ms=35
+open_to_first_audio_ms=35
+playback_summary decode_mode=SW hw_fallback_count=0 presented_frames=90 dropped_video_frames=0 audio_underruns=0
