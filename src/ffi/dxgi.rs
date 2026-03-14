@@ -4,6 +4,7 @@ use std::{
     ffi::{c_void, OsStr},
     fmt,
     os::windows::ffi::OsStrExt,
+    path::PathBuf,
     ptr::null_mut,
     rc::Rc,
 };
@@ -25,18 +26,21 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::GetKeyState,
+            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_LBUTTON},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClientRect, GetWindowLongPtrW, GetWindowPlacement,
-                LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
+                DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowPlacement,
+                LoadCursorW, LoadImageW, PeekMessageW, PostQuitMessage, RegisterClassExW,
                 SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow,
                 TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-                GWL_STYLE, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW, MSG,
+                GWL_STYLE, GWLP_USERDATA, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
+                LR_LOADFROMFILE, MSG,
                 PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
                 WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_CHAR, WM_CLOSE, WM_DESTROY,
-                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCCREATE,
-                WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+                WM_CAPTURECHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_KEYDOWN,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING,
+                WM_NCCREATE, WM_NCLBUTTONDOWN,
+                WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP,
                 WS_VISIBLE,
             },
         },
@@ -48,9 +52,10 @@ use crate::{
     platform::input::InputEvent,
 };
 
+
 const MAX_MESSAGES_PER_PUMP: usize = 64;
 const MODAL_TICK_TIMER_ID: usize = 1;
-const MODAL_TICK_INTERVAL_MS: u32 = 16;
+const MODAL_TICK_INTERVAL_MS: u32 = 1;
 
 #[derive(Debug)]
 pub struct DxgiError(String);
@@ -75,6 +80,7 @@ struct WindowState {
     input_events: RefCell<Vec<InputEvent>>,
     modal_tick_fn: Cell<Option<unsafe fn(*mut c_void)>>,
     modal_tick_ctx: Cell<*mut c_void>,
+    in_modal_move: Cell<bool>,
 }
 
 pub struct NativeWindowInner {
@@ -98,6 +104,7 @@ impl NativeWindowInner {
             input_events: RefCell::new(Vec::new()),
             modal_tick_fn: Cell::new(None),
             modal_tick_ctx: Cell::new(null_mut()),
+            in_modal_move: Cell::new(false),
         });
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
@@ -216,6 +223,99 @@ impl NativeWindowInner {
 
     pub fn is_borderless(&self) -> bool {
         self.is_borderless.get()
+    }
+
+    pub fn is_in_modal_move(&self) -> bool {
+        self.state.in_modal_move.get()
+    }
+
+    pub fn client_size(&self) -> Result<(u32, u32), Box<dyn Error>> {
+        let mut rect = RECT::default();
+        unsafe {
+            GetClientRect(self.hwnd, &mut rect)?;
+        }
+        Ok((
+            (rect.right - rect.left).max(0) as u32,
+            (rect.bottom - rect.top).max(0) as u32,
+        ))
+    }
+
+    pub fn cursor_client_position(&self) -> Result<Option<(i32, i32)>, Box<dyn Error>> {
+        let mut cursor = POINT::default();
+        unsafe {
+            if GetCursorPos(&mut cursor).is_err() {
+                return Ok(None);
+            }
+            if !ScreenToClient(self.hwnd, &mut cursor).as_bool() {
+                return Ok(None);
+            }
+        }
+
+        let (width, height) = self.client_size()?;
+        if cursor.x < 0 || cursor.y < 0 || cursor.x >= width as i32 || cursor.y >= height as i32 {
+            return Ok(None);
+        }
+
+        Ok(Some((cursor.x, cursor.y)))
+    }
+
+    pub fn is_left_button_down(&self) -> bool {
+        unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+    }
+
+    pub fn resize_for_content(&self, content_width: u32, content_height: u32) {
+        if self.is_borderless.get() || content_width == 0 || content_height == 0 {
+            return;
+        }
+
+        unsafe {
+            // Get the work area of the current monitor to clamp the window size.
+            let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return;
+            }
+            let work = info.rcWork;
+            let work_w = (work.right - work.left).max(0) as u32;
+            let work_h = (work.bottom - work.top).max(0) as u32;
+
+            // Scale down to fit the work area if needed, preserving aspect ratio.
+            let mut w = content_width;
+            let mut h = content_height;
+            if w > work_w || h > work_h {
+                let scale_x = work_w as f64 / w as f64;
+                let scale_y = work_h as f64 / h as f64;
+                let scale = scale_x.min(scale_y);
+                w = (w as f64 * scale) as u32;
+                h = (h as f64 * scale) as u32;
+            }
+
+            // Convert client size to window size (accounts for title bar / borders).
+            let Ok((win_w, win_h)) = adjust_window_size(w, h) else {
+                return;
+            };
+
+            // Clamp window size to work area after adding chrome.
+            let win_w = win_w.min(work_w as i32);
+            let win_h = win_h.min(work_h as i32);
+
+            // Centre on the work area.
+            let x = work.left + (work_w as i32 - win_w) / 2;
+            let y = work.top + (work_h as i32 - win_h) / 2;
+
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND_TOP,
+                x,
+                y,
+                win_w,
+                win_h,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
     }
 
     pub fn toggle_borderless_fullscreen(&self) {
@@ -352,6 +452,8 @@ impl DxgiSwapChain {
         device: &D3D11Device,
         clear_color: [f32; 4],
         subtitle_overlay: Option<&SubtitleOverlay>,
+        timeline_overlay: Option<&SubtitleOverlay>,
+        volume_overlay: Option<&SubtitleOverlay>,
     ) -> Result<(), Box<dyn Error>> {
         let render_target = self
             .render_target
@@ -361,7 +463,15 @@ impl DxgiSwapChain {
         device.clear_render_target(render_target, clear_color);
         if let Some(overlay) = subtitle_overlay {
             let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
-            device.render_subtitle_overlay(renderer, overlay, render_target)?;
+            device.render_subtitle_overlay(renderer, overlay, render_target, self.width, self.height)?;
+        }
+        if let Some(overlay) = timeline_overlay {
+            let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(renderer, overlay, render_target, self.width, self.height)?;
+        }
+        if let Some(overlay) = volume_overlay {
+            let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(renderer, overlay, render_target, self.width, self.height)?;
         }
 
         // SAFETY:
@@ -380,6 +490,8 @@ impl DxgiSwapChain {
         device: &D3D11Device,
         surface: &VideoSurface,
         subtitle_overlay: Option<&SubtitleOverlay>,
+        timeline_overlay: Option<&SubtitleOverlay>,
+        volume_overlay: Option<&SubtitleOverlay>,
         view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn Error>> {
         let backbuffer = self
@@ -400,7 +512,23 @@ impl DxgiSwapChain {
                 .as_ref()
                 .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
             let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
-            device.render_subtitle_overlay(renderer, overlay, render_target)?;
+            device.render_subtitle_overlay(renderer, overlay, render_target, output_width, output_height)?;
+        }
+        if let Some(overlay) = timeline_overlay {
+            let render_target = self
+                .render_target
+                .as_ref()
+                .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
+            let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(renderer, overlay, render_target, output_width, output_height)?;
+        }
+        if let Some(overlay) = volume_overlay {
+            let render_target = self
+                .render_target
+                .as_ref()
+                .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
+            let renderer = self.subtitle_renderer.get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(renderer, overlay, render_target, output_width, output_height)?;
         }
 
         unsafe {
@@ -497,11 +625,16 @@ fn module_handle() -> Result<HINSTANCE, Box<dyn Error>> {
 
 fn register_window_class(instance: HINSTANCE, class_name: PCWSTR) -> Result<(), Box<dyn Error>> {
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW)? };
-    let class = WNDCLASSW {
+    let icon = load_fastplay_icon(32, 32);
+    let small_icon = load_fastplay_icon(16, 16);
+    let class = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(window_proc),
         hInstance: instance,
         hCursor: cursor,
+        hIcon: icon,
+        hIconSm: small_icon,
         lpszClassName: class_name,
         ..Default::default()
     };
@@ -509,12 +642,49 @@ fn register_window_class(instance: HINSTANCE, class_name: PCWSTR) -> Result<(), 
     // SAFETY:
     // - class structure references static data and a valid window procedure
     // - M0 registers a single process-local class for one native shell window
-    let atom = unsafe { RegisterClassW(&class) };
+    let atom = unsafe { RegisterClassExW(&class) };
     if atom == 0 {
-        return Err(Box::new(DxgiError("RegisterClassW failed".into())));
+        return Err(Box::new(DxgiError("RegisterClassExW failed".into())));
     }
 
     Ok(())
+}
+
+fn load_fastplay_icon(width: i32, height: i32) -> HICON {
+    let icon_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("icon")
+        .join("fastplay.ico");
+    let icon_wide: Vec<u16> = icon_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+
+    let handle = unsafe {
+        LoadImageW(
+            None,
+            PCWSTR(icon_wide.as_ptr()),
+            IMAGE_ICON,
+            width,
+            height,
+            LR_LOADFROMFILE,
+        )
+    };
+
+    match handle {
+        Ok(handle) => HICON(handle.0),
+        Err(error) => {
+            eprintln!(
+                "icon load fallback path={} width={} height={} error={}",
+                icon_path.display(),
+                width,
+                height,
+                error
+            );
+            HICON::default()
+        }
+    }
 }
 
 fn adjust_window_size(width: u32, height: u32) -> Result<(i32, i32), Box<dyn Error>> {
@@ -595,6 +765,25 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::ToggleBorderlessFullscreen);
                     }
+                    0x52 if ctrl_held => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::RotateClockwise);
+                    }
+                    // R (no modifier) → toggle auto-replay
+                    0x52 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ToggleAutoReplay);
+                    }
+                    0x45 if ctrl_held => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::RotateCounterClockwise);
+                    }
                     // Ctrl+0 → reset view
                     0x30 if ctrl_held => {
                         state
@@ -648,6 +837,15 @@ unsafe extern "system" fn window_proc(
                         cursor_x: pt.x,
                         cursor_y: pt.y,
                     });
+                } else {
+                    let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
+                    let steps = if delta > 0 { 1 } else if delta < 0 { -1 } else { 0 };
+                    if steps != 0 {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::AdjustVolumeSteps(steps));
+                    }
                 }
             }
             LRESULT(0)
@@ -664,7 +862,52 @@ unsafe extern "system" fn window_proc(
             }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
+        WM_NCLBUTTONDOWN => {
+            // DefWindowProcW enters a modal drag-threshold tracking loop on
+            // caption clicks.  During that wait WM_ENTERSIZEMOVE hasn't fired
+            // yet, so playback freezes.  Start the modal tick timer immediately
+            // to cover the gap, then let DefWindowProcW handle the actual move
+            // so Windows snap (Aero Snap) still works.
+            const HTCAPTION: usize = 2;
+            if wparam.0 == HTCAPTION {
+                if let Some(state) = window_state(hwnd) {
+                    state.in_modal_move.set(true);
+                }
+                unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                        hwnd,
+                        MODAL_TICK_TIMER_ID,
+                        MODAL_TICK_INTERVAL_MS,
+                        None,
+                    );
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        WM_MOUSEMOVE => {
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            LRESULT(0)
+        }
+        WM_MOVING => {
+            // WM_MOVING fires reliably during the modal move loop, unlike
+            // WM_TIMER which has the lowest message priority and can be starved.
+            if let Some(state) = window_state(hwnd) {
+                if let Some(tick_fn) = state.modal_tick_fn.get() {
+                    let ctx = state.modal_tick_ctx.get();
+                    tick_fn(ctx);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_ENTERSIZEMOVE => {
+            if let Some(state) = window_state(hwnd) {
+                state.in_modal_move.set(true);
+            }
             unsafe {
                 windows::Win32::UI::WindowsAndMessaging::SetTimer(
                     hwnd,
@@ -676,6 +919,9 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_EXITSIZEMOVE => {
+            if let Some(state) = window_state(hwnd) {
+                state.in_modal_move.set(false);
+            }
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
                     hwnd,

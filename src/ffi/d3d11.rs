@@ -18,9 +18,11 @@ use windows::{
                 D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_ELEMENT_DESC,
                 D3D11_INPUT_PER_VERTEX_DATA, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
                 D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
-                D3D11_TEX2D_VPIV,
+                D3D11_TEX2D_VPIV, D3D11_VIEWPORT,
                 D3D11_TEX2D_VPOV, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
                 D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                D3D11_VIDEO_PROCESSOR_ROTATION_90, D3D11_VIDEO_PROCESSOR_ROTATION_180,
+                D3D11_VIDEO_PROCESSOR_ROTATION_270, D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
                 D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
                 D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
@@ -35,7 +37,8 @@ use windows::{
                 CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW,
                 SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
                 CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER,
-                DT_NOPREFIX, DT_WORDBREAK, FF_DONTCARE, FW_SEMIBOLD, HGDIOBJ,
+                DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
+                FF_DONTCARE, FW_MEDIUM, FW_SEMIBOLD, HGDIOBJ,
                 OUT_DEFAULT_PRECIS, TRANSPARENT, DEFAULT_CHARSET, DEFAULT_PITCH,
             },
         },
@@ -274,9 +277,15 @@ impl D3D11Device {
                 .video_device
                 .CreateVideoProcessorEnumerator(&content_desc)?;
             let processor = self.video_device.CreateVideoProcessor(&enumerator, 0)?;
+            let rotation_quarter_turns = view.rotation_quarter_turns % 4;
+            let (display_width, display_height) = if rotation_quarter_turns % 2 == 1 {
+                (surface.height, surface.width)
+            } else {
+                (surface.width, surface.height)
+            };
             let base_rect = aspect_fit_rect(
-                surface.width,
-                surface.height,
+                display_width,
+                display_height,
                 output_width,
                 output_height,
             );
@@ -347,6 +356,17 @@ impl D3D11Device {
                 D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
                 BOOL(0),
                 None,
+            );
+            self.video_context.VideoProcessorSetStreamRotation(
+                &processor,
+                0,
+                BOOL(1),
+                match view.rotation_quarter_turns % 4 {
+                    1 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
+                    2 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
+                    3 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
+                    _ => D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+                },
             );
             self.video_context.VideoProcessorSetStreamSourceRect(
                 &processor,
@@ -554,18 +574,166 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         }))
     }
 
+    pub(crate) fn create_timeline_overlay(
+        &self,
+        model: &crate::render::timeline::TimelineOverlayModel,
+    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
+        let Some(bitmap) = render_timeline_bitmap(model)? else {
+            return Ok(None);
+        };
+
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: bitmap.width,
+            Height: bitmap.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: bitmap.pixels.as_ptr().cast(),
+            SysMemPitch: bitmap.width.saturating_mul(4),
+            SysMemSlicePitch: 0,
+        };
+        let mut texture = None;
+        let mut shader_resource_view = None;
+        let vertices = timeline_quad_vertices(bitmap.width, bitmap.height, model.viewport_height);
+        let vertex_buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+        let vertex_buffer_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: vertices.as_ptr().cast(),
+            SysMemPitch: 0,
+            SysMemSlicePitch: 0,
+        };
+        let mut vertex_buffer = None;
+
+        unsafe {
+            self.device
+                .CreateTexture2D(&texture_desc, Some(&initial_data), Some(&mut texture))?;
+            self.device.CreateShaderResourceView(
+                texture
+                    .as_ref()
+                    .ok_or(D3D11Error("CreateTexture2D returned no timeline texture"))?,
+                None,
+                Some(&mut shader_resource_view),
+            )?;
+            self.device.CreateBuffer(
+                &vertex_buffer_desc,
+                Some(&vertex_buffer_data),
+                Some(&mut vertex_buffer),
+            )?;
+        }
+
+        Ok(Some(SubtitleOverlay {
+            shader_resource_view: shader_resource_view.ok_or(D3D11Error(
+                "CreateShaderResourceView returned no timeline view",
+            ))?,
+            vertex_buffer: vertex_buffer
+                .ok_or(D3D11Error("CreateBuffer returned no timeline vertex buffer"))?,
+        }))
+    }
+
+    pub(crate) fn create_volume_overlay(
+        &self,
+        text: &str,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
+        let Some(bitmap) = render_volume_bitmap(text)? else {
+            return Ok(None);
+        };
+
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: bitmap.width,
+            Height: bitmap.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: bitmap.pixels.as_ptr().cast(),
+            SysMemPitch: bitmap.width.saturating_mul(4),
+            SysMemSlicePitch: 0,
+        };
+        let mut texture = None;
+        let mut shader_resource_view = None;
+        let vertices = volume_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
+        let vertex_buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+        let vertex_buffer_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: vertices.as_ptr().cast(),
+            SysMemPitch: 0,
+            SysMemSlicePitch: 0,
+        };
+        let mut vertex_buffer = None;
+
+        unsafe {
+            self.device
+                .CreateTexture2D(&texture_desc, Some(&initial_data), Some(&mut texture))?;
+            self.device.CreateShaderResourceView(
+                texture
+                    .as_ref()
+                    .ok_or(D3D11Error("CreateTexture2D returned no volume texture"))?,
+                None,
+                Some(&mut shader_resource_view),
+            )?;
+            self.device
+                .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
+        }
+
+        Ok(Some(SubtitleOverlay {
+            shader_resource_view: shader_resource_view.ok_or(D3D11Error(
+                "CreateShaderResourceView returned no volume view",
+            ))?,
+            vertex_buffer: vertex_buffer
+                .ok_or(D3D11Error("CreateBuffer returned no volume vertex buffer"))?,
+        }))
+    }
+
     pub(crate) fn render_subtitle_overlay(
         &self,
         renderer: &SubtitleRenderer,
         overlay: &SubtitleOverlay,
         render_target: &RenderTargetView,
+        viewport_width: u32,
+        viewport_height: u32,
     ) -> Result<(), Box<dyn Error>> {
         let stride = size_of::<SubtitleVertex>() as u32;
         let offset = 0u32;
+        let viewport = D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: viewport_width.max(1) as f32,
+            Height: viewport_height.max(1) as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
 
         unsafe {
             self.context
                 .OMSetRenderTargets(Some(&[Some(render_target.view.clone())]), None);
+            self.context.RSSetViewports(Some(&[viewport]));
             self.context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             self.context
@@ -698,6 +866,53 @@ fn subtitle_quad_vertices(
     let left_px = ((viewport_width.saturating_sub(overlay_width)) / 2) as f32;
     let right_px = left_px + overlay_width as f32;
     let top_px = (viewport_height as f32 - margin - overlay_height as f32).max(0.0);
+    let bottom_px = (top_px + overlay_height as f32).min(viewport_height as f32);
+
+    let left = left_px / viewport_width as f32 * 2.0 - 1.0;
+    let right = right_px / viewport_width as f32 * 2.0 - 1.0;
+    let top = 1.0 - top_px / viewport_height as f32 * 2.0;
+    let bottom = 1.0 - bottom_px / viewport_height as f32 * 2.0;
+
+    [
+        SubtitleVertex { position: [left, top, 0.0], texcoord: [0.0, 0.0] },
+        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
+        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
+        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
+        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
+        SubtitleVertex { position: [right, bottom, 0.0], texcoord: [1.0, 1.0] },
+    ]
+}
+
+fn timeline_quad_vertices(
+    _overlay_width: u32,
+    overlay_height: u32,
+    viewport_height: u32,
+) -> [SubtitleVertex; 6] {
+    let top_px = (viewport_height as i32 - overlay_height as i32 - 10).max(0) as f32;
+    let bottom_px = (top_px + overlay_height as f32).min(viewport_height as f32);
+    let top = 1.0 - top_px / viewport_height as f32 * 2.0;
+    let bottom = 1.0 - bottom_px / viewport_height as f32 * 2.0;
+
+    [
+        SubtitleVertex { position: [-1.0, top, 0.0], texcoord: [0.0, 0.0] },
+        SubtitleVertex { position: [1.0, top, 0.0], texcoord: [1.0, 0.0] },
+        SubtitleVertex { position: [-1.0, bottom, 0.0], texcoord: [0.0, 1.0] },
+        SubtitleVertex { position: [-1.0, bottom, 0.0], texcoord: [0.0, 1.0] },
+        SubtitleVertex { position: [1.0, top, 0.0], texcoord: [1.0, 0.0] },
+        SubtitleVertex { position: [1.0, bottom, 0.0], texcoord: [1.0, 1.0] },
+    ]
+}
+
+fn volume_quad_vertices(
+    overlay_width: u32,
+    overlay_height: u32,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> [SubtitleVertex; 6] {
+    let margin = 16.0f32;
+    let right_px = (viewport_width as f32 - margin).max(overlay_width as f32);
+    let left_px = (right_px - overlay_width as f32).max(0.0);
+    let top_px = margin;
     let bottom_px = (top_px + overlay_height as f32).min(viewport_height as f32);
 
     let left = left_px / viewport_width as f32 * 2.0 - 1.0;
@@ -998,5 +1213,373 @@ fn render_subtitle_bitmap(
             height: bitmap_height,
             pixels,
         }))
+    }
+}
+
+fn render_timeline_bitmap(
+    model: &crate::render::timeline::TimelineOverlayModel,
+) -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
+    if model.viewport_width == 0 || model.viewport_height == 0 || model.duration_secs == 0 {
+        return Ok(None);
+    }
+
+    let width = model.viewport_width;
+    let height = crate::render::timeline::TIMELINE_HEIGHT_PX;
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let layout = crate::render::timeline::layout(model.viewport_width, model.viewport_height);
+    let track_top = (layout.track_top - layout.top).max(0) as u32;
+    let track_bottom = (layout.track_bottom - layout.top).max(track_top as i32 + 1) as u32;
+    let track_left = layout.track_left.max(0) as u32;
+    let track_right = layout.track_right.max(layout.track_left + 1) as u32;
+
+    fill_rect(
+        &mut pixels,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+        [12, 14, 18, 220],
+    );
+    fill_rect(
+        &mut pixels,
+        width,
+        height,
+        track_left,
+        track_top,
+        track_right,
+        track_bottom,
+        [255, 255, 255, 140],
+    );
+    fill_rect(
+        &mut pixels,
+        width,
+        height,
+        track_left,
+        track_top,
+        (track_left + model.played_px).min(track_right),
+        track_bottom,
+        [255, 255, 255, 255],
+    );
+    fill_circle(
+        &mut pixels,
+        width,
+        height,
+        model.handle_center_x.clamp(layout.track_left, layout.track_right) as u32,
+        track_top + ((track_bottom - track_top) / 2),
+        9,
+        [12, 14, 18, 255],
+    );
+    fill_circle(
+        &mut pixels,
+        width,
+        height,
+        model.handle_center_x.clamp(layout.track_left, layout.track_right) as u32,
+        track_top + ((track_bottom - track_top) / 2),
+        7,
+        [255, 255, 255, 245],
+    );
+
+    let left_label = match model.preview_position_secs {
+        Some(preview_secs) => format!(
+            "{} -> {}",
+            crate::render::timeline::format_timestamp(model.current_position_secs),
+            crate::render::timeline::format_timestamp(preview_secs)
+        ),
+        None => crate::render::timeline::format_timestamp(model.current_position_secs),
+    };
+    let right_label = crate::render::timeline::format_timestamp(model.duration_secs);
+
+    draw_timeline_label(&mut pixels, width, height, &left_label, true)?;
+    if model.loop_enabled {
+        let right_label = format!("\u{27F3}  {right_label}");
+        draw_timeline_label(&mut pixels, width, height, &right_label, false)?;
+    } else {
+        draw_timeline_label(&mut pixels, width, height, &right_label, false)?;
+    }
+
+    Ok(Some(SubtitleBitmap { width, height, pixels }))
+}
+
+fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let padding_x = 14i32;
+    let padding_y = 8i32;
+    let mut text_rect = RECT {
+        left: 0,
+        top: 0,
+        right: 160,
+        bottom: 0,
+    };
+    let mut text_wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            return Err(Box::new(D3D11Error("CreateCompatibleDC returned null")));
+        }
+
+        let font = CreateFontW(
+            -18,
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+            windows::core::w!("Segoe UI"),
+        );
+        if font.0.is_null() {
+            let _ = DeleteDC(dc);
+            return Err(Box::new(D3D11Error("CreateFontW returned null")));
+        }
+
+        let old_font = SelectObject(dc, HGDIOBJ(font.0));
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let _ = SetTextColor(dc, COLORREF(0x00FF_FFFF));
+        let _ = DrawTextW(
+            dc,
+            &mut text_wide,
+            &mut text_rect,
+            DT_CALCRECT | DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+
+        let bitmap_width = (text_rect.right - text_rect.left + padding_x * 2).max(1) as u32;
+        let bitmap_height = (text_rect.bottom - text_rect.top + padding_y * 2).max(1) as u32;
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: bitmap_width as i32,
+            biHeight: -(bitmap_height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = null_mut();
+        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        if bitmap.0.is_null() || bits.is_null() {
+            let _ = SelectObject(dc, old_font);
+            let _ = DeleteObject(HGDIOBJ(font.0));
+            let _ = DeleteDC(dc);
+            return Err(Box::new(D3D11Error("CreateDIBSection failed for volume overlay")));
+        }
+
+        let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+        std::ptr::write_bytes(bits, 0, (bitmap_width * bitmap_height * 4) as usize);
+        let source = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (bitmap_width * bitmap_height * 4) as usize);
+        fill_rect(
+            source,
+            bitmap_width,
+            bitmap_height,
+            0,
+            0,
+            bitmap_width,
+            bitmap_height,
+            [12, 14, 18, 208],
+        );
+
+        let mut draw_rect = RECT {
+            left: padding_x,
+            top: padding_y,
+            right: bitmap_width as i32 - padding_x,
+            bottom: bitmap_height as i32 - padding_y,
+        };
+        let _ = DrawTextW(
+            dc,
+            &mut text_wide,
+            &mut draw_rect,
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+
+        let source: &[u8] =
+            std::slice::from_raw_parts(bits.cast::<u8>(), (bitmap_width * bitmap_height * 4) as usize);
+        let mut pixels = vec![0u8; source.len()];
+        pixels.copy_from_slice(source);
+        for px in pixels.chunks_exact_mut(4) {
+            let intensity = px[0].max(px[1]).max(px[2]);
+            if intensity > 0 && px[3] == 0 {
+                px[0] = 255;
+                px[1] = 255;
+                px[2] = 255;
+                px[3] = intensity.max(190);
+            }
+        }
+
+        let _ = SelectObject(dc, old_bitmap);
+        let _ = SelectObject(dc, old_font);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteDC(dc);
+
+        Ok(Some(SubtitleBitmap {
+            width: bitmap_width,
+            height: bitmap_height,
+            pixels,
+        }))
+    }
+}
+
+fn draw_timeline_label(
+    destination_pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    text: &str,
+    align_left: bool,
+) -> Result<(), Box<dyn Error>> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let mut text_wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let mut draw_rect = RECT {
+        left: 12,
+        top: 0,
+        right: width as i32 - 12,
+        bottom: 18,
+    };
+    let draw_flags = if align_left {
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX
+    } else {
+        DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX
+    };
+
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            return Err(Box::new(D3D11Error("CreateCompatibleDC returned null")));
+        }
+
+        let font = CreateFontW(
+            -14,
+            0,
+            0,
+            0,
+            FW_MEDIUM.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+            windows::core::w!("Segoe UI"),
+        );
+        if font.0.is_null() {
+            let _ = DeleteDC(dc);
+            return Err(Box::new(D3D11Error("CreateFontW returned null")));
+        }
+
+        let old_font = SelectObject(dc, HGDIOBJ(font.0));
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = null_mut();
+        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        if bitmap.0.is_null() || bits.is_null() {
+            let _ = SelectObject(dc, old_font);
+            let _ = DeleteObject(HGDIOBJ(font.0));
+            let _ = DeleteDC(dc);
+            return Err(Box::new(D3D11Error("CreateDIBSection failed for timeline label")));
+        }
+
+        let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+        std::ptr::write_bytes(bits, 0, (width * height * 4) as usize);
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let _ = SetTextColor(dc, COLORREF(0x00FF_FFFF));
+        let _ = DrawTextW(dc, &mut text_wide, &mut draw_rect, draw_flags);
+
+        let source =
+            std::slice::from_raw_parts(bits.cast::<u8>(), (width * height * 4) as usize);
+        for (source_px, dest_px) in source.chunks_exact(4).zip(destination_pixels.chunks_exact_mut(4))
+        {
+            let intensity = source_px[0].max(source_px[1]).max(source_px[2]);
+            if intensity == 0 {
+                continue;
+            }
+
+            dest_px[0] = 255;
+            dest_px[1] = 255;
+            dest_px[2] = 255;
+            dest_px[3] = dest_px[3].max(intensity.max(170));
+        }
+
+        let _ = SelectObject(dc, old_bitmap);
+        let _ = SelectObject(dc, old_font);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteDC(dc);
+    }
+
+    Ok(())
+}
+
+fn fill_rect(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    color: [u8; 4],
+) {
+    let left = left.min(width);
+    let right = right.min(width);
+    let top = top.min(height);
+    let bottom = bottom.min(height);
+
+    for y in top..bottom {
+        for x in left..right {
+            let offset = ((y * width + x) * 4) as usize;
+            pixels[offset..offset + 4].copy_from_slice(&color);
+        }
+    }
+}
+
+fn fill_circle(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: u32,
+    center_y: u32,
+    radius: u32,
+    color: [u8; 4],
+) {
+    let radius_sq = (radius * radius) as i32;
+    let min_x = center_x.saturating_sub(radius) as i32;
+    let max_x = (center_x + radius).min(width.saturating_sub(1)) as i32;
+    let min_y = center_y.saturating_sub(radius) as i32;
+    let max_y = (center_y + radius).min(height.saturating_sub(1)) as i32;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x - center_x as i32;
+            let dy = y - center_y as i32;
+            if dx * dx + dy * dy > radius_sq {
+                continue;
+            }
+
+            let offset = (((y as u32) * width + x as u32) * 4) as usize;
+            pixels[offset..offset + 4].copy_from_slice(&color);
+        }
     }
 }

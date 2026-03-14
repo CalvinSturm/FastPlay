@@ -37,6 +37,22 @@ int fastplay_ffmpeg_error_stream_not_found(void) {
     return AVERROR_STREAM_NOT_FOUND;
 }
 
+int64_t fastplay_ffmpeg_duration_micros(AVFormatContext *ctx) {
+    if (!ctx || ctx->duration == AV_NOPTS_VALUE) {
+        return AV_NOPTS_VALUE;
+    }
+
+    return ctx->duration;
+}
+
+int64_t fastplay_ffmpeg_start_time_micros(AVFormatContext *ctx) {
+    if (!ctx || ctx->start_time == AV_NOPTS_VALUE) {
+        return AV_NOPTS_VALUE;
+    }
+
+    return ctx->start_time;
+}
+
 int fastplay_ffmpeg_seek_to_micros(AVFormatContext *ctx, int64_t timestamp_micros) {
     if (!ctx) {
         return AVERROR(EINVAL);

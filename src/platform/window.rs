@@ -52,12 +52,32 @@ impl NativeWindow {
         self.inner.take_input_events()
     }
 
+    pub fn resize_for_content(&self, content_width: u32, content_height: u32) {
+        self.inner.resize_for_content(content_width, content_height);
+    }
+
     pub fn toggle_borderless_fullscreen(&self) {
         self.inner.toggle_borderless_fullscreen();
     }
 
     pub fn is_borderless(&self) -> bool {
         self.inner.is_borderless()
+    }
+
+    pub fn client_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+        self.inner.client_size()
+    }
+
+    pub fn cursor_client_position(&self) -> Result<Option<(i32, i32)>, Box<dyn std::error::Error>> {
+        self.inner.cursor_client_position()
+    }
+
+    pub fn is_left_button_down(&self) -> bool {
+        self.inner.is_left_button_down()
+    }
+
+    pub fn is_in_modal_move(&self) -> bool {
+        self.inner.is_in_modal_move()
     }
 
     pub(crate) fn raw_window(&self) -> &NativeWindowInner {

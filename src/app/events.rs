@@ -17,6 +17,12 @@ pub enum SessionEvent {
         mode: VideoDecodeMode,
         hw_fallback_count: u64,
     },
+    MediaDurationKnown {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        duration: std::time::Duration,
+    },
     VideoFrameReady(PendingVideoFrame),
     AudioFrameReady(PendingAudioFrame),
     VideoStreamEnded {
