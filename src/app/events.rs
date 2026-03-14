@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 
+use crate::ffi::ffmpeg::PendingVideoFrame;
 use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 
 /// All asynchronous completions flow through this enum so the coordinator stays
 /// the only state owner.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum SessionEvent {
+    VideoFrameReady(PendingVideoFrame),
     OpenFailed {
         open_gen: OpenGeneration,
         op_id: OperationId,

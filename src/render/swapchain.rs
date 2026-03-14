@@ -1,5 +1,8 @@
 use crate::{
-    ffi::{d3d11::D3D11Device, dxgi::DxgiSwapChain},
+    ffi::{
+        d3d11::{D3D11Device, VideoSurface},
+        dxgi::DxgiSwapChain,
+    },
     platform::window::NativeWindow,
 };
 
@@ -33,6 +36,15 @@ impl SwapChainPresenter {
         height: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.swap_chain.resize(device, width, height)?;
+        Ok(())
+    }
+
+    pub fn render_surface(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.swap_chain.render_surface(device, surface)?;
         Ok(())
     }
 }

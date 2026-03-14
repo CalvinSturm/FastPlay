@@ -2,16 +2,20 @@
 
 use std::collections::HashMap;
 
-use crate::playback::generations::{OpenGeneration, SeekGeneration};
+use crate::{
+    ffi::d3d11::VideoSurface,
+    playback::generations::{OpenGeneration, SeekGeneration},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VideoSurfaceHandle(pub(crate) u64);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct SurfaceEntry {
     pub registry_epoch: u64,
     pub open_gen: OpenGeneration,
     pub seek_gen: SeekGeneration,
+    pub surface: VideoSurface,
 }
 
 #[derive(Debug, Default)]
@@ -31,6 +35,7 @@ impl SurfaceRegistry {
         &mut self,
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,
+        surface: VideoSurface,
     ) -> VideoSurfaceHandle {
         self.next_handle = self.next_handle.saturating_add(1);
         let handle = VideoSurfaceHandle(self.next_handle);
@@ -40,6 +45,7 @@ impl SurfaceRegistry {
                 registry_epoch: self.epoch,
                 open_gen,
                 seek_gen,
+                surface,
             },
         );
         handle
@@ -47,5 +53,9 @@ impl SurfaceRegistry {
 
     pub fn contains(&self, handle: VideoSurfaceHandle) -> bool {
         self.entries.contains_key(&handle)
+    }
+
+    pub fn get(&self, handle: VideoSurfaceHandle) -> Option<&SurfaceEntry> {
+        self.entries.get(&handle)
     }
 }

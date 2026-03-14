@@ -28,7 +28,7 @@ use windows::{
     },
 };
 
-use crate::ffi::d3d11::{D3D11Device, RenderTargetView};
+use crate::ffi::d3d11::{D3D11Device, RenderTargetView, VideoSurface};
 
 #[derive(Debug)]
 pub struct DxgiError(String);
@@ -166,7 +166,10 @@ impl Drop for NativeWindowInner {
 
 pub struct DxgiSwapChain {
     swap_chain: IDXGISwapChain1,
+    backbuffer: Option<ID3D11Texture2D>,
     render_target: Option<RenderTargetView>,
+    width: u32,
+    height: u32,
 }
 
 impl DxgiSwapChain {
@@ -201,11 +204,14 @@ impl DxgiSwapChain {
             factory.CreateSwapChainForHwnd(&dxgi_device, window.hwnd(), &desc, None, None)?
         };
 
-        let render_target = create_backbuffer_rtv(device, &swap_chain)?;
+        let (backbuffer, render_target) = create_backbuffer_state(device, &swap_chain)?;
 
         Ok(Self {
             swap_chain,
+            backbuffer: Some(backbuffer),
             render_target: Some(render_target),
+            width: 0,
+            height: 0,
         })
     }
 
@@ -232,6 +238,31 @@ impl DxgiSwapChain {
         Ok(())
     }
 
+    pub fn render_surface(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+    ) -> Result<(), Box<dyn Error>> {
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("swap-chain backbuffer texture is not bound".into()))?;
+
+        let (output_width, output_height) = if self.width == 0 || self.height == 0 {
+            current_backbuffer_size(backbuffer)?
+        } else {
+            (self.width, self.height)
+        };
+
+        device.render_video_surface(surface, backbuffer, output_width, output_height)?;
+
+        unsafe {
+            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+        }
+
+        Ok(())
+    }
+
     pub fn resize(
         &mut self,
         device: &D3D11Device,
@@ -243,6 +274,7 @@ impl DxgiSwapChain {
         }
 
         // Drop swap-chain-dependent views before ResizeBuffers.
+        self.backbuffer = None;
         self.render_target = None;
 
         // SAFETY:
@@ -259,20 +291,35 @@ impl DxgiSwapChain {
             )?;
         }
 
-        self.render_target = Some(create_backbuffer_rtv(device, &self.swap_chain)?);
+        let (backbuffer, render_target) = create_backbuffer_state(device, &self.swap_chain)?;
+        self.backbuffer = Some(backbuffer);
+        self.render_target = Some(render_target);
+        self.width = width;
+        self.height = height;
         Ok(())
     }
 }
 
-fn create_backbuffer_rtv(
+fn create_backbuffer_state(
     device: &D3D11Device,
     swap_chain: &IDXGISwapChain1,
-) -> Result<RenderTargetView, Box<dyn Error>> {
+) -> Result<(ID3D11Texture2D, RenderTargetView), Box<dyn Error>> {
     // SAFETY:
     // - buffer index 0 exists for the swap chain's backbuffer
     // - requested interface matches the underlying texture type
     let backbuffer: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0)? };
-    device.create_render_target_view(&backbuffer)
+    let render_target = device.create_render_target_view(&backbuffer)?;
+    Ok((backbuffer, render_target))
+}
+
+fn current_backbuffer_size(backbuffer: &ID3D11Texture2D) -> Result<(u32, u32), Box<dyn Error>> {
+    let mut desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+
+    unsafe {
+        backbuffer.GetDesc(&mut desc);
+    }
+
+    Ok((desc.Width, desc.Height))
 }
 
 fn create_factory() -> Result<IDXGIFactory2, Box<dyn Error>> {

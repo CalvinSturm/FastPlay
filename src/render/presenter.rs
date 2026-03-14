@@ -1,14 +1,17 @@
 use crate::{
-    ffi::d3d11::D3D11Device,
+    ffi::d3d11::{D3D11Device, VideoSurface},
     platform::window::NativeWindow,
-    render::{surface_registry::SurfaceRegistry, swapchain::SwapChainPresenter},
+    render::{
+        surface_registry::{SurfaceRegistry, VideoSurfaceHandle},
+        swapchain::SwapChainPresenter,
+    },
 };
 
 pub struct Presenter {
     device: D3D11Device,
     swap_chain: SwapChainPresenter,
-    #[allow(dead_code)]
     surfaces: SurfaceRegistry,
+    current_surface: Option<VideoSurfaceHandle>,
 }
 
 impl Presenter {
@@ -20,10 +23,19 @@ impl Presenter {
             device,
             swap_chain,
             surfaces: SurfaceRegistry::default(),
+            current_surface: None,
         })
     }
 
     pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(handle) = self.current_surface {
+            if let Some(entry) = self.surfaces.get(handle) {
+                self.swap_chain
+                    .render_surface(&self.device, &entry.surface)?;
+                return Ok(());
+            }
+        }
+
         self.swap_chain
             .render(&self.device, [0.08, 0.10, 0.14, 1.0])?;
         Ok(())
@@ -32,5 +44,26 @@ impl Presenter {
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
         self.swap_chain.resize(&self.device, width, height)?;
         Ok(())
+    }
+
+    pub fn device(&self) -> &D3D11Device {
+        &self.device
+    }
+
+    pub fn register_surface(
+        &mut self,
+        open_gen: crate::playback::generations::OpenGeneration,
+        seek_gen: crate::playback::generations::SeekGeneration,
+        surface: VideoSurface,
+    ) -> VideoSurfaceHandle {
+        self.surfaces.insert(open_gen, seek_gen, surface)
+    }
+
+    pub fn select_surface(&mut self, handle: VideoSurfaceHandle) {
+        self.current_surface = Some(handle);
+    }
+
+    pub fn has_selected_surface(&self) -> bool {
+        self.current_surface.is_some()
     }
 }
