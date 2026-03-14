@@ -58,4 +58,8 @@ impl SurfaceRegistry {
     pub fn get(&self, handle: VideoSurfaceHandle) -> Option<&SurfaceEntry> {
         self.entries.get(&handle)
     }
+
+    pub fn remove(&mut self, handle: VideoSurfaceHandle) -> Option<SurfaceEntry> {
+        self.entries.remove(&handle)
+    }
 }

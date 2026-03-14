@@ -8,8 +8,19 @@ use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 #[derive(Debug)]
 pub enum SessionEvent {
     VideoFrameReady(PendingVideoFrame),
+    VideoStreamEnded {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+    },
     OpenFailed {
         open_gen: OpenGeneration,
+        op_id: OperationId,
+        error: String,
+    },
+    PlaybackFailed {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
         op_id: OperationId,
         error: String,
     },

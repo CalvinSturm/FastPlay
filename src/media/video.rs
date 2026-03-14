@@ -19,3 +19,35 @@ pub enum DecodedVideoFrame {
         surface: VideoSurfaceHandle,
     },
 }
+
+impl DecodedVideoFrame {
+    pub fn open_gen(&self) -> OpenGeneration {
+        match self {
+            Self::D3D11 { open_gen, .. } => *open_gen,
+        }
+    }
+
+    pub fn seek_gen(&self) -> SeekGeneration {
+        match self {
+            Self::D3D11 { seek_gen, .. } => *seek_gen,
+        }
+    }
+
+    pub fn op_id(&self) -> OperationId {
+        match self {
+            Self::D3D11 { op_id, .. } => *op_id,
+        }
+    }
+
+    pub fn pts(&self) -> Duration {
+        match self {
+            Self::D3D11 { pts, .. } => *pts,
+        }
+    }
+
+    pub fn surface(&self) -> VideoSurfaceHandle {
+        match self {
+            Self::D3D11 { surface, .. } => *surface,
+        }
+    }
+}

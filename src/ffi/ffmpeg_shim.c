@@ -24,3 +24,11 @@ AVRational fastplay_ffmpeg_stream_time_base(AVStream *stream) {
 
     return stream->time_base;
 }
+
+int fastplay_ffmpeg_error_eagain(void) {
+    return AVERROR(EAGAIN);
+}
+
+int fastplay_ffmpeg_error_eof(void) {
+    return AVERROR_EOF;
+}

@@ -1,19 +1,29 @@
-#![allow(dead_code)]
+use std::time::{Duration, Instant};
 
-use std::time::Instant;
-
-/// M0 placeholder for future clock selection policy.
+/// M2 video-only playback clock.
+///
+/// Until audio exists, the first presented video frame establishes the anchor:
+/// that frame's PTS is mapped to the UI-thread `Instant` when it was selected
+/// for present. Later frames are due relative to that anchor.
 #[derive(Clone, Copy, Debug)]
 pub struct PlaybackClock {
-    started_at: Instant,
+    anchor_instant: Instant,
+    anchor_pts: Duration,
 }
 
 impl PlaybackClock {
-    pub fn new(started_at: Instant) -> Self {
-        Self { started_at }
+    pub fn new(anchor_instant: Instant, anchor_pts: Duration) -> Self {
+        Self {
+            anchor_instant,
+            anchor_pts,
+        }
     }
 
-    pub fn started_at(&self) -> Instant {
-        self.started_at
+    pub fn deadline_for(&self, pts: Duration) -> Instant {
+        if pts <= self.anchor_pts {
+            return self.anchor_instant;
+        }
+
+        self.anchor_instant + pts.saturating_sub(self.anchor_pts)
     }
 }

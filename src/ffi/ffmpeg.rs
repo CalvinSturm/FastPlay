@@ -32,13 +32,17 @@ pub(crate) struct PendingVideoFrame {
     pub surface: VideoSurface,
 }
 
-pub(crate) fn decode_first_video_frame(
+pub(crate) fn stream_video_frames<F>(
     source: &MediaSource,
     device: &D3D11Device,
     open_gen: OpenGeneration,
     seek_gen: SeekGeneration,
     op_id: OperationId,
-) -> Result<PendingVideoFrame, String> {
+    mut on_frame: F,
+) -> Result<(), String>
+where
+    F: FnMut(PendingVideoFrame) -> Result<(), String>,
+{
     let source_path = source
         .path()
         .to_str()
@@ -112,12 +116,14 @@ pub(crate) fn decode_first_video_frame(
             return Err("av_frame_alloc returned null".into());
         }
         let frame = Frame(frame);
+        let mut produced_frames = 0u64;
 
         loop {
             let read_status = av_read_frame(input.0, packet.0);
-            if read_status < 0 {
+            if read_status == fastplay_ffmpeg_error_eof() {
                 break;
             }
+            ffmpeg_check(read_status, "av_read_frame")?;
 
             if (*packet.0).stream_index != stream_index as i32 {
                 av_packet_unref(packet.0);
@@ -130,40 +136,60 @@ pub(crate) fn decode_first_video_frame(
             )?;
             av_packet_unref(packet.0);
 
-            if let Some(frame) =
-                try_receive_first_frame(codec.0, frame.0, device, open_gen, seek_gen, op_id)?
-            {
-                return Ok(frame);
-            }
+            receive_ready_frames(
+                codec.0,
+                frame.0,
+                device,
+                open_gen,
+                seek_gen,
+                op_id,
+                &mut produced_frames,
+                &mut on_frame,
+            )?;
         }
 
         ffmpeg_check(
             avcodec_send_packet(codec.0, null()),
             "avcodec_send_packet(flush)",
         )?;
-        if let Some(frame) =
-            try_receive_first_frame(codec.0, frame.0, device, open_gen, seek_gen, op_id)?
-        {
-            return Ok(frame);
+        receive_ready_frames(
+            codec.0,
+            frame.0,
+            device,
+            open_gen,
+            seek_gen,
+            op_id,
+            &mut produced_frames,
+            &mut on_frame,
+        )?;
+
+        if produced_frames == 0 {
+            return Err("no decodable video frame was produced".into());
         }
 
-        Err("no decodable video frame was produced".into())
+        Ok(())
     }
 }
 
-unsafe fn try_receive_first_frame(
+unsafe fn receive_ready_frames<F>(
     codec_context: *mut AVCodecContext,
     frame: *mut AVFrame,
     device: &D3D11Device,
     open_gen: OpenGeneration,
     seek_gen: SeekGeneration,
     op_id: OperationId,
-) -> Result<Option<PendingVideoFrame>, String> {
+    produced_frames: &mut u64,
+    on_frame: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(PendingVideoFrame) -> Result<(), String>,
+{
     loop {
         let status = avcodec_receive_frame(codec_context, frame);
-        if status < 0 {
-            return Ok(None);
+        if status == fastplay_ffmpeg_error_eagain() || status == fastplay_ffmpeg_error_eof() {
+            return Ok(());
         }
+        ffmpeg_check(status, "avcodec_receive_frame")?;
 
         let pixel_format = (*frame).format as AVPixelFormat;
         if pixel_format != AVPixelFormat_AV_PIX_FMT_D3D11 {
@@ -193,8 +219,8 @@ unsafe fn try_receive_first_frame(
             surface,
         };
         av_frame_unref(frame);
-
-        return Ok(Some(result));
+        *produced_frames = (*produced_frames).saturating_add(1);
+        on_frame(result)?;
     }
 }
 

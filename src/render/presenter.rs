@@ -59,11 +59,23 @@ impl Presenter {
         self.surfaces.insert(open_gen, seek_gen, surface)
     }
 
-    pub fn select_surface(&mut self, handle: VideoSurfaceHandle) {
-        self.current_surface = Some(handle);
+    pub fn select_surface(&mut self, handle: VideoSurfaceHandle) -> Option<VideoSurfaceHandle> {
+        self.current_surface.replace(handle)
     }
 
     pub fn has_selected_surface(&self) -> bool {
         self.current_surface.is_some()
+    }
+
+    pub fn release_surface(&mut self, handle: VideoSurfaceHandle) {
+        if self.current_surface == Some(handle) {
+            self.current_surface = None;
+        }
+        let _ = self.surfaces.remove(handle);
+    }
+
+    pub fn reset_surfaces(&mut self) {
+        self.current_surface = None;
+        self.surfaces.clear_for_new_epoch();
     }
 }
