@@ -870,6 +870,20 @@ Architecture revisions stop here. Build in this order.
 
 * software fallback path
 
+### Software fallback present-path requirement
+
+Software-decoded frames are uploaded into D3D11 and then presented through the existing video-processor path.
+
+Current practical constraint:
+- software-uploaded NV12 textures must be created as decoder-compatible video surfaces for the present path to accept them.
+
+Current implementation detail:
+- D3D11 software-upload textures use bind flags:
+  - `D3D11_BIND_SHADER_RESOURCE`
+  - `D3D11_BIND_DECODER`
+
+This requirement is part of the current fallback-path contract and must be preserved unless the presentation path is explicitly redesigned.
+
 ### M6
 
 * subtitle overlay

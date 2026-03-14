@@ -44,6 +44,7 @@ Do not add features that do not clearly improve first-frame, seek, present, or r
 - No CPU copy-back in the normal steady-state playback path unless the session is explicitly in fallback mode.
 - No exclusive fullscreen support in v1.
 - Do not use `DXGI_PRESENT_RESTART` in the normal windowed or borderless resize path.
+- Software fallback upload textures must remain compatible with the current D3D11 video-processor present path; do not simplify their creation flags without re-validating runtime playback.
 
 ## Scope discipline
 
