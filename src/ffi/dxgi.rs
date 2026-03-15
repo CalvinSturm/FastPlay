@@ -18,7 +18,8 @@ use windows::{
             Dxgi::{
                 Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
                 CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1,
-                DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_SCALING_STRETCH,
+                DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_DEVICE_REMOVED,
+                DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SCALING_STRETCH,
                 DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
                 DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
@@ -51,7 +52,7 @@ use windows::{
 };
 
 use crate::{
-    ffi::d3d11::{D3D11Device, RenderTargetView, SubtitleOverlay, SubtitleRenderer, VideoSurface},
+    ffi::d3d11::{D3D11Device, RenderTargetView, SubtitleOverlay, SubtitleRenderer, VideoProcessorCache, VideoSurface},
     platform::input::InputEvent,
 };
 
@@ -67,7 +68,7 @@ const SM_CYDRAG: i32 = 69;
 
 const MAX_MESSAGES_PER_PUMP: usize = 64;
 const MODAL_TICK_TIMER_ID: usize = 1;
-const MODAL_TICK_INTERVAL_MS: u32 = 32;
+const MODAL_TICK_INTERVAL_MS: u32 = 8;
 
 #[derive(Debug)]
 pub struct DxgiError(String);
@@ -408,6 +409,17 @@ impl Drop for NativeWindowInner {
     }
 }
 
+/// Outcome of a swap chain Present call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentResult {
+    /// Frame was presented normally.
+    Ok,
+    /// The window is fully occluded (minimized, covered) — no frame was shown.
+    Occluded,
+    /// The D3D11 device was lost or reset and must be rebuilt.
+    DeviceLost,
+}
+
 pub struct DxgiSwapChain {
     swap_chain: IDXGISwapChain1,
     backbuffer: Option<ID3D11Texture2D>,
@@ -415,6 +427,7 @@ pub struct DxgiSwapChain {
     width: u32,
     height: u32,
     subtitle_renderer: Option<SubtitleRenderer>,
+    vp_cache: Option<VideoProcessorCache>,
 }
 
 impl DxgiSwapChain {
@@ -423,6 +436,7 @@ impl DxgiSwapChain {
     /// before dropping the struct when another swap chain will be created
     /// on the same HWND.
     pub fn release_resources(&mut self) {
+        self.vp_cache = None;
         self.subtitle_renderer = None;
         self.render_target = None;
         self.backbuffer = None;
@@ -468,6 +482,7 @@ impl DxgiSwapChain {
             width: 0,
             height: 0,
             subtitle_renderer: None,
+            vp_cache: None,
         })
     }
 
@@ -478,7 +493,7 @@ impl DxgiSwapChain {
         subtitle_overlay: Option<&SubtitleOverlay>,
         timeline_overlay: Option<&SubtitleOverlay>,
         volume_overlay: Option<&SubtitleOverlay>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<PresentResult, Box<dyn Error>> {
         let render_target = self
             .render_target
             .as_ref()
@@ -522,15 +537,7 @@ impl DxgiSwapChain {
             )?;
         }
 
-        // SAFETY:
-        // - swap chain is live and bound to the current window
-        // - sync interval 1 avoids tearing for this simple M0 shell
-        // - flags remain zero; DXGI_PRESENT_RESTART is intentionally not used
-        unsafe {
-            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
-        }
-
-        Ok(())
+        self.present()
     }
 
     pub fn render_surface(
@@ -541,7 +548,7 @@ impl DxgiSwapChain {
         timeline_overlay: Option<&SubtitleOverlay>,
         volume_overlay: Option<&SubtitleOverlay>,
         view: &crate::render::ViewTransform,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<PresentResult, Box<dyn Error>> {
         let backbuffer = self
             .backbuffer
             .as_ref()
@@ -553,7 +560,7 @@ impl DxgiSwapChain {
             (self.width, self.height)
         };
 
-        device.render_video_surface(surface, backbuffer, output_width, output_height, view)?;
+        device.render_video_surface(surface, backbuffer, output_width, output_height, view, &mut self.vp_cache)?;
         if let Some(overlay) = subtitle_overlay {
             let render_target = self
                 .render_target
@@ -603,11 +610,7 @@ impl DxgiSwapChain {
             )?;
         }
 
-        unsafe {
-            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
-        }
-
-        Ok(())
+        self.present()
     }
 
     pub fn resize(
@@ -621,6 +624,7 @@ impl DxgiSwapChain {
         }
 
         // Drop swap-chain-dependent views before ResizeBuffers.
+        self.vp_cache = None;
         self.backbuffer = None;
         self.render_target = None;
 
@@ -644,6 +648,30 @@ impl DxgiSwapChain {
         self.width = width;
         self.height = height;
         Ok(())
+    }
+
+    fn present(&self) -> Result<PresentResult, Box<dyn Error>> {
+        // SAFETY:
+        // - swap chain is live and bound to the current window
+        // - sync interval 1 avoids tearing
+        // - flags remain zero; DXGI_PRESENT_RESTART is intentionally not used
+        let hr = unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) };
+
+        // DXGI_STATUS_OCCLUDED (0x087A0001): the window is fully covered or
+        // minimized — the frame wasn't shown but no action is needed.
+        const DXGI_STATUS_OCCLUDED_RAW: i32 = 0x087A0001u32 as i32;
+        match hr.0 {
+            s if s >= 0 && s != DXGI_STATUS_OCCLUDED_RAW => Ok(PresentResult::Ok),
+            DXGI_STATUS_OCCLUDED_RAW => Ok(PresentResult::Occluded),
+            _ if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET => {
+                Ok(PresentResult::DeviceLost)
+            }
+            _ => {
+                hr.ok()?;
+                // unreachable — ok() would have returned Err above
+                Ok(PresentResult::Ok)
+            }
+        }
     }
 
     pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn Error>> {
