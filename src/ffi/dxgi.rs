@@ -3,7 +3,7 @@ use std::{
     error::Error,
     ffi::{c_void, OsStr},
     fmt,
-    os::windows::ffi::OsStrExt,
+    os::windows::ffi::{OsStrExt, OsStringExt},
     path::PathBuf,
     ptr::null_mut,
     rc::Rc,
@@ -16,7 +16,10 @@ use windows::{
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
-                Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                Common::{
+                    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_SAMPLE_DESC,
+                },
                 CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1,
                 DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_DEVICE_REMOVED,
                 DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SCALING_STRETCH,
@@ -31,17 +34,19 @@ use windows::{
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_LBUTTON},
+            Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW,
+                DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
                 GetWindowPlacement, LoadCursorW, LoadImageW, PeekMessageW, PostQuitMessage,
                 RegisterClassExW, SetWindowLongPtrW,
                 SetWindowPlacement, SetWindowPos, ShowWindow,
                 TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
                 GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
-                LR_LOADFROMFILE, MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
+                LR_LOADFROMFILE, MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOZORDER,
                 SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-                WM_DESTROY, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
+                WM_DESTROY, WM_DROPFILES, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
                 WM_EXITSIZEMOVE, WM_KEYDOWN, WM_LBUTTONDBLCLK,
                 WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE,
                 WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
@@ -160,6 +165,7 @@ impl NativeWindowInner {
         // SAFETY: `hwnd` is a live top-level window created above.
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOW);
+            DragAcceptFiles(hwnd, true);
         }
 
         let mut placement = WINDOWPLACEMENT::default();
@@ -276,7 +282,7 @@ impl NativeWindowInner {
         unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
     }
 
-    pub fn resize_for_content(&self, content_width: u32, content_height: u32) {
+    pub fn resize_for_content(&self, content_width: u32, content_height: u32, center: bool) {
         if self.is_borderless.get() || content_width == 0 || content_height == 0 {
             return;
         }
@@ -315,9 +321,80 @@ impl NativeWindowInner {
             let win_w = win_w.min(work_w as i32);
             let win_h = win_h.min(work_h as i32);
 
-            // Centre on the work area.
-            let x = work.left + (work_w as i32 - win_w) / 2;
-            let y = work.top + (work_h as i32 - win_h) / 2;
+            if center {
+                let x = work.left + (work_w as i32 - win_w) / 2;
+                let y = work.top + (work_h as i32 - win_h) / 2;
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    HWND_TOP,
+                    x,
+                    y,
+                    win_w,
+                    win_h,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                );
+            } else {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    HWND_TOP,
+                    0,
+                    0,
+                    win_w,
+                    win_h,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOMOVE | SWP_FRAMECHANGED,
+                );
+            }
+        }
+    }
+
+    /// Resize the window to fill the work area top-to-bottom with no black
+    /// padding, keeping the window's horizontal center position.
+    pub fn fit_window_to_content(&self, content_width: u32, content_height: u32) {
+        if self.is_borderless.get() || content_width == 0 || content_height == 0 {
+            return;
+        }
+
+        unsafe {
+            let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return;
+            }
+            let work = info.rcWork;
+
+            let Ok((chrome_w, chrome_h)) = adjust_window_size(0, 0) else {
+                return;
+            };
+            let max_client_w = ((work.right - work.left) - chrome_w).max(1) as u32;
+            let max_client_h = ((work.bottom - work.top) - chrome_h).max(1) as u32;
+
+            // Fill the full work-area height; derive width from aspect ratio.
+            let scale = max_client_h as f64 / content_height as f64;
+            let w = ((content_width as f64 * scale) as u32).max(1).min(max_client_w);
+            let h = if w < (content_width as f64 * scale) as u32 {
+                // Width was clamped — recalculate height from width constraint.
+                ((content_height as f64 * (w as f64 / content_width as f64)) as u32)
+                    .max(1)
+                    .min(max_client_h)
+            } else {
+                max_client_h
+            };
+
+            let Ok((win_w, win_h)) = adjust_window_size(w, h) else {
+                return;
+            };
+
+            // Keep horizontal center, snap to work-area top.
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut rect);
+            let old_center_x = (rect.left + rect.right) / 2;
+            let x = (old_center_x - win_w / 2)
+                .max(work.left)
+                .min(work.right - win_w);
+            let y = work.top;
 
             let _ = SetWindowPos(
                 self.hwnd,
@@ -448,6 +525,10 @@ impl DxgiSwapChain {
     ) -> Result<Self, Box<dyn Error>> {
         let factory: IDXGIFactory2 = create_factory()?;
         let dxgi_device: IDXGIDevice = device.raw_device().cast()?;
+
+        // HDR swap chain support is deferred until the full pipeline
+        // (video processor color space, tone mapping) is in place.
+        // For now, always use the standard SDR format.
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: 0,
             Height: 0,
@@ -880,6 +961,10 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::RotateCounterClockwise);
                     }
+                    // Ctrl+W → fit window to video (no black padding)
+                    0x57 if ctrl_held => {
+                        state.input_events.borrow_mut().push(InputEvent::FitWindow);
+                    }
                     // Ctrl+0 → reset view
                     0x30 if ctrl_held => {
                         state.input_events.borrow_mut().push(InputEvent::ResetView);
@@ -891,18 +976,24 @@ unsafe extern "system" fn window_proc(
                             .push(InputEvent::ToggleSubtitles);
                     }
                     key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
+                        // Bit 30 of lparam: previous key state (1 = was down).
+                        // Accelerate seek on held key repeats.
+                        let held = (lparam.0 as u32 >> 30) & 1 != 0;
+                        let step = if held { 15 } else { 5 };
                         state
                             .input_events
                             .borrow_mut()
-                            .push(InputEvent::SeekRelativeSeconds(-5));
+                            .push(InputEvent::SeekRelativeSeconds(-step));
                     }
                     key if key
                         == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT.0 as u32 =>
                     {
+                        let held = (lparam.0 as u32 >> 30) & 1 != 0;
+                        let step = if held { 15 } else { 5 };
                         state
                             .input_events
                             .borrow_mut()
-                            .push(InputEvent::SeekRelativeSeconds(5));
+                            .push(InputEvent::SeekRelativeSeconds(step));
                     }
                     _ => {}
                 }
@@ -1140,6 +1231,30 @@ unsafe extern "system" fn window_proc(
                     }
                 }
             }
+            LRESULT(0)
+        }
+        WM_DROPFILES => {
+            let hdrop = HDROP(wparam.0 as *mut c_void);
+            // SAFETY: hdrop is valid for the duration of this message.
+            let file_count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
+            if file_count > 0 {
+                // Query the length of the first file path (excluding null).
+                let len = DragQueryFileW(hdrop, 0, None) as usize;
+                let mut buf = vec![0u16; len + 1];
+                DragQueryFileW(hdrop, 0, Some(&mut buf));
+                // Trim trailing null.
+                if buf.last() == Some(&0) {
+                    buf.pop();
+                }
+                let path = PathBuf::from(std::ffi::OsString::from_wide(&buf));
+                if let Some(state) = window_state(hwnd) {
+                    state
+                        .input_events
+                        .borrow_mut()
+                        .push(InputEvent::FileDropped(path));
+                }
+            }
+            DragFinish(hdrop);
             LRESULT(0)
         }
         WM_DESTROY => {

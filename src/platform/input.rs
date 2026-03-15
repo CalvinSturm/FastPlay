@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Debug, PartialEq)]
+use std::path::PathBuf;
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     TogglePause,
     ToggleSubtitles,
@@ -10,4 +12,6 @@ pub enum InputEvent {
     ZoomAtCursor { delta: i16, cursor_x: i32, cursor_y: i32 },
     ResetView,
     ToggleAutoReplay,
+    FitWindow,
+    FileDropped(PathBuf),
 }

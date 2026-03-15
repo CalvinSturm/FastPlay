@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::media::video::VideoDecodeMode;
 
@@ -14,6 +14,10 @@ pub struct PlaybackMetrics {
     seek_av_settled_at: Option<Instant>,
     resize_recovery_started_at: Option<Instant>,
     device_recovery_started_at: Option<Instant>,
+    fullscreen_toggle_started_at: Option<Instant>,
+    resume_requested_at: Option<Instant>,
+    resume_first_frame_presented: bool,
+    pause_requested_at: Option<Instant>,
     decode_mode: Option<VideoDecodeMode>,
     hw_fallback_count: u64,
     presented_video_frames: u64,
@@ -32,6 +36,10 @@ impl PlaybackMetrics {
         self.seek_av_settled_at = None;
         self.resize_recovery_started_at = None;
         self.device_recovery_started_at = None;
+        self.fullscreen_toggle_started_at = None;
+        self.resume_requested_at = None;
+        self.resume_first_frame_presented = false;
+        self.pause_requested_at = None;
         self.decode_mode = None;
         self.hw_fallback_count = 0;
         self.presented_video_frames = 0;
@@ -54,22 +62,19 @@ impl PlaybackMetrics {
         self.seek_av_settled_at = None;
     }
 
-    pub fn note_first_frame_presented(&mut self, now: Instant) -> Option<std::time::Duration> {
+    pub fn note_first_frame_presented(&mut self, now: Instant) -> Option<Duration> {
         let open_started = self.open_requested_at?;
         self.first_frame_presented_at = Some(now);
         Some(now.saturating_duration_since(open_started))
     }
 
-    pub fn note_first_audio_started(&mut self, now: Instant) -> Option<std::time::Duration> {
+    pub fn note_first_audio_started(&mut self, now: Instant) -> Option<Duration> {
         let open_started = self.open_requested_at?;
         self.first_audio_started_at = Some(now);
         Some(now.saturating_duration_since(open_started))
     }
 
-    pub fn note_seek_first_frame_presented(
-        &mut self,
-        now: Instant,
-    ) -> Option<std::time::Duration> {
+    pub fn note_seek_first_frame_presented(&mut self, now: Instant) -> Option<Duration> {
         let seek_started = self.seek_requested_at?;
         if self.seek_first_frame_presented_at.is_some() {
             return None;
@@ -78,7 +83,7 @@ impl PlaybackMetrics {
         Some(now.saturating_duration_since(seek_started))
     }
 
-    pub fn note_seek_av_settled(&mut self, now: Instant) -> Option<std::time::Duration> {
+    pub fn note_seek_av_settled(&mut self, now: Instant) -> Option<Duration> {
         let seek_started = self.seek_requested_at?;
         if self.seek_av_settled_at.is_some() {
             return None;
@@ -91,7 +96,7 @@ impl PlaybackMetrics {
         self.resize_recovery_started_at = Some(now);
     }
 
-    pub fn note_resize_recovered(&mut self, now: Instant) -> Option<std::time::Duration> {
+    pub fn note_resize_recovered(&mut self, now: Instant) -> Option<Duration> {
         let started = self.resize_recovery_started_at.take()?;
         Some(now.saturating_duration_since(started))
     }
@@ -100,8 +105,40 @@ impl PlaybackMetrics {
         self.device_recovery_started_at = Some(now);
     }
 
-    pub fn note_device_recovered(&mut self, now: Instant) -> Option<std::time::Duration> {
+    pub fn note_device_recovered(&mut self, now: Instant) -> Option<Duration> {
         let started = self.device_recovery_started_at.take()?;
+        Some(now.saturating_duration_since(started))
+    }
+
+    pub fn note_fullscreen_toggle_started(&mut self, now: Instant) {
+        self.fullscreen_toggle_started_at = Some(now);
+    }
+
+    pub fn note_fullscreen_toggle_completed(&mut self, now: Instant) -> Option<Duration> {
+        let started = self.fullscreen_toggle_started_at.take()?;
+        Some(now.saturating_duration_since(started))
+    }
+
+    pub fn note_resume_requested(&mut self, now: Instant) {
+        self.resume_requested_at = Some(now);
+        self.resume_first_frame_presented = false;
+    }
+
+    pub fn note_resume_first_frame(&mut self, now: Instant) -> Option<Duration> {
+        if self.resume_first_frame_presented {
+            return None;
+        }
+        let started = self.resume_requested_at?;
+        self.resume_first_frame_presented = true;
+        Some(now.saturating_duration_since(started))
+    }
+
+    pub fn note_pause_requested(&mut self, now: Instant) {
+        self.pause_requested_at = Some(now);
+    }
+
+    pub fn note_pause_completed(&mut self, now: Instant) -> Option<Duration> {
+        let started = self.pause_requested_at.take()?;
         Some(now.saturating_duration_since(started))
     }
 

@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod audio;
 mod ffi;
@@ -19,12 +21,15 @@ use platform::input::InputEvent;
 use platform::window::NativeWindow;
 use render::timeline::{self, TimelineOverlayModel};
 
+const SEEK_OVERLAY_DURATION: std::time::Duration = std::time::Duration::from_millis(800);
+
 struct TimelineUiState {
     was_left_button_down: bool,
     scrubbing: bool,
     scrub_was_paused: bool,
     preview_target: Option<std::time::Duration>,
     last_overlay: Option<TimelineOverlayModel>,
+    seek_overlay_until: Option<Instant>,
 }
 
 impl TimelineUiState {
@@ -35,6 +40,7 @@ impl TimelineUiState {
             scrub_was_paused: false,
             preview_target: None,
             last_overlay: None,
+            seek_overlay_until: None,
         }
     }
 
@@ -90,18 +96,23 @@ impl TimelineUiState {
                 }
             }
         } else if self.scrubbing && self.was_left_button_down && !left_button_down {
-            if let Some(target) = self.preview_target.take() {
-                self.scrub_seek(session, target, now)?;
-            }
+            self.preview_target = None;
             self.scrubbing = false;
+            // Resume playback if it was playing before the scrub started.
+            if !self.scrub_was_paused && session.is_paused() {
+                session.apply_command(SessionCommand::TogglePause, now)?;
+            }
         }
 
         let replay_indicator_active = session
             .replay_indicator_until()
             .is_some_and(|until| now < until);
+        let seek_overlay_active = self
+            .seek_overlay_until
+            .is_some_and(|until| now < until);
         let visible = !is_borderless
             && duration > std::time::Duration::ZERO
-            && (hovered || self.scrubbing || replay_indicator_active);
+            && (hovered || self.scrubbing || replay_indicator_active || seek_overlay_active);
         let snapshot = session.snapshot(now);
         let overlay = if visible {
             timeline::build_overlay_model(
@@ -200,6 +211,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             .saturating_sub(std::time::Duration::from_secs((-offset_seconds) as u64))
                     };
                     session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), Instant::now())?;
+                    timeline_ui.seek_overlay_until = Some(Instant::now() + SEEK_OVERLAY_DURATION);
                 }
                 InputEvent::AdjustVolumeSteps(steps) => {
                     session.apply_command(SessionCommand::AdjustVolumeSteps(steps), Instant::now())?;
@@ -221,6 +233,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 InputEvent::ToggleAutoReplay => {
                     session.apply_command(SessionCommand::ToggleAutoReplay, Instant::now())?;
+                }
+                InputEvent::FitWindow => {
+                    session.apply_command(SessionCommand::FitWindow, Instant::now())?;
+                }
+                InputEvent::FileDropped(path) => {
+                    let source = MediaSource::new(path);
+                    let source = if session.decode_preference() == VideoDecodePreference::ForceSoftware {
+                        source.with_decode_preference(VideoDecodePreference::ForceSoftware)
+                    } else {
+                        source
+                    };
+                    session.open(source, Instant::now())?;
                 }
             }
         }
