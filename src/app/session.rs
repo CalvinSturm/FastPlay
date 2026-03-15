@@ -11,13 +11,12 @@ use std::{
 };
 
 use crate::{
-    app::{
-        commands::SessionCommand,
-        events::SessionEvent,
-        state::PlaybackState,
-    },
+    app::{commands::SessionCommand, events::SessionEvent, state::PlaybackState},
     audio::sink::AudioSink,
-    ffi::{dxgi::ResizeRequest, ffmpeg::{self, StreamStatus}},
+    ffi::{
+        dxgi::ResizeRequest,
+        ffmpeg::{self, StreamStatus},
+    },
     media::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
         seek::{PlaybackSnapshot, PositionKind, SeekTarget},
@@ -138,7 +137,8 @@ impl PlaybackSession {
     pub fn new(window: NativeWindow) -> Result<Self, Box<dyn std::error::Error>> {
         let presenter = Presenter::new(&window)?;
         let queue_defaults = QueueDefaults::default();
-        let event_capacity = queue_defaults.decoded_video_frames + queue_defaults.decoded_audio_frames + 4;
+        let event_capacity =
+            queue_defaults.decoded_video_frames + queue_defaults.decoded_audio_frames + 4;
         let (event_tx, event_rx) = mpsc::sync_channel(event_capacity);
 
         Ok(Self {
@@ -290,7 +290,16 @@ impl PlaybackSession {
         self.needs_initial_resize = true;
         self.metrics.note_open_requested(now);
         self.measure_open_audio_metric = true;
-        self.begin_operation(source, None, open_gen, seek_gen, op_id, PlaybackState::Opening, true, true)?;
+        self.begin_operation(
+            source,
+            None,
+            open_gen,
+            seek_gen,
+            op_id,
+            PlaybackState::Opening,
+            true,
+            true,
+        )?;
         Ok(())
     }
 
@@ -320,7 +329,11 @@ impl PlaybackSession {
             SessionCommand::ToggleBorderlessFullscreen => {
                 self.window.toggle_borderless_fullscreen();
             }
-            SessionCommand::ZoomAtCursor { delta, cursor_x, cursor_y } => {
+            SessionCommand::ZoomAtCursor {
+                delta,
+                cursor_x,
+                cursor_y,
+            } => {
                 self.zoom_at_cursor(delta, cursor_x, cursor_y);
             }
             SessionCommand::ResetView => {
@@ -343,7 +356,11 @@ impl PlaybackSession {
         if let Ok((viewport_width, viewport_height)) = self.presenter.viewport_size() {
             if self
                 .presenter
-                .set_volume_overlay(Some(&format!("{volume_percent}%")), viewport_width, viewport_height)
+                .set_volume_overlay(
+                    Some(&format!("{volume_percent}%")),
+                    viewport_width,
+                    viewport_height,
+                )
                 .unwrap_or(false)
             {
                 self.present_needed = true;
@@ -370,6 +387,10 @@ impl PlaybackSession {
     }
 
     fn tick_inner(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
+        if self.state == PlaybackState::Error {
+            thread::sleep(Duration::from_millis(1));
+            return Ok(());
+        }
         self.submit_due_audio(now)?;
 
         loop {
@@ -395,7 +416,7 @@ impl PlaybackSession {
         self.update_subtitle_overlay(now)?;
         self.refresh_volume_overlay(now)?;
 
-        if self.present_needed {
+        if self.present_needed && self.state != PlaybackState::Error {
             let view = crate::render::ViewTransform {
                 zoom: self.view_zoom,
                 pan_x: self.view_pan_x,
@@ -613,10 +634,9 @@ impl PlaybackSession {
                 self.audio_stream_expected = true;
                 self.observe_media_time_origin(frame.pts);
                 if self.audio_sink.is_none() {
-                    let message = self
-                        .audio_sink_error
-                        .clone()
-                        .unwrap_or_else(|| "WASAPI sink was not available for decoded audio".to_string());
+                    let message = self.audio_sink_error.clone().unwrap_or_else(|| {
+                        "WASAPI sink was not available for decoded audio".to_string()
+                    });
                     self.fail_playback(message);
                     return Ok(());
                 }
@@ -704,11 +724,7 @@ impl PlaybackSession {
         Ok(())
     }
 
-    fn seek(
-        &mut self,
-        target: SeekTarget,
-        now: Instant,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn seek(&mut self, target: SeekTarget, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         let Some(source) = self.current_source.clone() else {
             return Ok(());
         };
@@ -810,6 +826,12 @@ impl PlaybackSession {
                     None
                 }
             };
+        } else if self.pause_after_seek {
+            // Scrub-seeking while paused — just stop the audio sink without
+            // a full reset to avoid rapid WASAPI buffer churn (0x88890005).
+            if let Some(sink) = self.audio_sink.as_mut() {
+                let _ = sink.pause();
+            }
         } else if let Some(sink) = self.audio_sink.as_mut() {
             if let Err(error) = sink.reset() {
                 self.audio_sink_error = Some(error.to_string());
@@ -1011,7 +1033,8 @@ impl PlaybackSession {
                 }
 
                 wrote_any_audio = true;
-                self.audio_submitted_frames = self.audio_submitted_frames.saturating_add(written as u64);
+                self.audio_submitted_frames =
+                    self.audio_submitted_frames.saturating_add(written as u64);
                 front.submitted_frames = front.submitted_frames.saturating_add(written);
                 if front.submitted_frames >= front.frame.frame_count() {
                     self.queued_audio_frames.pop_front();
@@ -1045,13 +1068,16 @@ impl PlaybackSession {
             && self.state != PlaybackState::Paused
             && sink.is_started()
             && self.queued_audio_frames.is_empty()
-            && sink.buffered_frames()? == 0
+            && sink.buffered_frames().unwrap_or(1) == 0
             && !self.can_finish_playback()?
         {
             self.metrics.note_audio_underrun();
         }
 
-        if self.audio_stream_expected && self.audio_clock_anchor_pts.is_some() && self.state == PlaybackState::Priming {
+        if self.audio_stream_expected
+            && self.audio_clock_anchor_pts.is_some()
+            && self.state == PlaybackState::Priming
+        {
             self.state = PlaybackState::Playing;
         }
 
@@ -1120,7 +1146,10 @@ impl PlaybackSession {
 
     fn present_video_frame(&mut self, frame: DecodedVideoFrame, now: Instant) {
         if self.video_clock.is_none() && self.audio_clock_anchor_pts.is_none() {
-            self.video_clock = Some(PlaybackClock::new(now, self.media_time_for_pts(frame.pts())));
+            self.video_clock = Some(PlaybackClock::new(
+                now,
+                self.media_time_for_pts(frame.pts()),
+            ));
         }
 
         if !self
@@ -1142,14 +1171,14 @@ impl PlaybackSession {
         self.metrics.note_video_frame_presented();
         self.pending_first_frame_metric |= self.metrics.presented_video_frames() == 1;
         self.seek_frame_presented_since_request |= self.pending_seek_settled_metric;
-        if !self.audio_stream_expected || self.audio_clock_anchor_pts.is_some() {
-            if self.pause_after_seek {
-                self.pause_after_seek = false;
-                self.paused_clock_position = self.pending_seek_target.map(|t| t.position());
-                self.state = PlaybackState::Paused;
-            } else {
-                self.state = PlaybackState::Playing;
-            }
+        // Check pause_after_seek unconditionally — audio submission is already
+        // blocked by the same flag so we must not wait for the audio anchor.
+        if self.pause_after_seek {
+            self.pause_after_seek = false;
+            self.paused_clock_position = self.pending_seek_target.map(|t| t.position());
+            self.state = PlaybackState::Paused;
+        } else if !self.audio_stream_expected || self.audio_clock_anchor_pts.is_some() {
+            self.state = PlaybackState::Playing;
         }
     }
 
@@ -1283,8 +1312,10 @@ impl PlaybackSession {
     }
 
     fn rotate_view(&mut self, delta_quarter_turns: u8) {
-        self.view_rotation_quarter_turns =
-            self.view_rotation_quarter_turns.wrapping_add(delta_quarter_turns) % 4;
+        self.view_rotation_quarter_turns = self
+            .view_rotation_quarter_turns
+            .wrapping_add(delta_quarter_turns)
+            % 4;
         self.present_needed = true;
     }
 
@@ -1296,10 +1327,7 @@ impl PlaybackSession {
         self.present_needed = true;
     }
 
-    fn update_subtitle_overlay(
-        &mut self,
-        now: Instant,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn update_subtitle_overlay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         let subtitle_position = self.subtitle_position(now);
         let Some(track) = self.subtitle_track.as_ref() else {
             self.active_subtitle_cue = None;
@@ -1321,7 +1349,8 @@ impl PlaybackSession {
 
         let cue = track.cue_at(subtitle_position);
         let next_index = cue.map(|(index, _)| index);
-        if self.active_subtitle_cue == next_index && self.active_subtitle_viewport == Some(viewport) {
+        if self.active_subtitle_cue == next_index && self.active_subtitle_viewport == Some(viewport)
+        {
             return Ok(());
         }
 
@@ -1372,7 +1401,9 @@ impl PlaybackSession {
             return Some(paused);
         }
 
-        if let (Some(anchor_pts), Some(sink)) = (self.audio_clock_anchor_pts, self.audio_sink.as_ref()) {
+        if let (Some(anchor_pts), Some(sink)) =
+            (self.audio_clock_anchor_pts, self.audio_sink.as_ref())
+        {
             if sink.is_started() {
                 let buffered_frames = sink.buffered_frames().ok()? as u64;
                 let played_frames = self.audio_submitted_frames.saturating_sub(buffered_frames);
@@ -1455,7 +1486,11 @@ impl PlaybackSession {
 
         self.metrics.note_device_recovery_started(now);
         eprintln!("device recovery: {reason}");
-        self.presenter.rebuild_device(&self.window)?;
+        if let Err(error) = self.presenter.rebuild_device(&self.window) {
+            eprintln!("device recovery failed: {error}");
+            self.fail_playback(format!("device recovery failed: {error}"));
+            return Ok(());
+        }
         let restart_target = self.desired_restart_position(now);
         let open_gen = self.generations.open();
         let seek_gen = self.generations.bump_seek();
@@ -1488,7 +1523,7 @@ impl PlaybackSession {
                 return Ok(false);
             }
             if let Some(sink) = self.audio_sink.as_ref() {
-                if sink.buffered_frames()? != 0 {
+                if sink.buffered_frames().unwrap_or(0) != 0 {
                     return Ok(false);
                 }
             }

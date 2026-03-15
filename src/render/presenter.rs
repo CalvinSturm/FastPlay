@@ -43,7 +43,9 @@ impl Presenter {
         &mut self,
         view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let sc = self.swap_chain.as_mut().expect("swap chain unavailable");
+        let Some(sc) = self.swap_chain.as_mut() else {
+            return Err("swap chain unavailable".into());
+        };
         if let Some(handle) = self.current_surface {
             if let Some(entry) = self.surfaces.get(handle) {
                 sc.render_surface(
@@ -69,7 +71,9 @@ impl Presenter {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
-        let sc = self.swap_chain.as_mut().expect("swap chain unavailable");
+        let Some(sc) = self.swap_chain.as_mut() else {
+            return Err("swap chain unavailable".into());
+        };
         sc.resize(&self.device, width, height)?;
         Ok(())
     }
@@ -78,8 +82,9 @@ impl Presenter {
         &mut self,
         window: &NativeWindow,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Drop the old swap chain first — DXGI only allows one per HWND.
-        self.swap_chain = None;
+        // Release backbuffer / render-target references, flush the device
+        // context, then drop the swap chain — DXGI only allows one per HWND.
+        self.drop_swap_chain();
         self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
         Ok(())
     }
@@ -88,12 +93,21 @@ impl Presenter {
         &mut self,
         window: &NativeWindow,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Drop the old swap chain first — DXGI only allows one per HWND.
-        self.swap_chain = None;
+        // Release everything tied to the old device before creating a new
+        // one — DXGI only allows one swap chain per HWND.
+        self.reset_surfaces();
+        self.drop_swap_chain();
         self.device = D3D11Device::create()?;
         self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
-        self.reset_surfaces();
         Ok(())
+    }
+
+    fn drop_swap_chain(&mut self) {
+        if let Some(sc) = self.swap_chain.as_mut() {
+            sc.release_resources();
+        }
+        self.device.flush();
+        self.swap_chain = None;
     }
 
     pub fn device(&self) -> &D3D11Device {
@@ -170,7 +184,9 @@ impl Presenter {
     }
 
     pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {
-        let sc = self.swap_chain.as_ref().expect("swap chain unavailable");
+        let Some(sc) = self.swap_chain.as_ref() else {
+            return Err("swap chain unavailable".into());
+        };
         sc.viewport_size()
     }
 
