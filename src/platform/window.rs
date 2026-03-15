@@ -76,8 +76,8 @@ impl NativeWindow {
         self.inner.is_left_button_down()
     }
 
-    pub fn is_in_modal_move(&self) -> bool {
-        self.inner.is_in_modal_move()
+    pub fn is_in_modal_loop(&self) -> bool {
+        self.inner.is_in_modal_loop()
     }
 
     pub(crate) fn raw_window(&self) -> &NativeWindowInner {

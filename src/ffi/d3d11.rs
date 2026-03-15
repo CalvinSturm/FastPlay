@@ -178,6 +178,13 @@ impl D3D11Device {
         }
     }
 
+    pub(crate) fn flush(&self) {
+        unsafe {
+            self.context.ClearState();
+            self.context.Flush();
+        }
+    }
+
     pub(crate) fn raw_device(&self) -> &ID3D11Device {
         &self.device
     }
@@ -390,8 +397,16 @@ impl D3D11Device {
                     bottom: output_height as i32,
                 }),
             );
+            // VideoProcessorBlt takes the stream by-value through the
+            // slice, which moves the struct.  The pInputSurface field is
+            // ManuallyDrop so its COM reference is never released on drop.
+            // We pass a pointer to the stack-local stream instead of moving
+            // it, then manually drop the ManuallyDrop field afterwards so
+            // the kernel-mode input view is freed every frame.
+            let mut streams = [stream];
             self.video_context
-                .VideoProcessorBlt(&processor, &output_view, 0, &[stream])?;
+                .VideoProcessorBlt(&processor, &output_view, 0, &streams)?;
+            ManuallyDrop::drop(&mut streams[0].pInputSurface);
         }
 
         Ok(())

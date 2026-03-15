@@ -11,6 +11,10 @@ pub struct SwapChainPresenter {
 }
 
 impl SwapChainPresenter {
+    pub fn release_resources(&mut self) {
+        self.swap_chain.release_resources();
+    }
+
     pub fn new(
         window: &NativeWindow,
         device: &D3D11Device,
