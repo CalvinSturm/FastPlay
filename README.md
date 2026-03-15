@@ -8,17 +8,30 @@ It is designed around a simple idea: a player should feel fast because it opens 
 
 FastPlay currently supports:
 
-- Windows-native windowing
+- Windows-native windowing with drag-and-drop file open
 - D3D11 + DXGI flip-model presentation
 - FFmpeg-based demux/decode
 - hardware video decode on the preferred D3D11 path
 - software video decode fallback with D3D11 upload/present
+- cached D3D11 video processor (avoids per-frame kernel-mode allocations)
 - WASAPI shared-mode audio playback
 - audio-master playback timing when audio exists
 - generation-safe seek and reopen behavior
-- minimal resize / recovery paths
-- external `.srt` subtitle overlay
-- subtitle toggle at runtime
+- timeline scrubbing overlay with playback position
+- borderless fullscreen
+- cursor-centered zoom and pan
+- view rotation (90-degree increments)
+- fit-to-screen window sizing (no black padding)
+- auto-replay toggle
+- spacebar replay at end of playback
+- accelerated keyboard seeking (hold for faster seek)
+- timeline appears briefly on keyboard seek
+- device-loss and resize recovery paths
+- external `.srt` subtitle overlay with runtime toggle
+- volume control with on-screen overlay
+- playback metrics (open-to-frame, seek latency, dropped frames, etc.)
+- embedded application icon
+- no console window in release builds
 - narrow validation hook for forced software decode
 
 This is still a focused engineering project, not a general-purpose consumer media player.
@@ -44,7 +57,7 @@ FastPlay does **not** currently aim to provide:
 - browser/web UI
 - advanced subtitle styling
 - embedded subtitle track selection
-- HDR/tone-mapping work
+- HDR/tone-mapping (deferred until full pipeline is ready)
 - extra hardware backends beyond the current D3D11-first design
 
 ## Architecture
@@ -52,10 +65,10 @@ FastPlay does **not** currently aim to provide:
 FastPlay is built around these core paths:
 
 ### Preferred path
-`FFmpeg -> AV_PIX_FMT_D3D11 -> D3D11 present`
+`FFmpeg -> AV_PIX_FMT_D3D11 -> D3D11 video processor -> DXGI present`
 
 ### Software fallback path
-`FFmpeg demux -> software decode -> D3D11 upload -> D3D11 present`
+`FFmpeg demux -> software decode -> D3D11 upload -> D3D11 video processor -> DXGI present`
 
 ### Audio path
 `FFmpeg decode -> WASAPI shared-mode sink`
@@ -71,7 +84,7 @@ For durable repo rules used during development, see [`AGENTS.md`](./AGENTS.md).
 
 ## Requirements
 
-- Windows
+- Windows 10 or later
 - Rust toolchain
 - FFmpeg development headers/libs available locally
 - D3D11 / DXGI / WASAPI-capable system
@@ -100,7 +113,7 @@ The build expects the usual FFmpeg development layout with `include/` and `lib/`
 ## Build
 
 ```powershell
-cargo build
+cargo build --release
 ```
 
 ## Run
@@ -108,13 +121,15 @@ cargo build
 Normal playback:
 
 ```powershell
-cargo run -- <path-to-media>
+cargo run --release -- <path-to-media>
 ```
+
+Or drag and drop a media file onto the FastPlay window. Subsequent drops resize in place without moving the window.
 
 Force software decode fallback:
 
 ```powershell
-cargo run -- --force-sw <path-to-media>
+cargo run --release -- --force-sw <path-to-media>
 ```
 
 ## External subtitles
@@ -132,13 +147,22 @@ The subtitle sidecar will be auto-loaded if present.
 
 ## Controls
 
-* `Space` — pause / resume
-* `Left` — seek backward
-* `Right` — seek forward
-* `S` — toggle subtitles on/off
-* `Ctrl+H` — toggle borderless fullscreen
-* `Ctrl+MouseWheel` — zoom at cursor (1× – 8×)
-* `Ctrl+0` — reset zoom / pan
+| Key | Action |
+|-----|--------|
+| `Space` | Pause / resume / replay at end |
+| `Left` | Seek backward 5s (hold for 15s steps) |
+| `Right` | Seek forward 5s (hold for 15s steps) |
+| `S` | Toggle subtitles on/off |
+| `R` | Toggle auto-replay |
+| `MouseWheel` | Adjust volume |
+| `Ctrl+H` | Toggle borderless fullscreen |
+| `Ctrl+W` | Fill screen height, no black padding |
+| `Ctrl+R` | Rotate clockwise 90 degrees |
+| `Ctrl+E` | Rotate counter-clockwise 90 degrees |
+| `Ctrl+MouseWheel` | Zoom at cursor |
+| `Ctrl+0` | Reset zoom / pan / rotation |
+
+Timeline scrubbing is available by hovering near the bottom of the window and clicking/dragging.
 
 ## Validation notes
 
@@ -156,6 +180,7 @@ Ignored by default:
 * no embedded subtitle track support
 * no ASS styling engine
 * no advanced subtitle settings UI
+* no HDR passthrough or tone mapping
 * no streaming
 * no playlists/library
 * no broad endpoint-notification system for audio devices
@@ -178,7 +203,7 @@ src/
   media/      # media-domain types, source, video, audio, seek, subtitle
   platform/   # Win32 window/input
   playback/   # clock, metrics, queue policy, generations
-  render/     # presenter, swapchain, surface registry
+  render/     # presenter, swapchain, surface registry, timeline overlay
 ```
 
 ## Development principles
@@ -201,6 +226,10 @@ Completed milestones:
 * M4: seek, stale-drop enforcement, and recovery paths
 * M5: software decode fallback path
 * M6: external `.srt` subtitle overlay
+* M7: borderless fullscreen, cursor-centered zoom, view rotation
+* M8: timeline scrubbing, playback overlays (volume, position)
+* M9: drag-and-drop, accelerated seek, fit-to-screen, auto-replay, metrics wiring
+* M10: end-of-playback replay, embedded icon, no-console release, timeline UX polish
 
 ## License
 

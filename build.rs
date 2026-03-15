@@ -32,6 +32,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     compile_ffmpeg_shim(&ffmpeg.include_dir);
     generate_ffmpeg_bindings(&ffmpeg.include_dir)?;
 
+    let _ = embed_resource::compile("assets/fastplay.rc", embed_resource::NONE);
+
     Ok(())
 }
 

@@ -128,6 +128,7 @@ pub struct PlaybackSession {
     view_pan_y: f32,
     view_rotation_quarter_turns: u8,
     needs_initial_resize: bool,
+    has_shown_content: bool,
     auto_replay: bool,
     replay_indicator_until: Option<Instant>,
     pause_after_seek: bool,
@@ -194,6 +195,7 @@ impl PlaybackSession {
             view_pan_y: 0.0,
             view_rotation_quarter_turns: 0,
             needs_initial_resize: false,
+            has_shown_content: false,
             auto_replay: false,
             replay_indicator_until: None,
             pause_after_seek: false,
@@ -228,6 +230,10 @@ impl PlaybackSession {
 
     pub fn auto_replay(&self) -> bool {
         self.auto_replay
+    }
+
+    pub fn decode_preference(&self) -> VideoDecodePreference {
+        self.decode_preference
     }
 
     pub fn replay_indicator_until(&self) -> Option<Instant> {
@@ -327,7 +333,11 @@ impl PlaybackSession {
             SessionCommand::RotateClockwise => self.rotate_view(1),
             SessionCommand::RotateCounterClockwise => self.rotate_view(3),
             SessionCommand::ToggleBorderlessFullscreen => {
+                self.metrics.note_fullscreen_toggle_started(now);
                 self.window.toggle_borderless_fullscreen();
+                if let Some(elapsed) = self.metrics.note_fullscreen_toggle_completed(Instant::now()) {
+                    eprintln!("fullscreen_toggle_ms={}", elapsed.as_millis());
+                }
             }
             SessionCommand::ZoomAtCursor {
                 delta,
@@ -342,6 +352,9 @@ impl PlaybackSession {
             SessionCommand::ToggleAutoReplay => {
                 self.auto_replay = !self.auto_replay;
                 self.replay_indicator_until = Some(now + Duration::from_millis(1500));
+            }
+            SessionCommand::FitWindow => {
+                self.fit_window();
             }
         }
         Ok(())
@@ -559,13 +572,15 @@ impl PlaybackSession {
                 // match the video's native aspect ratio (portrait or landscape).
                 if self.needs_initial_resize {
                     self.needs_initial_resize = false;
+                    let center = !self.has_shown_content;
+                    self.has_shown_content = true;
                     let (fw, fh) = match &frame {
                         ffmpeg::PendingVideoFrame::D3D11 { width, height, .. }
                         | ffmpeg::PendingVideoFrame::Software { width, height, .. } => {
                             (*width, *height)
                         }
                     };
-                    self.window.resize_for_content(fw, fh);
+                    self.window.resize_for_content(fw, fh, center);
                 }
 
                 match frame {
@@ -1084,6 +1099,22 @@ impl PlaybackSession {
             self.metrics.note_audio_underrun();
         }
 
+        // Stop the audio sink once all audio has been submitted and the
+        // WASAPI buffer has drained.  Without this, GetCurrentPadding may
+        // return a small residual value indefinitely, blocking the
+        // end-of-playback transition in can_finish_playback().
+        if self.audio_stream_expected
+            && self.audio_stream_ended
+            && self.queued_audio_frames.is_empty()
+            && matches!(self.state, PlaybackState::Draining | PlaybackState::Playing)
+        {
+            if let Some(sink) = self.audio_sink.as_mut() {
+                if sink.is_started() && sink.buffered_frames().unwrap_or(1) == 0 {
+                    let _ = sink.pause();
+                }
+            }
+        }
+
         if self.audio_stream_expected
             && self.audio_clock_anchor_pts.is_some()
             && self.state == PlaybackState::Priming
@@ -1179,6 +1210,9 @@ impl PlaybackSession {
 
         self.present_needed = true;
         self.metrics.note_video_frame_presented();
+        if let Some(elapsed) = self.metrics.note_resume_first_frame(now) {
+            eprintln!("play_to_motion_ms={}", elapsed.as_millis());
+        }
         self.pending_first_frame_metric |= self.metrics.presented_video_frames() == 1;
         self.seek_frame_presented_since_request |= self.pending_seek_settled_metric;
         // Check pause_after_seek unconditionally — audio submission is already
@@ -1233,6 +1267,7 @@ impl PlaybackSession {
     fn toggle_pause(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         match self.state {
             PlaybackState::Playing | PlaybackState::Priming | PlaybackState::Draining => {
+                self.metrics.note_pause_requested(now);
                 self.paused_clock_position = self.master_clock_position(now);
                 if let Some(sink) = self.audio_sink.as_mut() {
                     if sink.is_started() {
@@ -1240,8 +1275,21 @@ impl PlaybackSession {
                     }
                 }
                 self.state = PlaybackState::Paused;
+                if let Some(elapsed) = self.metrics.note_pause_completed(Instant::now()) {
+                    eprintln!("pause_to_stop_ms={}", elapsed.as_millis());
+                }
             }
             PlaybackState::Paused => {
+                // If both streams ended while paused, treat as replay.
+                if self.video_stream_ended
+                    && self.queued_video_frames.is_empty()
+                    && (!self.audio_stream_expected
+                        || (self.audio_stream_ended && self.queued_audio_frames.is_empty()))
+                {
+                    self.replay(now)?;
+                    return Ok(());
+                }
+                self.metrics.note_resume_requested(now);
                 if self.audio_clock_anchor_pts.is_none() {
                     let resume_pts = self.paused_clock_position.unwrap_or(Duration::ZERO);
                     self.video_clock = Some(PlaybackClock::new(now, resume_pts));
@@ -1335,6 +1383,17 @@ impl PlaybackSession {
         self.view_pan_y = 0.0;
         self.view_rotation_quarter_turns = 0;
         self.present_needed = true;
+    }
+
+    fn fit_window(&mut self) {
+        let Some((mut w, mut h)) = self.presenter.current_surface_size() else {
+            return;
+        };
+        // Account for rotation: odd quarter-turns swap width and height.
+        if self.view_rotation_quarter_turns % 2 != 0 {
+            std::mem::swap(&mut w, &mut h);
+        }
+        self.window.fit_window_to_content(w, h);
     }
 
     fn update_subtitle_overlay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {

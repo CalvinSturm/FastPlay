@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-pub const TIMELINE_ACTIVATION_ZONE_PX: i32 = 56;
-pub const TIMELINE_HEIGHT_PX: u32 = 52;
+pub const TIMELINE_ACTIVATION_ZONE_PX: i32 = 48;
+pub const TIMELINE_HEIGHT_PX: u32 = 44;
 
 const TIMELINE_BOTTOM_MARGIN_PX: i32 = 0;
 const TRACK_SIDE_PADDING_PX: i32 = 16;
-const TRACK_TOP_PX: i32 = 32;
-const TRACK_HEIGHT_PX: i32 = 8;
+const TRACK_TOP_PX: i32 = 28;
+const TRACK_HEIGHT_PX: i32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimelineLayout {

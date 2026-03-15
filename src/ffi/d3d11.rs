@@ -87,8 +87,8 @@ pub(crate) struct SubtitleRenderer {
 pub(crate) struct VideoSurface {
     texture: ID3D11Texture2D,
     subresource_index: u32,
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 /// Cached D3D11 video processor objects reused across frames when the
@@ -1296,18 +1296,24 @@ fn render_timeline_bitmap(
     let track_bottom = (layout.track_bottom - layout.top).max(track_top as i32 + 1) as u32;
     let track_left = layout.track_left.max(0) as u32;
     let track_right = layout.track_right.max(layout.track_left + 1) as u32;
+    let track_cy = track_top + (track_bottom - track_top) / 2;
+    let track_half_h = ((track_bottom - track_top) as f32) / 2.0;
 
-    fill_rect(
-        &mut pixels,
-        width,
-        height,
-        0,
-        0,
-        width,
-        height,
-        [12, 14, 18, 220],
-    );
-    fill_rect(
+    // Gradient background: transparent at top, semi-opaque at bottom.
+    for y in 0..height {
+        let t = y as f32 / height.max(1) as f32;
+        let alpha = (t * t * 180.0) as u8;
+        for x in 0..width {
+            let offset = ((y * width + x) * 4) as usize;
+            pixels[offset] = 0;
+            pixels[offset + 1] = 0;
+            pixels[offset + 2] = 0;
+            pixels[offset + 3] = alpha;
+        }
+    }
+
+    // Unplayed track — rounded pill shape, dim.
+    fill_rounded_rect(
         &mut pixels,
         width,
         height,
@@ -1315,40 +1321,41 @@ fn render_timeline_bitmap(
         track_top,
         track_right,
         track_bottom,
-        [255, 255, 255, 140],
+        track_half_h,
+        [255, 255, 255, 60],
     );
-    fill_rect(
+
+    // Played track — same pill shape, bright.
+    let played_right = (track_left + model.played_px).min(track_right);
+    if played_right > track_left {
+        fill_rounded_rect(
+            &mut pixels,
+            width,
+            height,
+            track_left,
+            track_top,
+            played_right,
+            track_bottom,
+            track_half_h,
+            [255, 255, 255, 230],
+        );
+    }
+
+    // Handle — anti-aliased white circle.
+    let handle_cx = model.handle_center_x.clamp(layout.track_left, layout.track_right) as u32;
+    fill_circle_aa(
         &mut pixels,
         width,
         height,
-        track_left,
-        track_top,
-        (track_left + model.played_px).min(track_right),
-        track_bottom,
+        handle_cx as f32,
+        track_cy as f32,
+        6.0,
         [255, 255, 255, 255],
-    );
-    fill_circle(
-        &mut pixels,
-        width,
-        height,
-        model.handle_center_x.clamp(layout.track_left, layout.track_right) as u32,
-        track_top + ((track_bottom - track_top) / 2),
-        9,
-        [12, 14, 18, 255],
-    );
-    fill_circle(
-        &mut pixels,
-        width,
-        height,
-        model.handle_center_x.clamp(layout.track_left, layout.track_right) as u32,
-        track_top + ((track_bottom - track_top) / 2),
-        7,
-        [255, 255, 255, 245],
     );
 
     let left_label = match model.preview_position_secs {
         Some(preview_secs) => format!(
-            "{} -> {}",
+            "{}  \u{2192}  {}",
             crate::render::timeline::format_timestamp(model.current_position_secs),
             crate::render::timeline::format_timestamp(preview_secs)
         ),
@@ -1508,10 +1515,10 @@ fn draw_timeline_label(
 
     let mut text_wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
     let mut draw_rect = RECT {
-        left: 12,
-        top: 0,
-        right: width as i32 - 12,
-        bottom: 18,
+        left: 16,
+        top: 4,
+        right: width as i32 - 16,
+        bottom: 24,
     };
     let draw_flags = if align_left {
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX
@@ -1620,31 +1627,134 @@ fn fill_rect(
     }
 }
 
-fn fill_circle(
+fn fill_circle_aa(
     pixels: &mut [u8],
     width: u32,
     height: u32,
-    center_x: u32,
-    center_y: u32,
-    radius: u32,
+    cx: f32,
+    cy: f32,
+    radius: f32,
     color: [u8; 4],
 ) {
-    let radius_sq = (radius * radius) as i32;
-    let min_x = center_x.saturating_sub(radius) as i32;
-    let max_x = (center_x + radius).min(width.saturating_sub(1)) as i32;
-    let min_y = center_y.saturating_sub(radius) as i32;
-    let max_y = (center_y + radius).min(height.saturating_sub(1)) as i32;
+    let r_outer = radius + 0.5;
+    let min_x = (cx - r_outer).floor().max(0.0) as u32;
+    let max_x = ((cx + r_outer).ceil() as u32).min(width.saturating_sub(1));
+    let min_y = (cy - r_outer).floor().max(0.0) as u32;
+    let max_y = ((cy + r_outer).ceil() as u32).min(height.saturating_sub(1));
 
     for y in min_y..=max_y {
         for x in min_x..=max_x {
-            let dx = x - center_x as i32;
-            let dy = y - center_y as i32;
-            if dx * dx + dy * dy > radius_sq {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > r_outer {
+                continue;
+            }
+            // Smooth edge: 1px anti-alias fringe.
+            let coverage = (radius - dist + 0.5).clamp(0.0, 1.0);
+            let alpha = (color[3] as f32 * coverage) as u8;
+            let offset = ((y * width + x) * 4) as usize;
+            blend_pixel(&mut pixels[offset..offset + 4], [color[0], color[1], color[2], alpha]);
+        }
+    }
+}
+
+fn fill_rounded_rect(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    radius: f32,
+    color: [u8; 4],
+) {
+    let left = left.min(width);
+    let right = right.min(width);
+    let top = top.min(height);
+    let bottom = bottom.min(height);
+    let rect_h = bottom.saturating_sub(top) as f32;
+    let rect_w = right.saturating_sub(left) as f32;
+    let r = radius.min(rect_h / 2.0).min(rect_w / 2.0);
+
+    let min_x = left.saturating_sub(1);
+    let max_x = (right + 1).min(width);
+    let min_y = top.saturating_sub(1);
+    let max_y = (bottom + 1).min(height);
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+
+            let inner_x = px >= left as f32 + r && px <= right as f32 - r;
+            let inner_y = py >= top as f32 + r && py <= bottom as f32 - r;
+
+            let coverage = if inner_x && inner_y {
+                // Fully inside.
+                1.0
+            } else if inner_x {
+                // Top or bottom edge.
+                let cy = if py < top as f32 + r {
+                    top as f32 + r
+                } else {
+                    bottom as f32 - r
+                };
+                let dist = (py - cy).abs();
+                (r - dist + 0.5).clamp(0.0, 1.0)
+            } else if inner_y {
+                // Left or right edge.
+                let cx = if px < left as f32 + r {
+                    left as f32 + r
+                } else {
+                    right as f32 - r
+                };
+                let dist = (px - cx).abs();
+                (r - dist + 0.5).clamp(0.0, 1.0)
+            } else {
+                // Corner — distance from corner circle center.
+                let cx = if px < left as f32 + r {
+                    left as f32 + r
+                } else {
+                    right as f32 - r
+                };
+                let cy = if py < top as f32 + r {
+                    top as f32 + r
+                } else {
+                    bottom as f32 - r
+                };
+                let dist = ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt();
+                (r - dist + 0.5).clamp(0.0, 1.0)
+            };
+
+            if coverage <= 0.0 {
                 continue;
             }
 
-            let offset = (((y as u32) * width + x as u32) * 4) as usize;
-            pixels[offset..offset + 4].copy_from_slice(&color);
+            let alpha = (color[3] as f32 * coverage) as u8;
+            let offset = ((y * width + x) * 4) as usize;
+            blend_pixel(&mut pixels[offset..offset + 4], [color[0], color[1], color[2], alpha]);
         }
     }
+}
+
+fn blend_pixel(dest: &mut [u8], src: [u8; 4]) {
+    let sa = src[3] as u32;
+    if sa == 0 {
+        return;
+    }
+    if sa == 255 || dest[3] == 0 {
+        dest.copy_from_slice(&src);
+        return;
+    }
+    let da = dest[3] as u32;
+    let out_a = sa + da - (sa * da / 255);
+    if out_a == 0 {
+        return;
+    }
+    for i in 0..3 {
+        dest[i] = ((src[i] as u32 * sa + dest[i] as u32 * da * (255 - sa) / 255) / out_a) as u8;
+    }
+    dest[3] = out_a as u8;
 }

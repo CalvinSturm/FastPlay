@@ -16,4 +16,5 @@ pub enum SessionCommand {
     ZoomAtCursor { delta: i16, cursor_x: i32, cursor_y: i32 },
     ResetView,
     ToggleAutoReplay,
+    FitWindow,
 }
