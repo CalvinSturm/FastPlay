@@ -233,4 +233,4 @@ Completed milestones:
 
 ## License
 
-TBD
+MIT
