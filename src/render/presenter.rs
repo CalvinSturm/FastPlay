@@ -22,12 +22,16 @@ pub struct Presenter {
     timeline_model: Option<TimelineOverlayModel>,
     volume_overlay: Option<SubtitleOverlay>,
     volume_text: Option<String>,
+    idle_overlay: Option<SubtitleOverlay>,
+    has_ever_shown_content: bool,
 }
 
 impl Presenter {
     pub fn new(window: &NativeWindow) -> Result<Self, Box<dyn std::error::Error>> {
         let device = D3D11Device::create()?;
         let swap_chain = SwapChainPresenter::new(window, &device)?;
+
+        let idle_overlay = device.create_idle_overlay(1280, 720).ok().flatten();
 
         Ok(Self {
             device,
@@ -39,6 +43,8 @@ impl Presenter {
             timeline_model: None,
             volume_overlay: None,
             volume_text: None,
+            idle_overlay,
+            has_ever_shown_content: false,
         })
     }
 
@@ -51,6 +57,10 @@ impl Presenter {
         };
         if let Some(handle) = self.current_surface {
             if let Some(entry) = self.surfaces.get(handle) {
+                if !self.has_ever_shown_content {
+                    self.has_ever_shown_content = true;
+                    self.idle_overlay = None;
+                }
                 return sc.render_surface(
                     &self.device,
                     &entry.surface,
@@ -65,7 +75,7 @@ impl Presenter {
         sc.render(
             &self.device,
             [0.08, 0.10, 0.14, 1.0],
-            self.subtitle_overlay.as_ref(),
+            self.idle_overlay.as_ref(),
             self.timeline_overlay.as_ref(),
             self.volume_overlay.as_ref(),
         )
