@@ -1,5 +1,8 @@
 use crate::{
-    ffi::d3d11::{D3D11Device, SubtitleOverlay, VideoSurface},
+    ffi::{
+        d3d11::{D3D11Device, SubtitleOverlay, VideoSurface},
+        dxgi::PresentResult,
+    },
     media::video::{DecodedVideoFrame, SoftwareVideoFrameFormat},
     platform::window::NativeWindow,
     render::{
@@ -42,21 +45,20 @@ impl Presenter {
     pub fn render(
         &mut self,
         view: &crate::render::ViewTransform,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<PresentResult, Box<dyn std::error::Error>> {
         let Some(sc) = self.swap_chain.as_mut() else {
             return Err("swap chain unavailable".into());
         };
         if let Some(handle) = self.current_surface {
             if let Some(entry) = self.surfaces.get(handle) {
-                sc.render_surface(
+                return sc.render_surface(
                     &self.device,
                     &entry.surface,
                     self.subtitle_overlay.as_ref(),
                     self.timeline_overlay.as_ref(),
                     self.volume_overlay.as_ref(),
                     view,
-                )?;
-                return Ok(());
+                );
             }
         }
 
@@ -66,8 +68,7 @@ impl Presenter {
             self.subtitle_overlay.as_ref(),
             self.timeline_overlay.as_ref(),
             self.volume_overlay.as_ref(),
-        )?;
-        Ok(())
+        )
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {

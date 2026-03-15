@@ -424,9 +424,19 @@ impl PlaybackSession {
                 rotation_quarter_turns: self.view_rotation_quarter_turns,
             };
             match self.presenter.render(&view) {
-                Ok(()) => {
+                Ok(crate::ffi::dxgi::PresentResult::Ok) => {
                     self.present_needed = false;
                     self.metrics.note_present(now);
+                }
+                Ok(crate::ffi::dxgi::PresentResult::Occluded) => {
+                    // Window is fully covered or minimized — the frame
+                    // wasn't shown. Mark as presented to avoid re-rendering
+                    // the same content, but skip the metrics note.
+                    self.present_needed = false;
+                }
+                Ok(crate::ffi::dxgi::PresentResult::DeviceLost) => {
+                    self.recover_device(now, "Present returned device-lost".to_string())?;
+                    return Ok(());
                 }
                 Err(error) => {
                     self.recover_device(now, format!("present failed: {error}"))?;

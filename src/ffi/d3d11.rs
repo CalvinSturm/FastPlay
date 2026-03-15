@@ -28,6 +28,8 @@ use windows::{
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
                 D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
                 D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+                ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+                ID3D11VideoProcessorOutputView,
             },
             Dxgi::Common::{
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32_FLOAT,
@@ -87,6 +89,21 @@ pub(crate) struct VideoSurface {
     subresource_index: u32,
     width: u32,
     height: u32,
+}
+
+/// Cached D3D11 video processor objects reused across frames when the
+/// input/output dimensions and backbuffer identity haven't changed.
+/// Avoids per-frame kernel-mode allocations that stress the GPU driver.
+pub(crate) struct VideoProcessorCache {
+    enumerator: ID3D11VideoProcessorEnumerator,
+    processor: ID3D11VideoProcessor,
+    output_view: ID3D11VideoProcessorOutputView,
+    input_width: u32,
+    input_height: u32,
+    output_width: u32,
+    output_height: u32,
+    /// Raw pointer used only for identity comparison — never dereferenced.
+    backbuffer_identity: *mut c_void,
 }
 
 #[repr(C)]
@@ -257,33 +274,85 @@ impl D3D11Device {
         output_width: u32,
         output_height: u32,
         view: &crate::render::ViewTransform,
+        vp_cache: &mut Option<VideoProcessorCache>,
     ) -> Result<(), Box<dyn Error>> {
-        let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: DXGI_RATIONAL {
-                Numerator: 1,
-                Denominator: 1,
-            },
-            InputWidth: surface.width.max(1),
-            InputHeight: surface.height.max(1),
-            OutputFrameRate: DXGI_RATIONAL {
-                Numerator: 1,
-                Denominator: 1,
-            },
-            OutputWidth: output_width.max(1),
-            OutputHeight: output_height.max(1),
-            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-        };
-
         // SAFETY:
         // - the enumerator and processor are created from the active device
         // - the input and output views reference live D3D11 textures
         // - the immediate context is multithread-protected for worker/UI sharing
+        // - backbuffer_identity is used only for pointer comparison, never
+        //   dereferenced
         unsafe {
-            let enumerator = self
-                .video_device
-                .CreateVideoProcessorEnumerator(&content_desc)?;
-            let processor = self.video_device.CreateVideoProcessor(&enumerator, 0)?;
+            let bb_identity = backbuffer.as_raw();
+
+            // Reuse or recreate the cached enumerator, processor, and output
+            // view.  These are keyed on (input dims, output dims, backbuffer
+            // identity).  Input views are per-texture and created fresh each
+            // frame, but the heavy kernel-mode objects are reused.
+            let cache = match vp_cache {
+                Some(c)
+                    if c.input_width == surface.width
+                        && c.input_height == surface.height
+                        && c.output_width == output_width
+                        && c.output_height == output_height
+                        && c.backbuffer_identity == bb_identity =>
+                {
+                    c
+                }
+                slot => {
+                    let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                        InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                        InputFrameRate: DXGI_RATIONAL {
+                            Numerator: 1,
+                            Denominator: 1,
+                        },
+                        InputWidth: surface.width.max(1),
+                        InputHeight: surface.height.max(1),
+                        OutputFrameRate: DXGI_RATIONAL {
+                            Numerator: 1,
+                            Denominator: 1,
+                        },
+                        OutputWidth: output_width.max(1),
+                        OutputHeight: output_height.max(1),
+                        Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+                    };
+                    let enumerator = self
+                        .video_device
+                        .CreateVideoProcessorEnumerator(&content_desc)?;
+                    let processor =
+                        self.video_device.CreateVideoProcessor(&enumerator, 0)?;
+
+                    let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                        ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                        Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                            Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                        },
+                    };
+                    let mut output_view = None;
+                    self.video_device.CreateVideoProcessorOutputView(
+                        backbuffer,
+                        &enumerator,
+                        &output_desc,
+                        Some(&mut output_view),
+                    )?;
+                    let output_view = output_view.ok_or(D3D11Error(
+                        "CreateVideoProcessorOutputView returned no view",
+                    ))?;
+
+                    *slot = Some(VideoProcessorCache {
+                        enumerator,
+                        processor,
+                        output_view,
+                        input_width: surface.width,
+                        input_height: surface.height,
+                        output_width,
+                        output_height,
+                        backbuffer_identity: bb_identity,
+                    });
+                    slot.as_mut().unwrap()
+                }
+            };
+
             let rotation_quarter_turns = view.rotation_quarter_turns % 4;
             let (display_width, display_height) = if rotation_quarter_turns % 2 == 1 {
                 (surface.height, surface.width)
@@ -315,33 +384,16 @@ impl D3D11Device {
                     },
                 },
             };
-            let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
-                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
-                    Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
-                },
-            };
 
             let mut input_view = None;
             self.video_device.CreateVideoProcessorInputView(
                 &surface.texture,
-                &enumerator,
+                &cache.enumerator,
                 &input_desc,
                 Some(&mut input_view),
             )?;
             let input_view =
                 input_view.ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
-
-            let mut output_view = None;
-            self.video_device.CreateVideoProcessorOutputView(
-                backbuffer,
-                &enumerator,
-                &output_desc,
-                Some(&mut output_view),
-            )?;
-            let output_view = output_view.ok_or(D3D11Error(
-                "CreateVideoProcessorOutputView returned no view",
-            ))?;
 
             let stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),
@@ -358,17 +410,17 @@ impl D3D11Device {
             };
 
             self.video_context.VideoProcessorSetStreamOutputRate(
-                &processor,
+                &cache.processor,
                 0,
                 D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
                 BOOL(0),
                 None,
             );
             self.video_context.VideoProcessorSetStreamRotation(
-                &processor,
+                &cache.processor,
                 0,
                 BOOL(1),
-                match view.rotation_quarter_turns % 4 {
+                match rotation_quarter_turns {
                     1 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
                     2 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
                     3 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
@@ -376,19 +428,19 @@ impl D3D11Device {
                 },
             );
             self.video_context.VideoProcessorSetStreamSourceRect(
-                &processor,
+                &cache.processor,
                 0,
                 BOOL(1),
                 Some(&source_rect),
             );
             self.video_context.VideoProcessorSetStreamDestRect(
-                &processor,
+                &cache.processor,
                 0,
                 BOOL(1),
                 Some(&dest_rect),
             );
             self.video_context.VideoProcessorSetOutputTargetRect(
-                &processor,
+                &cache.processor,
                 BOOL(1),
                 Some(&RECT {
                     left: 0,
@@ -397,15 +449,13 @@ impl D3D11Device {
                     bottom: output_height as i32,
                 }),
             );
-            // VideoProcessorBlt takes the stream by-value through the
-            // slice, which moves the struct.  The pInputSurface field is
-            // ManuallyDrop so its COM reference is never released on drop.
-            // We pass a pointer to the stack-local stream instead of moving
-            // it, then manually drop the ManuallyDrop field afterwards so
-            // the kernel-mode input view is freed every frame.
+            // VideoProcessorBlt borrows the stream array. The pInputSurface
+            // field is ManuallyDrop so its COM reference is never released
+            // on drop — we explicitly drop it afterwards so the kernel-mode
+            // input view is freed every frame.
             let mut streams = [stream];
             self.video_context
-                .VideoProcessorBlt(&processor, &output_view, 0, &streams)?;
+                .VideoProcessorBlt(&cache.processor, &cache.output_view, 0, &streams)?;
             ManuallyDrop::drop(&mut streams[0].pInputSurface);
         }
 
