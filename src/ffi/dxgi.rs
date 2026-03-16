@@ -43,7 +43,7 @@ use windows::{
                 SetWindowPlacement, SetWindowPos, ShowWindow,
                 TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
                 GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
-                LR_LOADFROMFILE, MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+                MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOZORDER,
                 SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
                 WM_DESTROY, WM_DROPFILES, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
@@ -832,33 +832,22 @@ fn register_window_class(instance: HINSTANCE, class_name: PCWSTR) -> Result<(), 
 }
 
 fn load_fastplay_icon(width: i32, height: i32) -> HICON {
-    let icon_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("icon")
-        .join("fastplay.ico");
-    let icon_wide: Vec<u16> = icon_path.as_os_str().encode_wide().chain(Some(0)).collect();
-
+    let module = unsafe { GetModuleHandleW(None).ok().map(|h| HINSTANCE(h.0)).unwrap_or_default() };
     let handle = unsafe {
         LoadImageW(
-            None,
-            PCWSTR(icon_wide.as_ptr()),
+            module,
+            PCWSTR(1 as *const u16),
             IMAGE_ICON,
             width,
             height,
-            LR_LOADFROMFILE,
+            Default::default(),
         )
     };
 
     match handle {
         Ok(handle) => HICON(handle.0),
         Err(error) => {
-            eprintln!(
-                "icon load fallback path={} width={} height={} error={}",
-                icon_path.display(),
-                width,
-                height,
-                error
-            );
+            eprintln!("icon load error width={} height={} error={}", width, height, error);
             HICON::default()
         }
     }
