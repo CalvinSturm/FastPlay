@@ -1,4 +1,4 @@
-# FastPlay
+# <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
 
 > **The Windows video player for people who care how fast playback feels.**
 
