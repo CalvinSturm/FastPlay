@@ -1,6 +1,17 @@
+
 # <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
 
 FastPlay is a **Windows-first, latency-focused media player** built in **Rust**.
+
+
+FastPlay is a Windows video player built for the parts of playback people actually notice: opening a file, reaching the first frame quickly, scrubbing without friction, adjusting the picture easily, and getting out of the way while you watch.
+
+It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
+
+[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/download/v0.1.0/fastplay-0.1.0-x86_64.msi) • [All releases](../../releases) • [Report an issue](../../issues)
+
+**Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
+
 
 It is designed around a simple idea: a player should feel fast because it opens quickly, seeks quickly, keeps video on the GPU, and avoids unnecessary UI and pipeline overhead.
 
