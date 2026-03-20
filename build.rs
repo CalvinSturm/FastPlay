@@ -15,6 +15,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/ffi/ffmpeg_shim.c");
     println!("cargo:rerun-if-changed=src/ffi/ffmpeg_shim.h");
+    println!("cargo:rerun-if-changed=assets/fastplay.rc");
+    println!("cargo:rerun-if-changed=assets/icon/fastplay.ico");
 
     let ffmpeg = discover_ffmpeg()?;
 
@@ -32,7 +34,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     compile_ffmpeg_shim(&ffmpeg.include_dir);
     generate_ffmpeg_bindings(&ffmpeg.include_dir)?;
 
-    let _ = embed_resource::compile("assets/fastplay.rc", embed_resource::NONE);
+    // Generate the RC file with an absolute icon path so rc.exe can find it
+    // regardless of what working directory it is invoked from.
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")?;
+    let icon_path = PathBuf::from(&manifest_dir)
+        .join("assets")
+        .join("icon")
+        .join("fastplay.ico");
+    let rc_path = PathBuf::from(env::var("OUT_DIR")?).join("fastplay.rc");
+    fs::write(
+        &rc_path,
+        format!("1 ICON \"{}\"\n", icon_path.to_string_lossy().replace('\\', "/")),
+    )?;
+    let _ = embed_resource::compile(&rc_path, embed_resource::NONE);
 
     Ok(())
 }
