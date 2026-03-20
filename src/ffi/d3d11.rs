@@ -1532,12 +1532,12 @@ fn render_timeline_bitmap(
     );
 
     let left_label = match model.preview_position_secs {
-        Some(preview_secs) => format!(
+        Some(preview_secs) if preview_secs != model.current_position_secs => format!(
             "{}  \u{2192}  {}",
             crate::render::timeline::format_timestamp(model.current_position_secs),
             crate::render::timeline::format_timestamp(preview_secs)
         ),
-        None => crate::render::timeline::format_timestamp(model.current_position_secs),
+        _ => crate::render::timeline::format_timestamp(model.current_position_secs),
     };
     let right_label = crate::render::timeline::format_timestamp(model.duration_secs);
 

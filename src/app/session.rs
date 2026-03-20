@@ -132,6 +132,7 @@ pub struct PlaybackSession {
     auto_replay: bool,
     replay_indicator_until: Option<Instant>,
     pause_after_seek: bool,
+    show_decode_info: bool,
 }
 
 impl PlaybackSession {
@@ -199,6 +200,7 @@ impl PlaybackSession {
             auto_replay: false,
             replay_indicator_until: None,
             pause_after_seek: false,
+            show_decode_info: false,
         })
     }
 
@@ -359,6 +361,10 @@ impl PlaybackSession {
             }
             SessionCommand::HalfSizeWindow => {
                 self.half_size_window();
+            }
+            SessionCommand::ToggleDecodeInfo => {
+                self.show_decode_info = !self.show_decode_info;
+                self.update_window_title();
             }
         }
         Ok(())
@@ -540,6 +546,9 @@ impl PlaybackSession {
                     .note_decode_mode_selected(mode, hw_fallback_count);
                 if mode == VideoDecodeMode::Software {
                     self.decode_preference = VideoDecodePreference::ForceSoftware;
+                }
+                if self.show_decode_info {
+                    self.update_window_title();
                 }
                 eprintln!(
                     "decode_mode={} hw_fallback_count={}",
@@ -1376,6 +1385,27 @@ impl PlaybackSession {
             std::mem::swap(&mut w, &mut h);
         }
         self.window.set_window_client_size((w / 2).max(1), (h / 2).max(1));
+    }
+
+    fn update_window_title(&self) {
+        let base = self
+            .current_source
+            .as_ref()
+            .and_then(|s| s.path().file_name())
+            .and_then(|n| n.to_str())
+            .map(|n| format!("{n} - FastPlay"))
+            .unwrap_or_else(|| "FastPlay".to_owned());
+
+        let title = if self.show_decode_info {
+            match self.active_decode_mode {
+                Some(mode) => format!("{base} [{}]", mode.label()),
+                None => base,
+            }
+        } else {
+            base
+        };
+
+        self.window.set_title(&title);
     }
 
     fn update_subtitle_overlay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {

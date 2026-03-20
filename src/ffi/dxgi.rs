@@ -1018,6 +1018,20 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::ToggleSubtitles);
                     }
+                    // ` → toggle decode info in title bar
+                    0xC0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ToggleDecodeInfo);
+                    }
+                    // ESC → cancel scrub
+                    0x1B => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::EscapeKey);
+                    }
                     key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
                         // Bit 30 of lparam: previous key state (1 = was down).
                         // Accelerate seek on held key repeats.
