@@ -277,6 +277,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     session.apply_command(SessionCommand::ToggleDecodeInfo, now)?;
                 }
                 InputEvent::EscapeKey => {
+                    if session.window().is_borderless() {
+                        session.apply_command(SessionCommand::ToggleBorderlessFullscreen, now)?;
+                    }
+                }
+                InputEvent::BackspaceKey => {
                     if timeline_ui.is_scrubbing() {
                         timeline_ui.cancel_scrub(&mut session, now)?;
                     }

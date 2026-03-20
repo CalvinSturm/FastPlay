@@ -1025,12 +1025,19 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::ToggleDecodeInfo);
                     }
-                    // ESC → cancel scrub
+                    // ESC → exit borderless fullscreen
                     0x1B => {
                         state
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::EscapeKey);
+                    }
+                    // Backspace → cancel scrub
+                    0x08 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::BackspaceKey);
                     }
                     key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
                         // Bit 30 of lparam: previous key state (1 = was down).

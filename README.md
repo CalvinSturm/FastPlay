@@ -20,6 +20,7 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `S` | Toggle subtitles |
 | `R` | Toggle auto-replay |
 | `MouseWheel` | Adjust volume |
+| `Esc` | Exit borderless fullscreen |
 | `Ctrl+H` | Toggle borderless fullscreen |
 | `Ctrl+W` | Fill screen height with no black padding |
 | `Ctrl+Q` | Snap window to half the video's native resolution |
@@ -27,6 +28,9 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Ctrl+E` | Rotate counter-clockwise 90 degrees |
 | `Ctrl+MouseWheel` | Zoom at cursor |
 | `Ctrl+0` | Reset zoom, pan, and rotation |
+
+| `Backspace` | Cancel scrub and return to original position |
+| `` ` `` | Toggle HW/SW decode mode in title bar |
 
 Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
 
