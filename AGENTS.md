@@ -9,8 +9,7 @@ Read `ARCHITECTURE.md` before making changes. Treat it as the source of truth fo
 ## Working rules
 
 - Do not revise architecture unless explicitly asked.
-- Implement one milestone at a time.
-- Do not jump ahead to future milestones.
+- Milestones M0–M6 are complete. New work is iterative improvement, not milestone build-out.
 - Prefer minimal, high-confidence changes over broad rewrites.
 - Preserve existing module boundaries unless the task explicitly requires a change.
 - Keep the repository as a single Rust crate unless explicitly told otherwise.
