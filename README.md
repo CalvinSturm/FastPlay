@@ -12,7 +12,7 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 
 ![demo](https://github.com/user-attachments/assets/ac8ae5f1-b4e3-42ca-b21e-c20c1c5de5c0)
 
-FastPlay is built around a simple idea: a player should feel fast because it opens quickly, seeks quickly, keeps video on the GPU, and avoids unnecessary UI and pipeline overhead.
+FastPlay is built around a simple idea: a player should feel fast because it opens quickly, seeks quickly, keeps video on the GPU, and avoids unnecessary UI overhead.
 
 ## Why FastPlay exists
 
@@ -55,6 +55,25 @@ Many media players try to do everything. FastPlay is focused on doing a smaller 
 - external `.srt` subtitle overlay
 - runtime subtitle toggle
 
+## Controls
+
+| Key | Action |
+|-----|--------|
+| `Space` | Pause / resume / replay at end |
+| `Left` | Seek backward 5s, hold for 15s steps |
+| `Right` | Seek forward 5s, hold for 15s steps |
+| `S` | Toggle subtitles |
+| `R` | Toggle auto-replay |
+| `MouseWheel` | Adjust volume |
+| `Ctrl+H` | Toggle borderless fullscreen |
+| `Ctrl+W` | Fill screen height with no black padding |
+| `Ctrl+R` | Rotate clockwise 90 degrees |
+| `Ctrl+E` | Rotate counter-clockwise 90 degrees |
+| `Ctrl+MouseWheel` | Zoom at cursor |
+| `Ctrl+0` | Reset zoom, pan, and rotation |
+
+Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
+
 ## Goals
 
 FastPlay prioritizes:
@@ -78,25 +97,6 @@ FastPlay does **not** currently aim to provide:
 - embedded subtitle track selection
 - HDR or tone mapping
 - extra hardware backends beyond the current D3D11-first design
-
-## Controls
-
-| Key | Action |
-|-----|--------|
-| `Space` | Pause / resume / replay at end |
-| `Left` | Seek backward 5s, hold for 15s steps |
-| `Right` | Seek forward 5s, hold for 15s steps |
-| `S` | Toggle subtitles |
-| `R` | Toggle auto-replay |
-| `MouseWheel` | Adjust volume |
-| `Ctrl+H` | Toggle borderless fullscreen |
-| `Ctrl+W` | Fill screen height with no black padding |
-| `Ctrl+R` | Rotate clockwise 90 degrees |
-| `Ctrl+E` | Rotate counter-clockwise 90 degrees |
-| `Ctrl+MouseWheel` | Zoom at cursor |
-| `Ctrl+0` | Reset zoom, pan, and rotation |
-
-Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
 
 ## Current limitations
 
@@ -146,7 +146,7 @@ The build expects the usual FFmpeg development layout with `include/` and `lib/`
 
 ```powershell
 cargo build --release
-````
+```
 
 ## Run
 
