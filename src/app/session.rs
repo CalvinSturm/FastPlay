@@ -268,6 +268,7 @@ impl PlaybackSession {
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
         self.active_decode_mode = None;
+        self.view_rotation_quarter_turns = 0;
         if let Some(track) = self.overlay.subtitle_track.as_ref() {
             eprintln!(
                 "subtitle_track_loaded path={} cues={}",
@@ -529,6 +530,7 @@ impl PlaybackSession {
                 op_id,
                 mode,
                 hw_fallback_count,
+                rotation_quarter_turns,
             } => {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
@@ -539,6 +541,10 @@ impl PlaybackSession {
                 if mode == VideoDecodeMode::Software {
                     self.decode_preference = VideoDecodePreference::ForceSoftware;
                 }
+                // Apply stream rotation on the initial decode mode event.
+                // On mid-stream HW→SW fallback the rotation is the same stream
+                // so this is idempotent.
+                self.view_rotation_quarter_turns = rotation_quarter_turns;
                 if self.overlay.show_decode_info {
                     self.update_window_title();
                 }
@@ -856,7 +862,7 @@ impl PlaybackSession {
                 open_gen,
                 seek_gen,
                 op_id,
-                |mode, hw_fallback_count| {
+                |mode, hw_fallback_count, rotation_quarter_turns| {
                     if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
@@ -867,6 +873,7 @@ impl PlaybackSession {
                             op_id,
                             mode,
                             hw_fallback_count,
+                            rotation_quarter_turns,
                         })
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },

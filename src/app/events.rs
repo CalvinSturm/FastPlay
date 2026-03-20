@@ -16,6 +16,8 @@ pub enum SessionEvent {
         op_id: OperationId,
         mode: VideoDecodeMode,
         hw_fallback_count: u64,
+        /// Clockwise quarter-turns from the stream's display matrix (0–3).
+        rotation_quarter_turns: u8,
     },
     MediaDurationKnown {
         open_gen: OpenGeneration,
