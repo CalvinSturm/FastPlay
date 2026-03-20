@@ -418,6 +418,13 @@ impl D3D11Device {
                 )?;
                 let new_view = new_view
                     .ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
+                // Each decoded frame is copied to a unique texture, so the
+                // cache key (texture identity) never repeats.  Evict the
+                // whole cache when it reaches the hardware pool size to
+                // prevent unbounded VRAM growth.
+                if cache.input_view_cache.len() >= 16 {
+                    cache.input_view_cache.clear();
+                }
                 cache.input_view_cache.push(InputViewEntry {
                     texture_identity,
                     subresource_index: surface.subresource_index,
