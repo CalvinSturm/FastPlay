@@ -103,7 +103,7 @@ pub(crate) fn stream_media<V, A, C>(
     open_gen: OpenGeneration,
     seek_gen: SeekGeneration,
     op_id: OperationId,
-    mut on_decode_mode: impl FnMut(VideoDecodeMode, u64) -> Result<(), String>,
+    mut on_decode_mode: impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
     mut on_duration: impl FnMut(Duration) -> Result<(), String>,
     mut should_cancel: C,
     mut on_video: V,
@@ -144,7 +144,7 @@ where
         let mut audio_batch = audio
             .as_ref()
             .map(|audio| AudioBatcher::new(audio.output_format));
-        on_decode_mode(video.mode, video.hw_fallback_count)?;
+        on_decode_mode(video.mode, video.hw_fallback_count, video.rotation_quarter_turns)?;
         let mut summary = StreamSummary {
             had_audio_stream: audio.is_some(),
             produced_video_frames: 0,
@@ -208,7 +208,7 @@ where
                             hw_mid_fallback_done = true;
                             summary.decode_mode = video.mode;
                             summary.hw_fallback_count = video.hw_fallback_count;
-                            on_decode_mode(video.mode, video.hw_fallback_count)?;
+                            on_decode_mode(video.mode, video.hw_fallback_count, video.rotation_quarter_turns)?;
                             let restart = start_position.unwrap_or(Duration::ZERO);
                             seek_and_flush(input.0, &video, audio.as_ref(), restart)?;
                             continue;
@@ -313,6 +313,9 @@ struct VideoDecoder {
     output: VideoDecoderOutput,
     mode: VideoDecodeMode,
     hw_fallback_count: u64,
+    /// Clockwise quarter-turns derived from the stream's display matrix side
+    /// data (0 = no rotation, 1 = 90° CW, 2 = 180°, 3 = 270° CW).
+    rotation_quarter_turns: u8,
 }
 
 enum VideoDecoderOutput {
@@ -375,6 +378,42 @@ unsafe fn open_video_decoder(
     }
 }
 
+/// Read the clockwise rotation in quarter-turns from a stream's display matrix
+/// side data. Returns 0 if no rotation metadata is present.
+unsafe fn stream_rotation_quarter_turns(codec_parameters: *const AVCodecParameters) -> u8 {
+    if codec_parameters.is_null() {
+        return 0;
+    }
+    let side_data = (*codec_parameters).coded_side_data;
+    let count = (*codec_parameters).nb_coded_side_data;
+    if side_data.is_null() || count <= 0 {
+        return 0;
+    }
+    for i in 0..count as usize {
+        let entry = &*side_data.add(i);
+        if entry.type_ != AVPacketSideDataType_AV_PKT_DATA_DISPLAYMATRIX {
+            continue;
+        }
+        if entry.size < 36 || entry.data.is_null() {
+            break;
+        }
+        // The display matrix is a 3x3 array of i32 in fixed-point (Q16.16).
+        let m = entry.data as *const i32;
+        let a = *m.add(0) as f64 / 65536.0; // cos(θ) * scale
+        let b = *m.add(1) as f64 / 65536.0; // sin(θ) * scale
+        let scale = (a * a + b * b).sqrt();
+        if scale < 1e-6 {
+            break;
+        }
+        // av_display_rotation_get returns -atan2(b, a) in degrees.
+        let degrees = -b.atan2(a).to_degrees();
+        // Round to nearest 90° and express as clockwise quarter-turns.
+        let quarter = ((degrees / 90.0).round() as i32).rem_euclid(4) as u8;
+        return quarter;
+    }
+    0
+}
+
 unsafe fn open_hardware_video_decoder(
     format_context: *mut AVFormatContext,
     device: &D3D11Device,
@@ -407,6 +446,8 @@ unsafe fn open_hardware_video_decoder(
         return Err("selected video stream codec parameters were null".into());
     }
 
+    let rotation_quarter_turns = stream_rotation_quarter_turns(codec_parameters);
+
     ffmpeg_check(
         avcodec_parameters_to_context(codec.0, codec_parameters),
         "avcodec_parameters_to_context(video)",
@@ -424,6 +465,7 @@ unsafe fn open_hardware_video_decoder(
         output: VideoDecoderOutput::Hardware,
         mode: VideoDecodeMode::HardwareD3D11,
         hw_fallback_count: 0,
+        rotation_quarter_turns,
     })
 }
 
@@ -458,6 +500,8 @@ unsafe fn open_software_video_decoder(
         return Err("selected video stream codec parameters were null".into());
     }
 
+    let rotation_quarter_turns = stream_rotation_quarter_turns(codec_parameters);
+
     ffmpeg_check(
         avcodec_parameters_to_context(codec.0, codec_parameters),
         "avcodec_parameters_to_context(video)",
@@ -473,6 +517,7 @@ unsafe fn open_software_video_decoder(
         output: VideoDecoderOutput::Software(SoftwareVideoConverter::default()),
         mode: VideoDecodeMode::Software,
         hw_fallback_count: 0,
+        rotation_quarter_turns,
     })
 }
 
