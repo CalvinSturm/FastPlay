@@ -16,5 +16,6 @@ pub enum InputEvent {
     HalfSizeWindow,
     ToggleDecodeInfo,
     EscapeKey,
+    BackspaceKey,
     FileDropped(PathBuf),
 }
