@@ -28,7 +28,8 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Ctrl+E` | Rotate counter-clockwise 90 degrees |
 | `Ctrl+MouseWheel` | Zoom at cursor |
 | `Ctrl+0` | Reset zoom, pan, and rotation |
-
+| `[` / `]` | Decrease / increase playback speed |
+| `\` | Reset playback speed to 1× |
 | `Backspace` | Cancel scrub and return to original position |
 | `` ` `` | Toggle HW/SW decode mode in title bar |
 

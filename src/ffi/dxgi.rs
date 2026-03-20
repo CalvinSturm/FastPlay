@@ -1039,12 +1039,15 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::BackspaceKey);
                     }
-                    // [ → slower, ] → faster
+                    // [ → slower, ] → faster, \ → reset to 1x
                     0xDB => {
                         state.input_events.borrow_mut().push(InputEvent::StepPlaybackRate(-1));
                     }
                     0xDD => {
                         state.input_events.borrow_mut().push(InputEvent::StepPlaybackRate(1));
+                    }
+                    0xDC => {
+                        state.input_events.borrow_mut().push(InputEvent::ResetPlaybackRate);
                     }
                     key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
                         // Bit 30 of lparam: previous key state (1 = was down).
