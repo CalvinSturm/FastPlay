@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    app::{commands::SessionCommand, events::SessionEvent, state::PlaybackState},
+    app::{commands::SessionCommand, events::SessionEvent, overlay::OverlayManager, state::PlaybackState},
     audio::sink::AudioSink,
     ffi::{
         dxgi::ResizeRequest,
@@ -30,7 +30,7 @@ use crate::{
         generations::{
             GenerationState, OpenGeneration, OperationClock, OperationId, SeekGeneration,
         },
-        metrics::PlaybackMetrics,
+        metrics::MetricsCollector,
         queues::QueueDefaults,
     },
     render::presenter::Presenter,
@@ -91,7 +91,7 @@ pub struct PlaybackSession {
     worker_nonce: Arc<AtomicU64>,
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
-    metrics: PlaybackMetrics,
+    metrics: MetricsCollector,
     video_clock: Option<PlaybackClock>,
     media_time_origin_pts: Option<Duration>,
     paused_clock_position: Option<Duration>,
@@ -100,29 +100,19 @@ pub struct PlaybackSession {
     media_duration: Option<Duration>,
     pending_seek_target: Option<SeekTarget>,
     seek_discard_before_pts: Option<Duration>,
-    pending_seek_first_frame_metric: bool,
-    pending_seek_settled_metric: bool,
     seek_frame_presented_since_request: bool,
     audio_stream_expected: bool,
-    subtitle_track: Option<SubtitleTrack>,
-    subtitles_enabled: bool,
-    subtitle_clock_base: Option<Duration>,
-    active_subtitle_cue: Option<usize>,
-    active_subtitle_viewport: Option<(u32, u32)>,
+    overlay: OverlayManager,
     queued_video_frames: VecDeque<DecodedVideoFrame>,
     queued_audio_frames: VecDeque<QueuedAudioFrame>,
     queued_video_capacity: usize,
     queued_audio_capacity: usize,
     drop_buckets: VideoDropBuckets,
-    measure_open_audio_metric: bool,
-    pending_first_frame_metric: bool,
-    pending_first_audio_metric: bool,
     video_stream_ended: bool,
     audio_stream_ended: bool,
     active_decode_mode: Option<VideoDecodeMode>,
     last_error: Option<String>,
     present_needed: bool,
-    volume_overlay_until: Option<Instant>,
     view_zoom: f32,
     view_pan_x: f32,
     view_pan_y: f32,
@@ -130,9 +120,7 @@ pub struct PlaybackSession {
     needs_initial_resize: bool,
     has_shown_content: bool,
     auto_replay: bool,
-    replay_indicator_until: Option<Instant>,
     pause_after_seek: bool,
-    show_decode_info: bool,
     playback_rate: f64,
 }
 
@@ -160,7 +148,7 @@ impl PlaybackSession {
             worker_nonce: Arc::new(AtomicU64::new(0)),
             event_tx,
             event_rx,
-            metrics: PlaybackMetrics::default(),
+            metrics: MetricsCollector::new(),
             video_clock: None,
             media_time_origin_pts: None,
             paused_clock_position: None,
@@ -169,29 +157,19 @@ impl PlaybackSession {
             media_duration: None,
             pending_seek_target: None,
             seek_discard_before_pts: None,
-            pending_seek_first_frame_metric: false,
-            pending_seek_settled_metric: false,
             seek_frame_presented_since_request: false,
             audio_stream_expected: false,
-            subtitle_track: None,
-            subtitles_enabled: true,
-            subtitle_clock_base: None,
-            active_subtitle_cue: None,
-            active_subtitle_viewport: None,
+            overlay: OverlayManager::new(),
             queued_video_frames: VecDeque::with_capacity(queue_defaults.decoded_video_frames),
             queued_audio_frames: VecDeque::with_capacity(queue_defaults.decoded_audio_frames),
             queued_video_capacity: queue_defaults.decoded_video_frames,
             queued_audio_capacity: queue_defaults.decoded_audio_frames,
             drop_buckets: VideoDropBuckets::default(),
-            measure_open_audio_metric: false,
-            pending_first_frame_metric: false,
-            pending_first_audio_metric: false,
             video_stream_ended: false,
             audio_stream_ended: false,
             active_decode_mode: None,
             last_error: None,
             present_needed: true,
-            volume_overlay_until: None,
             view_zoom: 1.0,
             view_pan_x: 0.0,
             view_pan_y: 0.0,
@@ -199,9 +177,7 @@ impl PlaybackSession {
             needs_initial_resize: false,
             has_shown_content: false,
             auto_replay: false,
-            replay_indicator_until: None,
             pause_after_seek: false,
-            show_decode_info: false,
             playback_rate: 1.0,
         })
     }
@@ -241,7 +217,7 @@ impl PlaybackSession {
     }
 
     pub fn replay_indicator_until(&self) -> Option<Instant> {
-        self.replay_indicator_until
+        self.overlay.replay_indicator_until()
     }
 
     pub fn set_timeline_overlay(
@@ -258,11 +234,11 @@ impl PlaybackSession {
         &mut self,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.volume_overlay_until.is_some_and(|until| now > until) {
+        if self.overlay.volume_overlay_until.is_some_and(|until| now > until) {
             if self.presenter.set_volume_overlay(None, 0, 0)? {
                 self.present_needed = true;
             }
-            self.volume_overlay_until = None;
+            self.overlay.volume_overlay_until = None;
         }
         Ok(())
     }
@@ -276,23 +252,23 @@ impl PlaybackSession {
         let seek_gen = self.generations.seek();
         let op_id = self.operation_clock.next();
         self.decode_preference = source.decode_preference();
-        self.subtitle_track = match SubtitleTrack::load_sidecar(&source) {
+        self.overlay.subtitle_track = match SubtitleTrack::load_sidecar(&source) {
             Ok(track) => track,
             Err(error) => {
                 eprintln!("subtitle load failed: {error}");
                 None
             }
         };
-        self.subtitles_enabled = self.subtitle_track.is_some();
-        self.subtitle_clock_base = None;
-        self.active_subtitle_cue = None;
-        self.active_subtitle_viewport = None;
+        self.overlay.subtitles_enabled = self.overlay.subtitle_track.is_some();
+        self.overlay.subtitle_clock_base = None;
+        self.overlay.active_subtitle_cue = None;
+        self.overlay.active_subtitle_viewport = None;
         self.playback_rate = 1.0;
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
         self.active_decode_mode = None;
-        if let Some(track) = self.subtitle_track.as_ref() {
+        if let Some(track) = self.overlay.subtitle_track.as_ref() {
             eprintln!(
                 "subtitle_track_loaded path={} cues={}",
                 track.path().display(),
@@ -301,7 +277,7 @@ impl PlaybackSession {
         }
         self.needs_initial_resize = true;
         self.metrics.note_open_requested(now);
-        self.measure_open_audio_metric = true;
+        self.metrics.enable_open_audio_metric();
         self.begin_operation(
             source,
             None,
@@ -357,7 +333,7 @@ impl PlaybackSession {
             }
             SessionCommand::ToggleAutoReplay => {
                 self.auto_replay = !self.auto_replay;
-                self.replay_indicator_until = Some(now + Duration::from_millis(1500));
+                self.overlay.replay_indicator_until = Some(now + Duration::from_millis(1500));
             }
             SessionCommand::FitWindow => {
                 self.fit_window();
@@ -366,7 +342,7 @@ impl PlaybackSession {
                 self.half_size_window();
             }
             SessionCommand::ToggleDecodeInfo => {
-                self.show_decode_info = !self.show_decode_info;
+                self.overlay.show_decode_info = !self.overlay.show_decode_info;
                 self.update_window_title();
             }
             SessionCommand::StepPlaybackRate(step) => {
@@ -405,7 +381,7 @@ impl PlaybackSession {
                 self.present_needed = true;
             }
         }
-        self.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
+        self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
         eprintln!("volume={volume_percent}");
     }
 
@@ -485,33 +461,33 @@ impl PlaybackSession {
             thread::sleep(Duration::from_millis(1));
         }
 
-        if self.pending_first_frame_metric && self.presenter.has_selected_surface() {
+        if self.metrics.pending_first_frame && self.presenter.has_selected_surface() {
             if let Some(elapsed) = self.metrics.note_first_frame_presented(now) {
                 eprintln!("open_to_first_frame_ms={}", elapsed.as_millis());
             }
-            self.pending_first_frame_metric = false;
+            self.metrics.pending_first_frame = false;
         }
 
-        if self.pending_first_audio_metric {
+        if self.metrics.pending_first_audio {
             if let Some(elapsed) = self.metrics.note_first_audio_started(now) {
                 eprintln!("open_to_first_audio_ms={}", elapsed.as_millis());
             }
-            self.pending_first_audio_metric = false;
-            self.measure_open_audio_metric = false;
+            self.metrics.pending_first_audio = false;
+            self.metrics.disable_open_audio_metric();
         }
 
-        if self.pending_seek_first_frame_metric && self.presenter.has_selected_surface() {
+        if self.metrics.pending_seek_first_frame && self.presenter.has_selected_surface() {
             if let Some(elapsed) = self.metrics.note_seek_first_frame_presented(now) {
                 eprintln!("seek_to_first_frame_ms={}", elapsed.as_millis());
             }
-            self.pending_seek_first_frame_metric = false;
+            self.metrics.pending_seek_first_frame = false;
         }
 
-        if self.pending_seek_settled_metric && self.seek_is_settled() {
+        if self.metrics.pending_seek_settled && self.seek_is_settled() {
             if let Some(elapsed) = self.metrics.note_seek_av_settled(now) {
                 eprintln!("seek_to_av_settled_ms={}", elapsed.as_millis());
             }
-            self.pending_seek_settled_metric = false;
+            self.metrics.pending_seek_settled = false;
             self.pending_seek_target = None;
         }
 
@@ -563,7 +539,7 @@ impl PlaybackSession {
                 if mode == VideoDecodeMode::Software {
                     self.decode_preference = VideoDecodePreference::ForceSoftware;
                 }
-                if self.show_decode_info {
+                if self.overlay.show_decode_info {
                     self.update_window_title();
                 }
                 eprintln!(
@@ -744,7 +720,7 @@ impl PlaybackSession {
         let seek_gen = self.generations.bump_seek();
         let op_id = self.operation_clock.next();
         self.metrics.note_seek_requested(now);
-        self.measure_open_audio_metric = false;
+        self.metrics.disable_open_audio_metric();
         let absolute_target = self.absolute_media_position(target.position());
         // Keep the last presented surface alive during seeks so the user sees
         // the previous frame until the new one arrives, avoiding a grey flash.
@@ -755,9 +731,8 @@ impl PlaybackSession {
         self.spawn_stream_worker(source, Some(absolute_target), open_gen, seek_gen, op_id);
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
-        self.subtitle_clock_base = Some(target.position());
-        self.pending_seek_first_frame_metric = true;
-        self.pending_seek_settled_metric = true;
+        self.overlay.subtitle_clock_base = Some(target.position());
+        self.metrics.note_seek_pending();
         self.seek_frame_presented_since_request = false;
         Ok(())
     }
@@ -813,15 +788,14 @@ impl PlaybackSession {
         self.audio_clock_anchor_pts = None;
         self.audio_submitted_frames = 0;
         self.drop_buckets = VideoDropBuckets::default();
-        self.pending_first_frame_metric = false;
-        self.pending_first_audio_metric = false;
+        self.metrics.reset_for_operation();
         self.video_stream_ended = false;
         self.audio_stream_ended = false;
         self.active_decode_mode = None;
-        self.volume_overlay_until = None;
-        self.subtitle_clock_base = None;
-        self.active_subtitle_cue = None;
-        self.active_subtitle_viewport = None;
+        self.overlay.volume_overlay_until = None;
+        self.overlay.subtitle_clock_base = None;
+        self.overlay.active_subtitle_cue = None;
+        self.overlay.active_subtitle_viewport = None;
         if reset_audio_expectation {
             self.audio_stream_expected = false;
         }
@@ -1061,8 +1035,8 @@ impl PlaybackSession {
             if wrote_any_audio && self.audio_clock_anchor_pts.is_none() && sink.is_started() {
                 self.audio_clock_anchor_pts = first_written_pts;
                 self.video_clock = None;
-                if self.measure_open_audio_metric {
-                    self.pending_first_audio_metric = true;
+                if self.metrics.measure_open_audio() {
+                    self.metrics.pending_first_audio = true;
                 }
             }
         }
@@ -1209,8 +1183,8 @@ impl PlaybackSession {
         if let Some(elapsed) = self.metrics.note_resume_first_frame(now) {
             eprintln!("play_to_motion_ms={}", elapsed.as_millis());
         }
-        self.pending_first_frame_metric |= self.metrics.presented_video_frames() == 1;
-        self.seek_frame_presented_since_request |= self.pending_seek_settled_metric;
+        self.metrics.pending_first_frame |= self.metrics.presented_video_frames() == 1;
+        self.seek_frame_presented_since_request |= self.metrics.pending_seek_settled;
         // Check pause_after_seek unconditionally — audio submission is already
         // blocked by the same flag so we must not wait for the audio anchor.
         if self.pause_after_seek {
@@ -1315,19 +1289,19 @@ impl PlaybackSession {
     }
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.subtitle_track.is_none() {
+        if self.overlay.subtitle_track.is_none() {
             eprintln!("subtitle toggle ignored: no external .srt sidecar was loaded");
             return Ok(());
         }
 
-        self.subtitles_enabled = !self.subtitles_enabled;
-        self.subtitle_clock_base = None;
-        self.active_subtitle_cue = None;
-        self.active_subtitle_viewport = None;
-        if !self.subtitles_enabled {
+        self.overlay.subtitles_enabled = !self.overlay.subtitles_enabled;
+        self.overlay.subtitle_clock_base = None;
+        self.overlay.active_subtitle_cue = None;
+        self.overlay.active_subtitle_viewport = None;
+        if !self.overlay.subtitles_enabled {
             self.presenter.clear_subtitle_overlay();
         }
-        eprintln!("subtitles_enabled={}", self.subtitles_enabled);
+        eprintln!("subtitles_enabled={}", self.overlay.subtitles_enabled);
         Ok(())
     }
 
@@ -1442,7 +1416,7 @@ impl PlaybackSession {
             };
             suffixes.push(rate_str);
         }
-        if self.show_decode_info {
+        if self.overlay.show_decode_info {
             if let Some(mode) = self.active_decode_mode {
                 suffixes.push(mode.label().to_owned());
             }
@@ -1458,15 +1432,15 @@ impl PlaybackSession {
 
     fn update_subtitle_overlay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         let subtitle_position = self.subtitle_position(now);
-        let Some(track) = self.subtitle_track.as_ref() else {
-            self.active_subtitle_cue = None;
-            self.active_subtitle_viewport = None;
+        let Some(track) = self.overlay.subtitle_track.as_ref() else {
+            self.overlay.active_subtitle_cue = None;
+            self.overlay.active_subtitle_viewport = None;
             self.presenter.clear_subtitle_overlay();
             return Ok(());
         };
-        if !self.subtitles_enabled {
-            self.active_subtitle_cue = None;
-            self.active_subtitle_viewport = None;
+        if !self.overlay.subtitles_enabled {
+            self.overlay.active_subtitle_cue = None;
+            self.overlay.active_subtitle_viewport = None;
             self.presenter.clear_subtitle_overlay();
             return Ok(());
         }
@@ -1476,9 +1450,9 @@ impl PlaybackSession {
             return Ok(());
         }
 
-        let cue = track.cue_at(subtitle_position, self.active_subtitle_cue);
+        let cue = track.cue_at(subtitle_position, self.overlay.active_subtitle_cue);
         let next_index = cue.map(|(index, _)| index);
-        if self.active_subtitle_cue == next_index && self.active_subtitle_viewport == Some(viewport)
+        if self.overlay.active_subtitle_cue == next_index && self.overlay.active_subtitle_viewport == Some(viewport)
         {
             return Ok(());
         }
@@ -1488,8 +1462,8 @@ impl PlaybackSession {
             Some((index, cue)) => {
                 self.presenter
                     .set_subtitle_overlay(Some(&cue.text), viewport.0, viewport.1)?;
-                self.active_subtitle_cue = Some(index);
-                self.active_subtitle_viewport = Some(viewport);
+                self.overlay.active_subtitle_cue = Some(index);
+                self.overlay.active_subtitle_viewport = Some(viewport);
                 eprintln!(
                     "subtitle_cue index={} start_ms={} end_ms={}",
                     index,
@@ -1498,10 +1472,10 @@ impl PlaybackSession {
                 );
             }
             None => {
-                if self.active_subtitle_cue.take().is_some() {
+                if self.overlay.active_subtitle_cue.take().is_some() {
                     eprintln!("subtitle_cue cleared");
                 }
-                self.active_subtitle_viewport = Some(viewport);
+                self.overlay.active_subtitle_viewport = Some(viewport);
                 self.presenter.clear_subtitle_overlay();
             }
         }
@@ -1515,11 +1489,11 @@ impl PlaybackSession {
         }
 
         let master = self.master_clock_position(now).unwrap_or(Duration::ZERO);
-        if let Some(base) = self.subtitle_clock_base {
+        if let Some(base) = self.overlay.subtitle_clock_base {
             if master.saturating_add(Duration::from_secs(1)) < base {
                 return base.saturating_add(master);
             }
-            self.subtitle_clock_base = None;
+            self.overlay.subtitle_clock_base = None;
         }
 
         master
@@ -1589,7 +1563,7 @@ impl PlaybackSession {
         let seek_gen = self.generations.bump_seek();
         let op_id = self.operation_clock.next();
         eprintln!("audio endpoint recovery: {reason}");
-        self.measure_open_audio_metric = false;
+        self.metrics.disable_open_audio_metric();
         self.begin_operation(
             source,
             Some(restart_target),
@@ -1600,7 +1574,7 @@ impl PlaybackSession {
             true,
             false,
         )?;
-        self.subtitle_clock_base = Some(restart_target);
+        self.overlay.subtitle_clock_base = Some(restart_target);
         Ok(())
     }
 
@@ -1624,7 +1598,7 @@ impl PlaybackSession {
         let open_gen = self.generations.open();
         let seek_gen = self.generations.bump_seek();
         let op_id = self.operation_clock.next();
-        self.measure_open_audio_metric = false;
+        self.metrics.disable_open_audio_metric();
         self.begin_operation(
             source,
             Some(restart_target),
@@ -1635,7 +1609,7 @@ impl PlaybackSession {
             false,
             false,
         )?;
-        self.subtitle_clock_base = Some(restart_target);
+        self.overlay.subtitle_clock_base = Some(restart_target);
         if let Some(elapsed) = self.metrics.note_device_recovered(now) {
             eprintln!("device_recovery_ms={}", elapsed.as_millis());
         }
