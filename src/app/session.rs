@@ -357,6 +357,9 @@ impl PlaybackSession {
             SessionCommand::FitWindow => {
                 self.fit_window();
             }
+            SessionCommand::HalfSizeWindow => {
+                self.half_size_window();
+            }
         }
         Ok(())
     }
@@ -1363,6 +1366,16 @@ impl PlaybackSession {
             std::mem::swap(&mut w, &mut h);
         }
         self.window.fit_window_to_content(w, h);
+    }
+
+    fn half_size_window(&mut self) {
+        let Some((mut w, mut h)) = self.presenter.current_surface_size() else {
+            return;
+        };
+        if self.view_rotation_quarter_turns % 2 != 0 {
+            std::mem::swap(&mut w, &mut h);
+        }
+        self.window.set_window_client_size((w / 2).max(1), (h / 2).max(1));
     }
 
     fn update_subtitle_overlay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {

@@ -13,5 +13,6 @@ pub enum InputEvent {
     ResetView,
     ToggleAutoReplay,
     FitWindow,
+    HalfSizeWindow,
     FileDropped(PathBuf),
 }

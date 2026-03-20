@@ -242,6 +242,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::FitWindow => {
                     session.apply_command(SessionCommand::FitWindow, now)?;
                 }
+                InputEvent::HalfSizeWindow => {
+                    session.apply_command(SessionCommand::HalfSizeWindow, now)?;
+                }
                 InputEvent::FileDropped(path) => {
                     let source = MediaSource::new(path);
                     let source = if session.decode_preference() == VideoDecodePreference::ForceSoftware {
