@@ -107,6 +107,7 @@ dependencies = [
  "cc",
  "embed-resource",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

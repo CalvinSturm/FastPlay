@@ -10,6 +10,8 @@ mod render;
 
 use std::{ffi::c_void, time::Instant};
 
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+
 use app::commands::SessionCommand;
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
@@ -39,6 +41,13 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Raise the Windows multimedia timer resolution to 1 ms so that
+    // thread::sleep(1ms) wakes up on time.  Without this the default
+    // resolution is ~15 ms, which causes the main loop to miss video frame
+    // deadlines and produces stuttering / A-V desync.
+    // SAFETY: balanced by timeEndPeriod(1) at the end of this function.
+    unsafe { timeBeginPeriod(1) };
+
     let media_path = parse_media_source_from_args()?;
     let window = NativeWindow::create("FastPlay", 1280, 720)?;
     let mut session = PlaybackSession::new(window)?;
@@ -163,6 +172,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(temp) = temp_drop_file {
         let _ = std::fs::remove_file(&temp);
     }
+    unsafe { timeEndPeriod(1) };
     Ok(())
 }
 
