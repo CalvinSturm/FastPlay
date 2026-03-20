@@ -12,7 +12,7 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
-        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
@@ -31,10 +31,20 @@ use windows::{
                 MONITOR_DEFAULTTONEAREST,
             },
         },
-        System::LibraryLoader::GetModuleHandleW,
+        System::{
+            Com::{IDataObject, IStream, FORMATETC},
+            DataExchange::RegisterClipboardFormatW,
+            LibraryLoader::GetModuleHandleW,
+            Memory::{GlobalLock, GlobalUnlock},
+            Ole::{
+                IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, RevokeDragDrop,
+                DROPEFFECT, DROPEFFECT_COPY, ReleaseStgMedium,
+            },
+            SystemServices::MODIFIERKEYS_FLAGS,
+        },
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_LBUTTON},
-            Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP},
+            Shell::{DragQueryFileW, FILEGROUPDESCRIPTORW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
@@ -46,7 +56,7 @@ use windows::{
                 MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOZORDER,
                 SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-                WM_DESTROY, WM_DROPFILES, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
+                WM_DESTROY, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
                 WM_EXITSIZEMOVE, WM_KEYDOWN, WM_LBUTTONDBLCLK,
                 WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE,
                 WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
@@ -109,6 +119,7 @@ pub struct NativeWindowInner {
     is_borderless: Cell<bool>,
     saved_placement: Cell<WINDOWPLACEMENT>,
     saved_style: Cell<u32>,
+    _drop_target: IDropTarget,
 }
 
 impl NativeWindowInner {
@@ -165,7 +176,14 @@ impl NativeWindowInner {
         // SAFETY: `hwnd` is a live top-level window created above.
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOW);
-            DragAcceptFiles(hwnd, true);
+        }
+
+        // Register COM drop target so that drops from virtual folders (e.g.
+        // inside a zip) are handled via IDataObject in addition to real paths.
+        let drop_target: IDropTarget = FastPlayDropTarget { hwnd }.into();
+        unsafe {
+            let _ = OleInitialize(None);
+            RegisterDragDrop(hwnd, &drop_target)?;
         }
 
         let mut placement = WINDOWPLACEMENT::default();
@@ -177,6 +195,7 @@ impl NativeWindowInner {
             is_borderless: Cell::new(false),
             saved_placement: Cell::new(placement),
             saved_style: Cell::new(WS_OVERLAPPEDWINDOW.0),
+            _drop_target: drop_target,
         })
     }
 
@@ -530,6 +549,7 @@ impl Drop for NativeWindowInner {
         if self.state.is_open.get() && self.hwnd.0 != null_mut() {
             // SAFETY: `hwnd` belongs to this wrapper and is no longer used after drop.
             unsafe {
+                let _ = RevokeDragDrop(self.hwnd);
                 let _ = DestroyWindow(self.hwnd);
             }
         }
@@ -925,6 +945,162 @@ fn to_wide(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(Some(0)).collect()
 }
 
+// ── COM drop target ──────────────────────────────────────────────────────────
+
+#[windows::core::implement(IDropTarget)]
+struct FastPlayDropTarget {
+    hwnd: HWND,
+}
+
+impl IDropTarget_Impl for FastPlayDropTarget_Impl {
+    fn DragEnter(
+        &self,
+        _pdataobj: Option<&IDataObject>,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        _pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        unsafe { *pdweffect = DROPEFFECT_COPY }
+        Ok(())
+    }
+
+    fn DragOver(
+        &self,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        _pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        unsafe { *pdweffect = DROPEFFECT_COPY }
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> windows_core::Result<()> {
+        Ok(())
+    }
+
+    fn Drop(
+        &self,
+        pdataobj: Option<&IDataObject>,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        _pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        unsafe { *pdweffect = DROPEFFECT_COPY }
+        if let Some(data_obj) = pdataobj {
+            if let Some(path) = unsafe { extract_drop_path(data_obj) } {
+                if let Some(state) = unsafe { window_state(self.hwnd) } {
+                    state.input_events.borrow_mut().push(InputEvent::FileDropped(path));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Try to resolve a drag-and-drop `IDataObject` to a filesystem path.
+///
+/// Handles two cases:
+/// 1. Real filesystem drop (`CF_HDROP`) — path exists on disk.
+/// 2. Virtual file from a shell namespace (e.g. inside a `.zip`) — reads the
+///    file contents via `CFSTR_FILECONTENTS` and writes them to a temp file.
+unsafe fn extract_drop_path(data_obj: &IDataObject) -> Option<PathBuf> {
+    // ── 1. CF_HDROP — real path ───────────────────────────────────────────
+    let hdrop_fmt = FORMATETC {
+        cfFormat: 15u16, // CF_HDROP
+        ptd: std::ptr::null_mut(),
+        dwAspect: 1, // DVASPECT_CONTENT
+        lindex: -1,
+        tymed: 1, // TYMED_HGLOBAL
+    };
+    if let Ok(mut medium) = data_obj.GetData(&hdrop_fmt) {
+        let hdrop = HDROP(medium.u.hGlobal.0);
+        let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+        let path = if count > 0 {
+            let len = DragQueryFileW(hdrop, 0, None) as usize;
+            let mut buf = vec![0u16; len + 1];
+            DragQueryFileW(hdrop, 0, Some(&mut buf));
+            buf.retain(|&c| c != 0);
+            let p = PathBuf::from(std::ffi::OsString::from_wide(&buf));
+            if p.exists() { Some(p) } else { None }
+        } else {
+            None
+        };
+        ReleaseStgMedium(&mut medium);
+        if path.is_some() {
+            return path;
+        }
+    }
+
+    // ── 2. Virtual file — extract to %TEMP% ──────────────────────────────
+    let desc_id = RegisterClipboardFormatW(w!("FileGroupDescriptorW"));
+    let contents_id = RegisterClipboardFormatW(w!("FileContents"));
+    if desc_id == 0 || contents_id == 0 {
+        return None;
+    }
+
+    // Get filename from FileGroupDescriptorW
+    let desc_fmt = FORMATETC {
+        cfFormat: desc_id as u16,
+        ptd: std::ptr::null_mut(),
+        dwAspect: 1, // DVASPECT_CONTENT
+        lindex: -1,
+        tymed: 1, // TYMED_HGLOBAL
+    };
+    let mut desc_medium = data_obj.GetData(&desc_fmt).ok()?;
+    let filename = {
+        let ptr = GlobalLock(desc_medium.u.hGlobal) as *const FILEGROUPDESCRIPTORW;
+        let name = if ptr.is_null() {
+            None
+        } else {
+            // FILEGROUPDESCRIPTORW is packed(1) — copy the filename out to avoid
+            // creating an unaligned reference.
+            let raw: [u16; 260] = std::ptr::read_unaligned(
+                std::ptr::addr_of!((*ptr).fgd[0].cFileName)
+            );
+            let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+            let s = std::ffi::OsString::from_wide(&raw[..len]);
+            let _ = GlobalUnlock(desc_medium.u.hGlobal);
+            Some(PathBuf::from(s))
+        };
+        name
+    };
+    ReleaseStgMedium(&mut desc_medium);
+    let filename = filename?;
+
+    // Get file contents as IStream
+    let contents_fmt = FORMATETC {
+        cfFormat: contents_id as u16,
+        ptd: std::ptr::null_mut(),
+        dwAspect: 1, // DVASPECT_CONTENT
+        lindex: 0,   // first file
+        tymed: 4,    // TYMED_ISTREAM
+    };
+    let mut contents_medium = data_obj.GetData(&contents_fmt).ok()?;
+    let stream: Option<IStream> = (*contents_medium.u.pstm).clone();
+    ReleaseStgMedium(&mut contents_medium);
+    let stream = stream?;
+
+    // Write stream to a temp file
+    let mut temp_path = std::env::temp_dir();
+    temp_path.push(filename.file_name()?);
+    let mut file = std::fs::File::create(&temp_path).ok()?;
+    let mut buf = [0u8; 65536];
+    loop {
+        let mut read = 0u32;
+        let hr = stream.Read(buf.as_mut_ptr().cast(), buf.len() as u32, Some(&mut read));
+        if read > 0 {
+            use std::io::Write;
+            file.write_all(&buf[..read as usize]).ok()?;
+        }
+        // hr < 0 means error; hr == S_FALSE (1) or read == 0 means end of stream
+        if read == 0 || hr.is_err() {
+            break;
+        }
+    }
+    drop(file);
+    Some(temp_path)
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -1305,30 +1481,6 @@ unsafe extern "system" fn window_proc(
                     }
                 }
             }
-            LRESULT(0)
-        }
-        WM_DROPFILES => {
-            let hdrop = HDROP(wparam.0 as *mut c_void);
-            // SAFETY: hdrop is valid for the duration of this message.
-            let file_count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
-            if file_count > 0 {
-                // Query the length of the first file path (excluding null).
-                let len = DragQueryFileW(hdrop, 0, None) as usize;
-                let mut buf = vec![0u16; len + 1];
-                DragQueryFileW(hdrop, 0, Some(&mut buf));
-                // Trim trailing null.
-                if buf.last() == Some(&0) {
-                    buf.pop();
-                }
-                let path = PathBuf::from(std::ffi::OsString::from_wide(&buf));
-                if let Some(state) = window_state(hwnd) {
-                    state
-                        .input_events
-                        .borrow_mut()
-                        .push(InputEvent::FileDropped(path));
-                }
-            }
-            DragFinish(hdrop);
             LRESULT(0)
         }
         WM_DESTROY => {
