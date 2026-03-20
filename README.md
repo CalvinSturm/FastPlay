@@ -6,7 +6,7 @@ FastPlay is a Windows video player built for the parts of playback people actual
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/download/v0.1.0/fastplay-0.1.0-x86_64.msi) • [All releases](../../releases) • [Report an issue](../../issues)
+[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/download/v0.1.1/fastplay-0.1.1-x86_64.msi) • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
@@ -210,7 +210,7 @@ src/
   app/        # session coordinator, commands, events, state
   audio/      # audio sink abstractions
   ffi/        # FFmpeg / D3D11 / DXGI / WASAPI interop
-  media/      # media-domain types, source, video, audio, seek, subtitle
+  media/      # source, video, audio, seek, subtitle
   platform/   # Win32 window/input
   playback/   # clock, metrics, queue policy, generations
   render/     # presenter, swapchain, surface registry, timeline overlay

@@ -141,12 +141,14 @@ fastplay/
       video.rs
       audio.rs
       seek.rs
+      subtitle.rs
 
     render/
       mod.rs
       presenter.rs
       swapchain.rs
       surface_registry.rs
+      timeline.rs
 
     audio/
       mod.rs
@@ -316,7 +318,6 @@ pub struct VideoSurfaceHandle(u64);
 
 ```rust
 struct SurfaceEntry {
-    registry_epoch: u64,
     open_gen: OpenGeneration,
     seek_gen: SeekGeneration,
     // hidden texture/view refs
@@ -325,7 +326,8 @@ struct SurfaceEntry {
 
 ### Rules
 
-* registry epoch increments on device rebuild / presenter reset
+* `epoch_base` on the registry increments on device rebuild / presenter reset
+* handles from prior epochs resolve to `None` via arithmetic underflow check
 * stale handles must never become valid again
 * presenter rejects unknown/stale handles
 * no handle reuse across incompatible epochs
@@ -958,14 +960,18 @@ If not, it waits.
 
 ## 31. Status
 
-**Architecture locked.**
-Begin implementation.
+**Architecture locked. Milestones M0–M6 complete.**
 
-Next artifact:
+Current release: v0.1.1
 
-* repo bootstrap
-* module stubs
-* concrete `PlaybackSession`
-* `SessionEvent`
-* empty `tick(now)` loop
-* D3D11 swap-chain bring-up
+Implemented:
+* single-crate Rust implementation matching all module stubs
+* concrete `PlaybackSession` and `tick(now)` loop
+* D3D11 hw decode + DXGI flip-model present
+* WASAPI shared-mode audio with audio-master clock
+* seek generations, stale-drop enforcement, reopen handling
+* software fallback path (D3D11 upload + video-processor present)
+* external `.srt` subtitle overlay
+* borderless fullscreen, zoom/pan, rotation, resize/device recovery
+* timeline scrub overlay
+* file associations and MSI installer
