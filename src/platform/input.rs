@@ -14,5 +14,7 @@ pub enum InputEvent {
     ToggleAutoReplay,
     FitWindow,
     HalfSizeWindow,
+    ToggleDecodeInfo,
+    EscapeKey,
     FileDropped(PathBuf),
 }

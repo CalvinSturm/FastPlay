@@ -18,4 +18,5 @@ pub enum SessionCommand {
     ToggleAutoReplay,
     FitWindow,
     HalfSizeWindow,
+    ToggleDecodeInfo,
 }
