@@ -372,6 +372,16 @@ impl PlaybackSession {
             SessionCommand::StepPlaybackRate(step) => {
                 self.step_playback_rate(step);
             }
+            SessionCommand::ResetPlaybackRate => {
+                if (self.playback_rate - 1.0).abs() >= 0.01 {
+                    self.playback_rate = 1.0;
+                    self.video_clock = None;
+                    self.audio_clock_anchor_pts = None;
+                    self.audio_submitted_frames = 0;
+                    self.queued_audio_frames.clear();
+                    self.update_window_title();
+                }
+            }
         }
         Ok(())
     }

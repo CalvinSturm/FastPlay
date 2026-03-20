@@ -176,6 +176,8 @@ where
         }
         let frame = Frame(frame);
 
+        let mut hw_mid_fallback_done = false;
+
         loop {
             if should_cancel() {
                 return Ok(StreamStatus::Cancelled);
@@ -188,10 +190,37 @@ where
             ffmpeg_check(read_status, "av_read_frame")?;
 
             if (*packet.0).stream_index == video.stream_index as i32 {
-                ffmpeg_check(
-                    avcodec_send_packet(video.codec.0, packet.0),
-                    "avcodec_send_packet(video)",
-                )?;
+                let send_result = avcodec_send_packet(video.codec.0, packet.0);
+                if send_result < 0
+                    && video.mode == VideoDecodeMode::HardwareD3D11
+                    && !hw_mid_fallback_done
+                {
+                    // HW decode failed on first real packet — try software fallback.
+                    av_packet_unref(packet.0);
+                    match open_software_video_decoder(input.0) {
+                        Ok(mut sw_decoder) => {
+                            eprintln!(
+                                "hw decode failed mid-stream ({}), falling back to software",
+                                send_result
+                            );
+                            sw_decoder.hw_fallback_count = video.hw_fallback_count + 1;
+                            video = sw_decoder;
+                            hw_mid_fallback_done = true;
+                            summary.decode_mode = video.mode;
+                            summary.hw_fallback_count = video.hw_fallback_count;
+                            on_decode_mode(video.mode, video.hw_fallback_count)?;
+                            let restart = start_position.unwrap_or(Duration::ZERO);
+                            seek_and_flush(input.0, &video, audio.as_ref(), restart)?;
+                            continue;
+                        }
+                        Err(sw_error) => {
+                            return Err(ffmpeg_check(send_result, "avcodec_send_packet(video)")
+                                .unwrap_err()
+                                + &format!("; software fallback also failed: {sw_error}"));
+                        }
+                    }
+                }
+                ffmpeg_check(send_result, "avcodec_send_packet(video)")?;
                 av_packet_unref(packet.0);
                 receive_video_frames(
                     &mut video,

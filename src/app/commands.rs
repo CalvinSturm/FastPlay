@@ -20,4 +20,5 @@ pub enum SessionCommand {
     HalfSizeWindow,
     ToggleDecodeInfo,
     StepPlaybackRate(i8),
+    ResetPlaybackRate,
 }

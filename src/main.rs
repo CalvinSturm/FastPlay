@@ -289,6 +289,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::StepPlaybackRate(step) => {
                     session.apply_command(SessionCommand::StepPlaybackRate(step), now)?;
                 }
+                InputEvent::ResetPlaybackRate => {
+                    session.apply_command(SessionCommand::ResetPlaybackRate, now)?;
+                }
                 InputEvent::FileDropped(path) => {
                     let source = MediaSource::new(path);
                     let source = if session.decode_preference() == VideoDecodePreference::ForceSoftware {
