@@ -490,11 +490,13 @@ impl D3D11Device {
             // VideoProcessorBlt borrows the stream array. The pInputSurface
             // field is ManuallyDrop so its COM reference is never released
             // on drop — we explicitly drop it afterwards so the kernel-mode
-            // input view is freed every frame.
+            // input view is freed every frame. Drop before propagating any
+            // error so the COM reference is always released.
             let mut streams = [stream];
-            self.video_context
-                .VideoProcessorBlt(&cache.processor, &cache.output_view, 0, &streams)?;
+            let blt_result = self.video_context
+                .VideoProcessorBlt(&cache.processor, &cache.output_view, 0, &streams);
             ManuallyDrop::drop(&mut streams[0].pInputSurface);
+            blt_result?;
         }
 
         Ok(())
@@ -945,6 +947,77 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             ))?,
             vertex_buffer: vertex_buffer
                 .ok_or(D3D11Error("CreateBuffer returned no idle vertex buffer"))?,
+            width: bitmap.width,
+            height: bitmap.height,
+        }))
+    }
+
+    pub(crate) fn create_help_overlay(
+        &self,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
+        let Some(bitmap) = render_help_bitmap()? else {
+            return Ok(None);
+        };
+
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: bitmap.width,
+            Height: bitmap.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: bitmap.pixels.as_ptr().cast(),
+            SysMemPitch: bitmap.width.saturating_mul(4),
+            SysMemSlicePitch: 0,
+        };
+        let vertices = idle_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
+        let vertex_buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+        let vertex_buffer_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: vertices.as_ptr().cast(),
+            SysMemPitch: 0,
+            SysMemSlicePitch: 0,
+        };
+        let mut texture = None;
+        let mut shader_resource_view = None;
+        let mut vertex_buffer = None;
+
+        unsafe {
+            self.device
+                .CreateTexture2D(&texture_desc, Some(&initial_data), Some(&mut texture))?;
+            self.device.CreateShaderResourceView(
+                texture
+                    .as_ref()
+                    .ok_or(D3D11Error("CreateTexture2D returned no help texture"))?,
+                None,
+                Some(&mut shader_resource_view),
+            )?;
+            self.device
+                .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
+        }
+
+        let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no help texture"))?;
+        Ok(Some(SubtitleOverlay {
+            texture,
+            shader_resource_view: shader_resource_view.ok_or(D3D11Error(
+                "CreateShaderResourceView returned no help view",
+            ))?,
+            vertex_buffer: vertex_buffer
+                .ok_or(D3D11Error("CreateBuffer returned no help vertex buffer"))?,
             width: bitmap.width,
             height: bitmap.height,
         }))
@@ -1526,6 +1599,37 @@ fn render_timeline_bitmap(
         );
     }
 
+    // In/out range fill — orange-tinted overlay spanning the active range.
+    if model.in_point_marker_x.is_some() || model.out_point_marker_x.is_some() {
+        let range_left = model.in_point_marker_x.unwrap_or(layout.track_left).max(0) as u32;
+        let range_right = model.out_point_marker_x.unwrap_or(layout.track_right).max(0) as u32;
+        if range_right > range_left {
+            fill_rounded_rect(
+                &mut pixels,
+                width,
+                height,
+                range_left,
+                track_top,
+                range_right,
+                track_bottom,
+                track_half_h,
+                [60, 160, 255, 130],
+            );
+        }
+    }
+
+    // In/out marker ticks — 2px-wide white vertical bars slightly taller than the track.
+    let marker_top = track_top.saturating_sub(3);
+    let marker_bottom = (track_bottom + 3).min(height);
+    if let Some(x) = model.in_point_marker_x {
+        let mx = x.clamp(0, width as i32 - 2) as u32;
+        fill_rect(&mut pixels, width, height, mx, marker_top, mx + 2, marker_bottom, [255, 255, 255, 220]);
+    }
+    if let Some(x) = model.out_point_marker_x {
+        let mx = (x - 1).clamp(0, width as i32 - 2) as u32;
+        fill_rect(&mut pixels, width, height, mx, marker_top, mx + 2, marker_bottom, [255, 255, 255, 220]);
+    }
+
     // Handle — anti-aliased white circle.
     let handle_cx = model.handle_center_x.clamp(layout.track_left, layout.track_right) as u32;
     fill_circle_aa(
@@ -1666,6 +1770,144 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             height: bitmap_height,
             pixels,
         }))
+    }
+}
+
+fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
+    const ROWS: &[(&str, &str)] = &[
+        ("Space", "Pause / resume"),
+        ("\u{2190} / \u{2192}", "Seek 5 s  (hold: 15 s)"),
+        ("S", "Toggle subtitles"),
+        ("I / O", "Set in / out point"),
+        ("R", "Loop range \u{00B7} auto-replay"),
+        ("[ / ]", "Speed \u{2212} / +"),
+        ("\\", "Reset speed"),
+        ("Backspace", "Cancel scrub"),
+        ("Esc", "Exit fullscreen"),
+        ("Ctrl+H", "Toggle fullscreen"),
+        ("Ctrl+W", "Fill screen height"),
+        ("Ctrl+Q", "Half native resolution"),
+        ("Ctrl+R / E", "Rotate \u{00B1}90\u{00B0}"),
+        ("Ctrl+Scroll", "Zoom at cursor"),
+        ("Ctrl+Drag", "Pan  (when zoomed)"),
+        ("Ctrl+0", "Reset view"),
+        ("`", "Toggle HW/SW decode"),
+        ("Mousewheel", "Volume"),
+    ];
+
+    const PAD_X: i32 = 20;
+    const PAD_Y: i32 = 16;
+    const HEADER_H: i32 = 24;
+    const SEP: i32 = 8;
+    const LINE_H: i32 = 20;
+    const COL_DESC_X: i32 = PAD_X + 118; // where description column begins
+    const BW: u32 = 390;
+    let bh = (PAD_Y + HEADER_H + SEP + ROWS.len() as i32 * LINE_H + PAD_Y) as u32;
+
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            return Err(Box::new(D3D11Error("CreateCompatibleDC returned null")));
+        }
+
+        let font = CreateFontW(
+            -13, 0, 0, 0,
+            FW_MEDIUM.0 as i32, 0, 0, 0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+            windows::core::w!("Segoe UI"),
+        );
+        if font.0.is_null() {
+            let _ = DeleteDC(dc);
+            return Err(Box::new(D3D11Error("CreateFontW returned null for help overlay")));
+        }
+
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: BW as i32,
+            biHeight: -(bh as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = null_mut();
+        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        if bitmap.0.is_null() || bits.is_null() {
+            let _ = DeleteObject(HGDIOBJ(font.0));
+            let _ = DeleteDC(dc);
+            return Err(Box::new(D3D11Error("CreateDIBSection failed for help overlay")));
+        }
+
+        let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+        let old_font = SelectObject(dc, HGDIOBJ(font.0));
+        std::ptr::write_bytes(bits, 0, (BW * bh * 4) as usize);
+
+        let _ = SetBkMode(dc, TRANSPARENT);
+        // GDI draws in BGR; alpha is left as 0 — we fix it in post-process.
+        let _ = SetTextColor(dc, COLORREF(0x00E8E8E8)); // light text
+
+        // Header "Controls"
+        let mut header_wide: Vec<u16> = "Controls".encode_utf16().chain(Some(0)).collect();
+        let mut header_rect = RECT {
+            left: PAD_X,
+            top: PAD_Y,
+            right: BW as i32 - PAD_X,
+            bottom: PAD_Y + HEADER_H,
+        };
+        let _ = DrawTextW(dc, &mut header_wide, &mut header_rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+        // Key-binding rows
+        for (i, (key, desc)) in ROWS.iter().enumerate() {
+            let y = PAD_Y + HEADER_H + SEP + i as i32 * LINE_H;
+            let row_bottom = y + LINE_H;
+
+            let mut key_wide: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+            let mut key_rect = RECT { left: PAD_X, top: y, right: COL_DESC_X - 8, bottom: row_bottom };
+            let _ = DrawTextW(dc, &mut key_wide, &mut key_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+            let mut desc_wide: Vec<u16> = desc.encode_utf16().chain(Some(0)).collect();
+            let mut desc_rect = RECT { left: COL_DESC_X, top: y, right: BW as i32 - PAD_X, bottom: row_bottom };
+            let _ = DrawTextW(dc, &mut desc_wide, &mut desc_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        }
+
+        let source: &[u8] = std::slice::from_raw_parts(bits.cast::<u8>(), (BW * bh * 4) as usize);
+        let mut pixels = vec![0u8; source.len()];
+        pixels.copy_from_slice(source);
+
+        // Post-process: GDI wrote RGB but left alpha=0.
+        // Text pixels (non-zero channel) → bright white with alpha.
+        // All other pixels → dark semi-transparent background.
+        for px in pixels.chunks_exact_mut(4) {
+            let intensity = px[0].max(px[1]).max(px[2]);
+            if intensity > 4 {
+                // Text — make bright white, alpha proportional to intensity.
+                px[0] = 235; px[1] = 235; px[2] = 240;
+                px[3] = intensity.min(230);
+            } else {
+                // Background — dark, slightly blue-tinted.
+                px[0] = 22; px[1] = 20; px[2] = 18;
+                px[3] = 218;
+            }
+        }
+
+        // Separator line between header and rows (1px, semi-opaque white).
+        let sep_y = (PAD_Y + HEADER_H + SEP / 2) as u32;
+        if sep_y < bh {
+            fill_rect(&mut pixels, BW, bh, PAD_X as u32, sep_y, BW - PAD_X as u32, sep_y + 1, [255, 255, 255, 60]);
+        }
+
+        let _ = SelectObject(dc, old_bitmap);
+        let _ = SelectObject(dc, old_font);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteDC(dc);
+
+        Ok(Some(SubtitleBitmap { width: BW, height: bh, pixels }))
     }
 }
 

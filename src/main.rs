@@ -114,6 +114,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::ToggleAutoReplay => {
                     session.apply_command(SessionCommand::ToggleAutoReplay, now)?;
                 }
+                InputEvent::SetInPoint => {
+                    session.apply_command(SessionCommand::SetInPoint, now)?;
+                }
+                InputEvent::SetOutPoint => {
+                    session.apply_command(SessionCommand::SetOutPoint, now)?;
+                }
+                InputEvent::ToggleLoopRange => {
+                    session.apply_command(SessionCommand::ToggleLoopRange, now)?;
+                }
                 InputEvent::FitWindow => {
                     session.apply_command(SessionCommand::FitWindow, now)?;
                 }
@@ -138,6 +147,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 InputEvent::ResetPlaybackRate => {
                     session.apply_command(SessionCommand::ResetPlaybackRate, now)?;
+                }
+                InputEvent::PanDelta { dx, dy } => {
+                    session.apply_command(
+                        SessionCommand::PanBy { dx: dx as f32, dy: dy as f32 },
+                        now,
+                    )?;
+                }
+                InputEvent::ShowHelp => {
+                    session.apply_command(SessionCommand::ShowHelp, now)?;
+                }
+                InputEvent::HideHelp => {
+                    session.apply_command(SessionCommand::HideHelp, now)?;
                 }
                 InputEvent::FileDropped(path) => {
                     let source = MediaSource::new(path);

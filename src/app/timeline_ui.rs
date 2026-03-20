@@ -75,7 +75,7 @@ impl TimelineUiState {
             self.scrubbing = false;
             self.scrub_origin = None;
             self.preview_target = None;
-        } else if !self.was_left_button_down && left_button_down {
+        } else if !self.was_left_button_down && left_button_down && !session.window().is_ctrl_held() {
             if let Some((x, y)) = cursor {
                 if timeline::scrub_hit_test(viewport_width, viewport_height, x, y) {
                     self.scrubbing = true;
@@ -133,7 +133,9 @@ impl TimelineUiState {
                 display_position,
                 self.preview_target,
                 duration,
-                session.auto_replay(),
+                session.auto_replay() || session.loop_range(),
+                session.in_point(),
+                session.out_point(),
             )
         } else {
             None

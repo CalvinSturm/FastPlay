@@ -30,6 +30,8 @@ pub struct TimelineOverlayModel {
     pub played_px: u32,
     pub handle_center_x: i32,
     pub loop_enabled: bool,
+    pub in_point_marker_x: Option<i32>,
+    pub out_point_marker_x: Option<i32>,
 }
 
 pub fn activation_hit_test(viewport_width: u32, viewport_height: u32, x: i32, y: i32) -> bool {
@@ -68,6 +70,8 @@ pub fn build_overlay_model(
     preview_position: Option<Duration>,
     duration: Duration,
     loop_enabled: bool,
+    in_point: Option<Duration>,
+    out_point: Option<Duration>,
 ) -> Option<TimelineOverlayModel> {
     if viewport_width == 0 || viewport_height == 0 || duration.is_zero() {
         return None;
@@ -80,6 +84,11 @@ pub fn build_overlay_model(
     let played_px = ((track_width as f64) * played_ratio.clamp(0.0, 1.0)).round() as u32;
     let played_px = played_px.min(track_width);
 
+    let point_to_marker_x = |pt: Duration| -> i32 {
+        let ratio = (pt.min(duration).as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0);
+        layout.track_left + ((track_width as f64 * ratio).round() as i32)
+    };
+
     Some(TimelineOverlayModel {
         viewport_width,
         viewport_height,
@@ -89,6 +98,8 @@ pub fn build_overlay_model(
         played_px,
         handle_center_x: layout.track_left + played_px as i32,
         loop_enabled,
+        in_point_marker_x: in_point.map(point_to_marker_x),
+        out_point_marker_x: out_point.map(point_to_marker_x),
     })
 }
 

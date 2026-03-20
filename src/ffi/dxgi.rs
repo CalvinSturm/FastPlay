@@ -41,7 +41,7 @@ use windows::{
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_LBUTTON},
+            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_LBUTTON},
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -55,7 +55,7 @@ use windows::{
                 SWP_NOZORDER,
                 SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
                 WM_DESTROY, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
-                WM_EXITSIZEMOVE, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+                WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK,
                 WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE,
                 WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
                 WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
@@ -109,6 +109,8 @@ struct WindowState {
     in_modal_loop: Cell<bool>,
     caption_tracking: Cell<bool>,
     caption_drag_origin: Cell<POINT>,
+    ctrl_pan_active: Cell<bool>,
+    ctrl_pan_last_client: Cell<POINT>,
 }
 
 pub struct NativeWindowInner {
@@ -136,6 +138,8 @@ impl NativeWindowInner {
             in_modal_loop: Cell::new(false),
             caption_tracking: Cell::new(false),
             caption_drag_origin: Cell::new(POINT::default()),
+            ctrl_pan_active: Cell::new(false),
+            ctrl_pan_last_client: Cell::new(POINT::default()),
         });
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
@@ -303,6 +307,14 @@ impl NativeWindowInner {
 
     pub fn is_left_button_down(&self) -> bool {
         unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+    }
+
+    pub fn is_ctrl_held(&self) -> bool {
+        unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 }
+    }
+
+    pub fn is_ctrl_pan_active(&self) -> bool {
+        self.state.ctrl_pan_active.get()
     }
 
     pub fn resize_for_content(&self, content_width: u32, content_height: u32, center: bool) {
@@ -640,6 +652,7 @@ impl DxgiSwapChain {
         subtitle_overlay: Option<&SubtitleOverlay>,
         timeline_overlay: Option<&SubtitleOverlay>,
         volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
     ) -> Result<PresentResult, Box<dyn Error>> {
         let render_target = self
             .render_target
@@ -647,31 +660,7 @@ impl DxgiSwapChain {
             .ok_or_else(|| DxgiError("swap-chain backbuffer is not bound".into()))?;
 
         device.clear_render_target(render_target, clear_color);
-        if let Some(overlay) = subtitle_overlay {
-            let renderer = self
-                .subtitle_renderer
-                .get_or_insert(device.create_subtitle_renderer()?);
-            device.render_subtitle_overlay(
-                renderer,
-                overlay,
-                render_target,
-                self.width,
-                self.height,
-            )?;
-        }
-        if let Some(overlay) = timeline_overlay {
-            let renderer = self
-                .subtitle_renderer
-                .get_or_insert(device.create_subtitle_renderer()?);
-            device.render_subtitle_overlay(
-                renderer,
-                overlay,
-                render_target,
-                self.width,
-                self.height,
-            )?;
-        }
-        if let Some(overlay) = volume_overlay {
+        for overlay in [subtitle_overlay, timeline_overlay, volume_overlay, help_overlay].into_iter().flatten() {
             let renderer = self
                 .subtitle_renderer
                 .get_or_insert(device.create_subtitle_renderer()?);
@@ -694,6 +683,7 @@ impl DxgiSwapChain {
         subtitle_overlay: Option<&SubtitleOverlay>,
         timeline_overlay: Option<&SubtitleOverlay>,
         volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
         view: &crate::render::ViewTransform,
     ) -> Result<PresentResult, Box<dyn Error>> {
         let backbuffer = self
@@ -708,39 +698,7 @@ impl DxgiSwapChain {
         };
 
         device.render_video_surface(surface, backbuffer, output_width, output_height, view, &mut self.vp_cache)?;
-        if let Some(overlay) = subtitle_overlay {
-            let render_target = self
-                .render_target
-                .as_ref()
-                .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
-            let renderer = self
-                .subtitle_renderer
-                .get_or_insert(device.create_subtitle_renderer()?);
-            device.render_subtitle_overlay(
-                renderer,
-                overlay,
-                render_target,
-                output_width,
-                output_height,
-            )?;
-        }
-        if let Some(overlay) = timeline_overlay {
-            let render_target = self
-                .render_target
-                .as_ref()
-                .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
-            let renderer = self
-                .subtitle_renderer
-                .get_or_insert(device.create_subtitle_renderer()?);
-            device.render_subtitle_overlay(
-                renderer,
-                overlay,
-                render_target,
-                output_width,
-                output_height,
-            )?;
-        }
-        if let Some(overlay) = volume_overlay {
+        for overlay in [subtitle_overlay, timeline_overlay, volume_overlay, help_overlay].into_iter().flatten() {
             let render_target = self
                 .render_target
                 .as_ref()
@@ -1081,12 +1039,15 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::RotateClockwise);
                     }
-                    // R (no modifier) → toggle auto-replay
+                    // I → set in-point, O → set out-point, R → toggle loop range
+                    0x49 => {
+                        state.input_events.borrow_mut().push(InputEvent::SetInPoint);
+                    }
+                    0x4F => {
+                        state.input_events.borrow_mut().push(InputEvent::SetOutPoint);
+                    }
                     0x52 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ToggleAutoReplay);
+                        state.input_events.borrow_mut().push(InputEvent::ToggleLoopRange);
                     }
                     0x45 if ctrl_held => {
                         state
@@ -1105,6 +1066,13 @@ unsafe extern "system" fn window_proc(
                     // Ctrl+0 → reset view
                     0x30 if ctrl_held => {
                         state.input_events.borrow_mut().push(InputEvent::ResetView);
+                    }
+                    // H (no Ctrl) → show help overlay while held
+                    0x48 if !ctrl_held => {
+                        // Only emit on first press (bit 30 of lparam = 0).
+                        if (lparam.0 as u32 >> 30) & 1 == 0 {
+                            state.input_events.borrow_mut().push(InputEvent::ShowHelp);
+                        }
                     }
                     0x53 => {
                         state
@@ -1164,6 +1132,15 @@ unsafe extern "system" fn window_proc(
                             .push(InputEvent::SeekRelativeSeconds(step));
                     }
                     _ => {}
+                }
+            }
+            LRESULT(0)
+        }
+        WM_KEYUP => {
+            if let Some(state) = window_state(hwnd) {
+                // H released → hide the help overlay.
+                if wparam.0 as u32 == 0x48 {
+                    state.input_events.borrow_mut().push(InputEvent::HideHelp);
                 }
             }
             LRESULT(0)
@@ -1242,6 +1219,22 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEMOVE => {
             if let Some(state) = window_state(hwnd) {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if state.ctrl_pan_active.get() {
+                    // MK_LBUTTON (0x0001) — cancel if button no longer held.
+                    if (wparam.0 as u32 & 0x0001) == 0 {
+                        state.ctrl_pan_active.set(false);
+                    } else {
+                        let last = state.ctrl_pan_last_client.get();
+                        let dx = x - last.x;
+                        let dy = y - last.y;
+                        state.ctrl_pan_last_client.set(POINT { x, y });
+                        if dx != 0 || dy != 0 {
+                            state.input_events.borrow_mut().push(InputEvent::PanDelta { dx, dy });
+                        }
+                    }
+                }
                 if state.caption_tracking.get() {
                     let mut pt = POINT::default();
                     let _ = GetCursorPos(&mut pt);
@@ -1269,6 +1262,19 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_LBUTTONDOWN => {
+            if let Some(state) = window_state(hwnd) {
+                // MK_CONTROL (0x0008) is set in wParam when Ctrl is held.
+                let ctrl_held = (wparam.0 as u32 & 0x0008) != 0;
+                if ctrl_held && !state.caption_tracking.get() {
+                    let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                    state.ctrl_pan_active.set(true);
+                    state.ctrl_pan_last_client.set(POINT { x, y });
+                }
+            }
+            LRESULT(0)
+        }
         WM_LBUTTONDBLCLK => {
             if let Some(state) = window_state(hwnd) {
                 // If a double-click arrives while we hold capture from a
@@ -1290,12 +1296,14 @@ unsafe extern "system" fn window_proc(
                     state.caption_tracking.set(false);
                     let _ = ReleaseCapture();
                 }
+                state.ctrl_pan_active.set(false);
             }
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
             if let Some(state) = window_state(hwnd) {
                 state.caption_tracking.set(false);
+                state.ctrl_pan_active.set(false);
             }
             LRESULT(0)
         }

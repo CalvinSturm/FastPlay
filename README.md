@@ -18,7 +18,9 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Left` | Seek backward 5s, hold for 15s steps |
 | `Right` | Seek forward 5s, hold for 15s steps |
 | `S` | Toggle subtitles |
-| `R` | Toggle auto-replay |
+| `I` | Set in-point at current position |
+| `O` | Set out-point at current position |
+| `R` | Toggle loop range (if in/out set) · toggle auto-replay (if no range) |
 | `MouseWheel` | Adjust volume |
 | `Esc` | Exit borderless fullscreen |
 | `Ctrl+H` | Toggle borderless fullscreen |
@@ -35,6 +37,19 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 
 Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
 
+### In / Out range
+
+Press `I` to mark where playback starts and `O` to mark where it ends. The range adapts to however many points are set:
+
+| In | Out | Plays | Space at end goes to |
+|----|-----|-------|----------------------|
+| — | — | start → end | start |
+| ✓ | — | in-point → end | in-point |
+| — | ✓ | start → out-point | start |
+| ✓ | ✓ | in-point → out-point | in-point |
+
+Press `R` while a range is active to loop it continuously. In/out points reset when a new file is opened.
+
 ## Features
 
 ### Playback
@@ -42,7 +57,7 @@ Timeline scrubbing is available by hovering near the bottom of the window and cl
 - quick open and first-frame path
 - responsive keyboard seek with accelerated hold behavior
 - timeline scrubbing overlay with playback position
-- auto-replay toggle
+- in/out point range with loop and auto-replay
 - replay at end of playback
 - playback metrics such as open-to-frame latency, seek latency, and dropped frames
 
