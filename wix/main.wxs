@@ -151,6 +151,21 @@
                         <Component Id='dll_pkgconf' Guid='*'>
                             <File Id='pkgconf' Name='pkgconf-7.dll' DiskId='1' Source='$(var.CargoTargetBinDir)\pkgconf-7.dll' KeyPath='yes'/>
                         </Component>
+                        <Component Id='FileAssociations' Guid='*'>
+                            <!-- ProgId: description, icon, and open command -->
+                            <RegistryValue Root='HKCR' Key='FastPlay.VideoFile' Value='FastPlay Video File' Type='string' KeyPath='yes'/>
+                            <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\DefaultIcon' Value='"[Bin]fastplay.exe",0' Type='string'/>
+                            <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\shell\open\command' Value='"[Bin]fastplay.exe" "%1"' Type='string'/>
+
+                            <!-- File extension associations -->
+                            <RegistryValue Root='HKCR' Key='.mp4' Value='FastPlay.VideoFile' Type='string'/>
+                            <RegistryValue Root='HKCR' Key='.mkv' Value='FastPlay.VideoFile' Type='string'/>
+                            <RegistryValue Root='HKCR' Key='.mov' Value='FastPlay.VideoFile' Type='string'/>
+                            <RegistryValue Root='HKCR' Key='.avi' Value='FastPlay.VideoFile' Type='string'/>
+                            <RegistryValue Root='HKCR' Key='.webm' Value='FastPlay.VideoFile' Type='string'/>
+                            <RegistryValue Root='HKCR' Key='.m4v' Value='FastPlay.VideoFile' Type='string'/>
+                            <RegistryValue Root='HKCR' Key='.wmv' Value='FastPlay.VideoFile' Type='string'/>
+                        </Component>
                     </Directory>
                 </Directory>
             </Directory>
@@ -173,6 +188,7 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='FileAssociations'/>
             <ComponentRef Id='dll_avcodec'/>
             <ComponentRef Id='dll_avformat'/>
             <ComponentRef Id='dll_avutil'/>

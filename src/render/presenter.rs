@@ -85,6 +85,9 @@ impl Presenter {
             return Err("swap chain unavailable".into());
         };
         sc.resize(&self.device, width, height)?;
+        if !self.has_ever_shown_content {
+            self.idle_overlay = self.device.create_idle_overlay(width, height).ok().flatten();
+        }
         Ok(())
     }
 
