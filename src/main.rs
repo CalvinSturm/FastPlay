@@ -219,6 +219,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         session.window().set_title(&title);
     }
 
+    // Tracks any temp file written by the zip-drop path so it can be cleaned up.
+    let mut temp_drop_file: Option<std::path::PathBuf> = None;
+
     let mut input_events: Vec<InputEvent> = Vec::new();
     while session.window().is_open() {
         session.window().pump_messages()?;
@@ -293,6 +296,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     session.apply_command(SessionCommand::ResetPlaybackRate, now)?;
                 }
                 InputEvent::FileDropped(path) => {
+                    // Delete the previous zip-extracted temp file, if any.
+                    if let Some(prev) = temp_drop_file.take() {
+                        let _ = std::fs::remove_file(&prev);
+                    }
+                    // If the new path is inside the temp directory it came from
+                    // a zip drop and should be deleted when we're done with it.
+                    if path.starts_with(std::env::temp_dir()) {
+                        temp_drop_file = Some(path.clone());
+                    }
                     let source = MediaSource::new(path);
                     let source = if session.decode_preference() == VideoDecodePreference::ForceSoftware {
                         source.with_decode_preference(VideoDecodePreference::ForceSoftware)
@@ -310,6 +322,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     session.window().clear_modal_tick();
+    if let Some(temp) = temp_drop_file {
+        let _ = std::fs::remove_file(&temp);
+    }
     Ok(())
 }
 
