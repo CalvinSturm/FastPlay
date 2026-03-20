@@ -19,4 +19,5 @@ pub enum SessionCommand {
     FitWindow,
     HalfSizeWindow,
     ToggleDecodeInfo,
+    StepPlaybackRate(i8),
 }

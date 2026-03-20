@@ -17,5 +17,6 @@ pub enum InputEvent {
     ToggleDecodeInfo,
     EscapeKey,
     BackspaceKey,
+    StepPlaybackRate(i8),
     FileDropped(PathBuf),
 }
