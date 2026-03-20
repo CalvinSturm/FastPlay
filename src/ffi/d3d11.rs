@@ -29,7 +29,7 @@ use windows::{
                 D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
                 D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
                 ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-                ID3D11VideoProcessorOutputView,
+                ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
             },
             Dxgi::Common::{
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32_FLOAT,
@@ -94,6 +94,14 @@ pub(crate) struct VideoSurface {
     pub(crate) height: u32,
 }
 
+/// Entry in the per-frame input view cache inside `VideoProcessorCache`.
+struct InputViewEntry {
+    /// Raw texture pointer used only for identity comparison — never dereferenced.
+    texture_identity: *mut c_void,
+    subresource_index: u32,
+    view: ID3D11VideoProcessorInputView,
+}
+
 /// Cached D3D11 video processor objects reused across frames when the
 /// input/output dimensions and backbuffer identity haven't changed.
 /// Avoids per-frame kernel-mode allocations that stress the GPU driver.
@@ -107,6 +115,11 @@ pub(crate) struct VideoProcessorCache {
     output_height: u32,
     /// Raw pointer used only for identity comparison — never dereferenced.
     backbuffer_identity: *mut c_void,
+    /// Cached input views keyed by (texture identity, subresource index).
+    /// Hardware decoders use a fixed pool of surfaces (typically 8–16), so
+    /// a Vec with linear search outperforms a HashMap at this size.
+    /// Automatically invalidated when the enumerator changes (whole cache replaced).
+    input_view_cache: Vec<InputViewEntry>,
 }
 
 #[repr(C)]
@@ -351,6 +364,7 @@ impl D3D11Device {
                         output_width,
                         output_height,
                         backbuffer_identity: bb_identity,
+                        input_view_cache: Vec::new(),
                     });
                     slot.as_mut().unwrap()
                 }
@@ -388,15 +402,29 @@ impl D3D11Device {
                 },
             };
 
-            let mut input_view = None;
-            self.video_device.CreateVideoProcessorInputView(
-                &surface.texture,
-                &cache.enumerator,
-                &input_desc,
-                Some(&mut input_view),
-            )?;
-            let input_view =
-                input_view.ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
+            let texture_identity = surface.texture.as_raw();
+            let input_view = if let Some(entry) = cache.input_view_cache.iter().find(|e| {
+                e.texture_identity == texture_identity
+                    && e.subresource_index == surface.subresource_index
+            }) {
+                entry.view.clone()
+            } else {
+                let mut new_view = None;
+                self.video_device.CreateVideoProcessorInputView(
+                    &surface.texture,
+                    &cache.enumerator,
+                    &input_desc,
+                    Some(&mut new_view),
+                )?;
+                let new_view = new_view
+                    .ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
+                cache.input_view_cache.push(InputViewEntry {
+                    texture_identity,
+                    subresource_index: surface.subresource_index,
+                    view: new_view.clone(),
+                });
+                new_view
+            };
 
             let stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),

@@ -855,7 +855,7 @@ impl PlaybackSession {
                 seek_gen,
                 op_id,
                 |mode, hw_fallback_count| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -869,7 +869,7 @@ impl PlaybackSession {
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },
                 |duration| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -881,9 +881,9 @@ impl PlaybackSession {
                         })
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },
-                || worker_nonce.load(Ordering::Acquire) != expected_nonce,
+                || worker_nonce.load(Ordering::Relaxed) != expected_nonce,
                 |frame| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -891,7 +891,7 @@ impl PlaybackSession {
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },
                 |frame| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
+                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -1089,15 +1089,23 @@ impl PlaybackSession {
             return;
         }
 
+        // Compute the master clock once — it is constant within this call since `now`
+        // is fixed and audio state does not change mid-function.
+        let audio_clock = if self.audio_clock_anchor_pts.is_some() {
+            let Some(clock) = self.master_clock_position(now) else {
+                return;
+            };
+            Some(clock)
+        } else {
+            None
+        };
+
         loop {
             let Some(next_frame) = self.queued_video_frames.front() else {
                 return;
             };
 
-            if self.audio_clock_anchor_pts.is_some() {
-                let Some(audio_clock) = self.master_clock_position(now) else {
-                    return;
-                };
+            if let Some(audio_clock) = audio_clock {
                 let next_frame_time = self.media_time_for_pts(next_frame.pts());
                 if next_frame_time > audio_clock {
                     return;
@@ -1152,19 +1160,19 @@ impl PlaybackSession {
             ));
         }
 
-        if !self
-            .presenter
-            .surface_matches(frame.surface(), frame.open_gen(), frame.seek_gen())
-        {
-            self.drop_video_frame(frame, VideoDropCause::SurfaceMismatch);
-            return;
-        }
-
         let handle = frame.surface();
-        if let Some(previous) = self.presenter.select_surface(handle) {
-            if previous != handle {
+        match self
+            .presenter
+            .validate_and_select_surface(handle, frame.open_gen(), frame.seek_gen())
+        {
+            Err(()) => {
+                self.drop_video_frame(frame, VideoDropCause::SurfaceMismatch);
+                return;
+            }
+            Ok(Some(previous)) if previous != handle => {
                 self.presenter.release_surface(previous);
             }
+            Ok(_) => {}
         }
 
         self.present_needed = true;
@@ -1202,9 +1210,8 @@ impl PlaybackSession {
             self.queued_video_frames.len()
         } else {
             self.queued_video_frames
-                .iter()
-                .position(|queued| frame.pts() < queued.pts())
-                .unwrap_or(self.queued_video_frames.len())
+                .binary_search_by(|queued| queued.pts().cmp(&frame.pts()))
+                .unwrap_or_else(|pos| pos)
         };
         self.queued_video_frames.insert(insert_at, frame);
 
@@ -1378,7 +1385,7 @@ impl PlaybackSession {
             return Ok(());
         }
 
-        let cue = track.cue_at(subtitle_position);
+        let cue = track.cue_at(subtitle_position, self.active_subtitle_cue);
         let next_index = cue.map(|(index, _)| index);
         if self.active_subtitle_cue == next_index && self.active_subtitle_viewport == Some(viewport)
         {

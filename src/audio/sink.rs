@@ -16,12 +16,17 @@ pub struct AudioSink {
 impl AudioSink {
     pub fn create_shared_default() -> Result<Self, Box<dyn std::error::Error>> {
         let (inner, format) = WasapiAudioSink::create_shared_default()?;
+        // Pre-allocate to the expected batch size (sample_rate / 10 frames) so
+        // the first write_frame call with volume != 1.0 doesn't trigger a heap
+        // allocation.
+        let target_bytes =
+            (format.sample_rate as usize / 10) * format.bytes_per_frame() as usize;
         Ok(Self {
             inner,
             format,
             started: false,
             volume: 1.0,
-            volume_scratch: Vec::new(),
+            volume_scratch: Vec::with_capacity(target_bytes),
         })
     }
 
