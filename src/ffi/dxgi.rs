@@ -40,7 +40,7 @@ use windows::{
                 DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
                 GetWindowPlacement, LoadCursorW, LoadImageW, PeekMessageW, PostQuitMessage,
                 RegisterClassExW, SetWindowLongPtrW,
-                SetWindowPlacement, SetWindowPos, ShowWindow,
+                SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
                 TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
                 GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
                 MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
@@ -180,6 +180,14 @@ impl NativeWindowInner {
         })
     }
 
+    pub fn set_title(&self, title: &str) {
+        let wide = to_wide(title);
+        // SAFETY: hwnd is a live window owned by this struct.
+        unsafe {
+            let _ = SetWindowTextW(self.hwnd, PCWSTR(wide.as_ptr()));
+        }
+    }
+
     pub fn pump_messages(&self) -> Result<(), Box<dyn Error>> {
         let mut message = MSG::default();
         let mut processed = 0usize;
@@ -236,8 +244,8 @@ impl NativeWindowInner {
         self.state.modal_tick_ctx.set(null_mut());
     }
 
-    pub fn take_input_events(&self) -> Vec<InputEvent> {
-        std::mem::take(&mut *self.state.input_events.borrow_mut())
+    pub fn take_input_events(&self, out: &mut Vec<InputEvent>) {
+        std::mem::swap(out, &mut *self.state.input_events.borrow_mut());
     }
 
     pub fn is_borderless(&self) -> bool {

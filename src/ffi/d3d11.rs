@@ -71,8 +71,11 @@ pub struct RenderTargetView {
 }
 
 pub(crate) struct SubtitleOverlay {
+    texture: ID3D11Texture2D,
     shader_resource_view: ID3D11ShaderResourceView,
     vertex_buffer: ID3D11Buffer,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 pub(crate) struct SubtitleRenderer {
@@ -630,22 +633,51 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
         }
 
+        let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no subtitle texture"))?;
         Ok(Some(SubtitleOverlay {
+            texture,
             shader_resource_view: shader_resource_view.ok_or(D3D11Error(
                 "CreateShaderResourceView returned no subtitle view",
             ))?,
             vertex_buffer: vertex_buffer
                 .ok_or(D3D11Error("CreateBuffer returned no subtitle vertex buffer"))?,
+            width: bitmap.width,
+            height: bitmap.height,
         }))
     }
 
     pub(crate) fn create_timeline_overlay(
         &self,
         model: &crate::render::timeline::TimelineOverlayModel,
+        existing: Option<SubtitleOverlay>,
     ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
         let Some(bitmap) = render_timeline_bitmap(model)? else {
             return Ok(None);
         };
+
+        let vertices = timeline_quad_vertices(bitmap.width, bitmap.height, model.viewport_height);
+
+        // Reuse existing GPU resources if dimensions haven't changed.
+        if let Some(overlay) = existing {
+            if overlay.width == bitmap.width && overlay.height == bitmap.height {
+                unsafe {
+                    self.context.UpdateSubresource(
+                        &overlay.texture,
+                        0, None,
+                        bitmap.pixels.as_ptr().cast(),
+                        bitmap.width.saturating_mul(4),
+                        0,
+                    );
+                    self.context.UpdateSubresource(
+                        &overlay.vertex_buffer,
+                        0, None,
+                        vertices.as_ptr().cast(),
+                        0, 0,
+                    );
+                }
+                return Ok(Some(overlay));
+            }
+        }
 
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: bitmap.width,
@@ -666,10 +698,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         };
         let mut texture = None;
         let mut shader_resource_view = None;
-        let vertices = timeline_quad_vertices(bitmap.width, bitmap.height, model.viewport_height);
         let vertex_buffer_desc = D3D11_BUFFER_DESC {
             ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
-            Usage: D3D11_USAGE_IMMUTABLE,
+            Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
@@ -699,12 +730,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             )?;
         }
 
+        let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no timeline texture"))?;
         Ok(Some(SubtitleOverlay {
+            texture,
             shader_resource_view: shader_resource_view.ok_or(D3D11Error(
                 "CreateShaderResourceView returned no timeline view",
             ))?,
             vertex_buffer: vertex_buffer
                 .ok_or(D3D11Error("CreateBuffer returned no timeline vertex buffer"))?,
+            width: bitmap.width,
+            height: bitmap.height,
         }))
     }
 
@@ -713,10 +748,35 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         text: &str,
         viewport_width: u32,
         viewport_height: u32,
+        existing: Option<SubtitleOverlay>,
     ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
         let Some(bitmap) = render_volume_bitmap(text)? else {
             return Ok(None);
         };
+
+        let vertices = volume_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
+
+        // Reuse existing GPU resources if dimensions haven't changed.
+        if let Some(overlay) = existing {
+            if overlay.width == bitmap.width && overlay.height == bitmap.height {
+                unsafe {
+                    self.context.UpdateSubresource(
+                        &overlay.texture,
+                        0, None,
+                        bitmap.pixels.as_ptr().cast(),
+                        bitmap.width.saturating_mul(4),
+                        0,
+                    );
+                    self.context.UpdateSubresource(
+                        &overlay.vertex_buffer,
+                        0, None,
+                        vertices.as_ptr().cast(),
+                        0, 0,
+                    );
+                }
+                return Ok(Some(overlay));
+            }
+        }
 
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: bitmap.width,
@@ -737,10 +797,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         };
         let mut texture = None;
         let mut shader_resource_view = None;
-        let vertices = volume_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
         let vertex_buffer_desc = D3D11_BUFFER_DESC {
             ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
-            Usage: D3D11_USAGE_IMMUTABLE,
+            Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
@@ -767,12 +826,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
         }
 
+        let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no volume texture"))?;
         Ok(Some(SubtitleOverlay {
+            texture,
             shader_resource_view: shader_resource_view.ok_or(D3D11Error(
                 "CreateShaderResourceView returned no volume view",
             ))?,
             vertex_buffer: vertex_buffer
                 .ok_or(D3D11Error("CreateBuffer returned no volume vertex buffer"))?,
+            width: bitmap.width,
+            height: bitmap.height,
         }))
     }
 
@@ -839,12 +902,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
         }
 
+        let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no idle texture"))?;
         Ok(Some(SubtitleOverlay {
+            texture,
             shader_resource_view: shader_resource_view.ok_or(D3D11Error(
                 "CreateShaderResourceView returned no idle view",
             ))?,
             vertex_buffer: vertex_buffer
                 .ok_or(D3D11Error("CreateBuffer returned no idle vertex buffer"))?,
+            width: bitmap.width,
+            height: bitmap.height,
         }))
     }
 
@@ -918,40 +985,27 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
     //
     // If the present path changes in the future, re-validate this assumption.
 
-    pub(crate) fn upload_nv12_surface(
+    // IMPORTANT:
+    // Software-fallback NV12 upload textures must be created as decoder-compatible
+    // video surfaces for the existing D3D11 video-processor present path.
+    // Using only a generic texture here can compile but fail at runtime in the
+    // present path.
+    // Required bind flags for the current design:
+    // - D3D11_BIND_SHADER_RESOURCE
+    // - D3D11_BIND_DECODER
+    //
+    // If the present path changes in the future, re-validate this assumption.
+
+    pub(crate) fn upload_nv12_surface_contiguous(
         &self,
         width: u32,
         height: u32,
-        y_plane: &[u8],
-        y_stride: usize,
-        uv_plane: &[u8],
-        uv_stride: usize,
+        data: &[u8],
+        stride: usize,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
             return Err(Box::new(D3D11Error("software upload requires non-zero dimensions")));
         }
-        if width % 2 != 0 || height % 2 != 0 {
-            return Err(Box::new(D3D11Error(
-                "software NV12 upload currently requires even frame dimensions",
-            )));
-        }
-        if y_stride != uv_stride {
-            return Err(Box::new(D3D11Error(
-                "software NV12 upload requires equal luma/chroma strides",
-            )));
-        }
-
-        let expected_y_len = y_stride.saturating_mul(height as usize);
-        let expected_uv_len = uv_stride.saturating_mul((height / 2) as usize);
-        if y_plane.len() < expected_y_len || uv_plane.len() < expected_uv_len {
-            return Err(Box::new(D3D11Error(
-                "software NV12 planes were smaller than the declared stride/height",
-            )));
-        }
-
-        let mut upload = Vec::with_capacity(expected_y_len.saturating_add(expected_uv_len));
-        upload.extend_from_slice(&y_plane[..expected_y_len]);
-        upload.extend_from_slice(&uv_plane[..expected_uv_len]);
 
         let desc = D3D11_TEXTURE2D_DESC {
             Width: width,
@@ -959,25 +1013,22 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_NV12,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_DECODER.0) as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
         let initial_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: upload.as_ptr().cast(),
-            SysMemPitch: y_stride as u32,
-            SysMemSlicePitch: upload.len() as u32,
+            pSysMem: data.as_ptr().cast(),
+            SysMemPitch: stride as u32,
+            SysMemSlicePitch: data.len() as u32,
         };
         let mut texture = None;
 
         // SAFETY:
-        // - the upload buffer stays alive for the duration of CreateTexture2D
-        // - the NV12 planes are laid out contiguously as required for a single-subresource upload
+        // - `data` is a contiguous NV12 buffer (Y plane then interleaved UV plane)
+        // - it stays alive for the duration of CreateTexture2D
         // - the created texture remains owned by the returned VideoSurface
         unsafe {
             self.device

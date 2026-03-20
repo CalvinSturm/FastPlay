@@ -18,7 +18,7 @@ use crate::{
     media::{
         audio::AudioStreamFormat,
         source::MediaSource,
-        video::{SoftwareVideoFrameFormat, VideoDecodeMode, VideoDecodePreference},
+        video::{VideoDecodeMode, VideoDecodePreference},
     },
     playback::generations::{OpenGeneration, OperationId, SeekGeneration},
 };
@@ -40,41 +40,30 @@ pub(crate) enum PendingVideoFrame {
         height: u32,
         surface: VideoSurface,
     },
-    Software {
-        open_gen: OpenGeneration,
-        seek_gen: SeekGeneration,
-        op_id: OperationId,
-        pts: Duration,
-        width: u32,
-        height: u32,
-        format: SoftwareVideoFrameFormat,
-        planes: Vec<Vec<u8>>,
-        strides: Vec<usize>,
-    },
 }
 
 impl PendingVideoFrame {
     pub fn open_gen(&self) -> OpenGeneration {
         match self {
-            Self::D3D11 { open_gen, .. } | Self::Software { open_gen, .. } => *open_gen,
+            Self::D3D11 { open_gen, .. } => *open_gen,
         }
     }
 
     pub fn seek_gen(&self) -> SeekGeneration {
         match self {
-            Self::D3D11 { seek_gen, .. } | Self::Software { seek_gen, .. } => *seek_gen,
+            Self::D3D11 { seek_gen, .. } => *seek_gen,
         }
     }
 
     pub fn op_id(&self) -> OperationId {
         match self {
-            Self::D3D11 { op_id, .. } | Self::Software { op_id, .. } => *op_id,
+            Self::D3D11 { op_id, .. } => *op_id,
         }
     }
 
     pub fn pts(&self) -> Duration {
         match self {
-            Self::D3D11 { pts, .. } | Self::Software { pts, .. } => *pts,
+            Self::D3D11 { pts, .. } => *pts,
         }
     }
 }
@@ -572,17 +561,15 @@ where
                 }
             }
             VideoDecoderOutput::Software(converter) => {
-                let converted = converter.convert(frame)?;
-                PendingVideoFrame::Software {
+                let surface = converter.convert(frame, device)?;
+                PendingVideoFrame::D3D11 {
                     open_gen,
                     seek_gen,
                     op_id,
                     pts: decoded_frame_pts(frame, video.pts_time_base),
                     width: (*frame).width as u32,
                     height: (*frame).height as u32,
-                    format: converted.format,
-                    planes: converted.planes,
-                    strides: converted.strides,
+                    surface,
                 }
             }
         };
@@ -598,16 +585,17 @@ struct SoftwareVideoConverter {
     source_width: i32,
     source_height: i32,
     source_format: AVPixelFormat,
-}
-
-struct ConvertedSoftwareFrame {
-    format: SoftwareVideoFrameFormat,
-    planes: Vec<Vec<u8>>,
-    strides: Vec<usize>,
+    /// Reusable contiguous NV12 buffer: Y plane followed immediately by UV plane.
+    /// Avoids per-frame heap allocation once the first frame has been decoded.
+    frame_buf: Vec<u8>,
 }
 
 impl SoftwareVideoConverter {
-    unsafe fn convert(&mut self, frame: *mut AVFrame) -> Result<ConvertedSoftwareFrame, String> {
+    unsafe fn convert(
+        &mut self,
+        frame: *mut AVFrame,
+        device: &D3D11Device,
+    ) -> Result<VideoSurface, String> {
         let width = (*frame).width;
         let height = (*frame).height;
         if width <= 0 || height <= 0 {
@@ -626,12 +614,21 @@ impl SoftwareVideoConverter {
             self.recreate(width, height, source_format)?;
         }
 
-        let y_stride = width as usize;
-        let uv_stride = width as usize;
-        let mut y_plane = vec![0u8; y_stride * height as usize];
-        let mut uv_plane = vec![0u8; uv_stride * (height as usize / 2)];
-        let mut dst_data = [y_plane.as_mut_ptr(), uv_plane.as_mut_ptr(), null_mut(), null_mut()];
-        let mut dst_linesize = [y_stride as i32, uv_stride as i32, 0, 0];
+        let stride = width as usize;
+        let y_len = stride * height as usize;
+        let uv_len = stride * (height as usize / 2);
+        let total = y_len + uv_len;
+        self.frame_buf.resize(total, 0);
+
+        // Point sws_scale directly into the contiguous buffer: Y at offset 0,
+        // UV immediately after the Y plane.
+        let mut dst_data = [
+            self.frame_buf.as_mut_ptr(),
+            self.frame_buf.as_mut_ptr().add(y_len),
+            null_mut(),
+            null_mut(),
+        ];
+        let mut dst_linesize = [stride as i32, stride as i32, 0, 0];
 
         let scaled = sws_scale(
             self.context,
@@ -644,11 +641,9 @@ impl SoftwareVideoConverter {
         );
         ffmpeg_check(scaled, "sws_scale(video)")?;
 
-        Ok(ConvertedSoftwareFrame {
-            format: SoftwareVideoFrameFormat::Nv12,
-            planes: vec![y_plane, uv_plane],
-            strides: vec![y_stride, uv_stride],
-        })
+        device
+            .upload_nv12_surface_contiguous(width as u32, height as u32, &self.frame_buf, stride)
+            .map_err(|e| e.to_string())
     }
 
     unsafe fn recreate(
@@ -726,7 +721,7 @@ where
             batcher.push(
                 pts,
                 frame_count,
-                data,
+                &data,
                 open_gen,
                 seek_gen,
                 op_id,
@@ -833,7 +828,7 @@ impl AudioBatcher {
         &mut self,
         pts: Duration,
         frame_count: u32,
-        data: Vec<u8>,
+        data: &[u8],
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,
         op_id: OperationId,
@@ -847,7 +842,7 @@ impl AudioBatcher {
             self.pts = Some(pts);
         }
         self.frame_count = self.frame_count.saturating_add(frame_count);
-        self.data.extend_from_slice(&data);
+        self.data.extend_from_slice(data);
         if self.frame_count >= self.target_frames {
             self.flush(open_gen, seek_gen, op_id, produced_frames, on_frame)?;
         }
