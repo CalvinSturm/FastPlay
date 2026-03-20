@@ -49,6 +49,7 @@ Many media players try to do everything. FastPlay is focused on doing a smaller 
 - cursor-centered zoom and pan
 - 90-degree view rotation
 - fit-to-screen window sizing with no black padding
+- half native resolution window sizing
 - volume control with on-screen overlay
 
 ### Subtitles
@@ -67,6 +68,7 @@ Many media players try to do everything. FastPlay is focused on doing a smaller 
 | `MouseWheel` | Adjust volume |
 | `Ctrl+H` | Toggle borderless fullscreen |
 | `Ctrl+W` | Fill screen height with no black padding |
+| `Ctrl+Q` | Snap window to half the video's native resolution |
 | `Ctrl+R` | Rotate clockwise 90 degrees |
 | `Ctrl+E` | Rotate counter-clockwise 90 degrees |
 | `Ctrl+MouseWheel` | Zoom at cursor |
