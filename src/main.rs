@@ -286,6 +286,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         timeline_ui.cancel_scrub(&mut session, now)?;
                     }
                 }
+                InputEvent::StepPlaybackRate(step) => {
+                    session.apply_command(SessionCommand::StepPlaybackRate(step), now)?;
+                }
                 InputEvent::FileDropped(path) => {
                     let source = MediaSource::new(path);
                     let source = if session.decode_preference() == VideoDecodePreference::ForceSoftware {

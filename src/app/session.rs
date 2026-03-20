@@ -133,6 +133,7 @@ pub struct PlaybackSession {
     replay_indicator_until: Option<Instant>,
     pause_after_seek: bool,
     show_decode_info: bool,
+    playback_rate: f64,
 }
 
 impl PlaybackSession {
@@ -201,6 +202,7 @@ impl PlaybackSession {
             replay_indicator_until: None,
             pause_after_seek: false,
             show_decode_info: false,
+            playback_rate: 1.0,
         })
     }
 
@@ -285,6 +287,7 @@ impl PlaybackSession {
         self.subtitle_clock_base = None;
         self.active_subtitle_cue = None;
         self.active_subtitle_viewport = None;
+        self.playback_rate = 1.0;
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
@@ -365,6 +368,9 @@ impl PlaybackSession {
             SessionCommand::ToggleDecodeInfo => {
                 self.show_decode_info = !self.show_decode_info;
                 self.update_window_title();
+            }
+            SessionCommand::StepPlaybackRate(step) => {
+                self.step_playback_rate(step);
             }
         }
         Ok(())
@@ -991,7 +997,7 @@ impl PlaybackSession {
     }
 
     fn submit_due_audio(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        if self.state == PlaybackState::Paused || self.pause_after_seek {
+        if self.state == PlaybackState::Paused || self.pause_after_seek || self.playback_rate != 1.0 {
             return Ok(());
         }
 
@@ -1169,6 +1175,7 @@ impl PlaybackSession {
             self.video_clock = Some(PlaybackClock::new(
                 now,
                 self.media_time_for_pts(frame.pts()),
+                self.playback_rate,
             ));
         }
 
@@ -1273,7 +1280,7 @@ impl PlaybackSession {
                 self.metrics.note_resume_requested(now);
                 if self.audio_clock_anchor_pts.is_none() {
                     let resume_pts = self.paused_clock_position.unwrap_or(Duration::ZERO);
-                    self.video_clock = Some(PlaybackClock::new(now, resume_pts));
+                    self.video_clock = Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
                 } else if let Some(sink) = self.audio_sink.as_mut() {
                     sink.resume()?;
                 }
@@ -1387,6 +1394,26 @@ impl PlaybackSession {
         self.window.set_window_client_size((w / 2).max(1), (h / 2).max(1));
     }
 
+    fn step_playback_rate(&mut self, step: i8) {
+        const RATES: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+        let current_idx = RATES
+            .iter()
+            .position(|&r| (r - self.playback_rate).abs() < 0.01)
+            .unwrap_or(3); // default to 1.0 index
+        let new_idx = (current_idx as i8 + step).clamp(0, RATES.len() as i8 - 1) as usize;
+        let new_rate = RATES[new_idx];
+        if (new_rate - self.playback_rate).abs() < 0.01 {
+            return;
+        }
+        self.playback_rate = new_rate;
+        // Reset clock state — clocks re-anchor on next frame/audio submission.
+        self.video_clock = None;
+        self.audio_clock_anchor_pts = None;
+        self.audio_submitted_frames = 0;
+        self.queued_audio_frames.clear();
+        self.update_window_title();
+    }
+
     fn update_window_title(&self) {
         let base = self
             .current_source
@@ -1396,13 +1423,24 @@ impl PlaybackSession {
             .map(|n| format!("{n} - FastPlay"))
             .unwrap_or_else(|| "FastPlay".to_owned());
 
-        let title = if self.show_decode_info {
-            match self.active_decode_mode {
-                Some(mode) => format!("{base} [{}]", mode.label()),
-                None => base,
+        let mut suffixes: Vec<String> = Vec::new();
+        if (self.playback_rate - 1.0).abs() >= 0.01 {
+            let rate_str = if self.playback_rate.fract() == 0.0 {
+                format!("{}x", self.playback_rate as u32)
+            } else {
+                format!("{:.2}x", self.playback_rate).trim_end_matches('0').trim_end_matches('.').to_owned() + "x"
+            };
+            suffixes.push(rate_str);
+        }
+        if self.show_decode_info {
+            if let Some(mode) = self.active_decode_mode {
+                suffixes.push(mode.label().to_owned());
             }
-        } else {
+        }
+        let title = if suffixes.is_empty() {
             base
+        } else {
+            format!("{base} [{}]", suffixes.join("  "))
         };
 
         self.window.set_title(&title);
