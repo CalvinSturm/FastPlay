@@ -1,8 +1,6 @@
-
 # <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
 
 FastPlay is a **Windows-first, latency-focused media player** built in **Rust**.
-
 
 FastPlay is a Windows video player built for the parts of playback people actually notice: opening a file, reaching the first frame quickly, scrubbing without friction, adjusting the picture easily, and getting out of the way while you watch.
 
@@ -12,40 +10,50 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
+![demo](https://github.com/user-attachments/assets/ac8ae5f1-b4e3-42ca-b21e-c20c1c5de5c0)
 
-It is designed around a simple idea: a player should feel fast because it opens quickly, seeks quickly, keeps video on the GPU, and avoids unnecessary UI and pipeline overhead.
+FastPlay is built around a simple idea: a player should feel fast because it opens quickly, seeks quickly, keeps video on the GPU, and avoids unnecessary UI and pipeline overhead.
 
-## Current status
+## Why FastPlay exists
 
-FastPlay currently supports:
+Many media players try to do everything. FastPlay is focused on doing a smaller set of things well on Windows:
 
-- Windows-native windowing with drag-and-drop file open
-- D3D11 + DXGI flip-model presentation
-- FFmpeg-based demux/decode
+- open quickly
+- reach first frame quickly
+- seek responsively
+- keep playback clean and local
+- provide picture controls that stay out of the way
+
+## Current features
+
+### Playback
+- drag-and-drop file open
+- quick open and first-frame path
+- responsive keyboard seek with accelerated hold behavior
+- timeline scrubbing overlay with playback position
+- auto-replay toggle
+- replay at end of playback
+- playback metrics such as open-to-frame latency, seek latency, and dropped frames
+
+### Video and audio
+- FFmpeg-based demux and decode
 - hardware video decode on the preferred D3D11 path
-- software video decode fallback with D3D11 upload/present
-- cached D3D11 video processor (avoids per-frame kernel-mode allocations)
+- software video decode fallback with D3D11 upload and present
 - WASAPI shared-mode audio playback
 - audio-master playback timing when audio exists
 - generation-safe seek and reopen behavior
-- timeline scrubbing overlay with playback position
+- device-loss and resize recovery paths
+
+### Viewing controls
 - borderless fullscreen
 - cursor-centered zoom and pan
-- view rotation (90-degree increments)
-- fit-to-screen window sizing (no black padding)
-- auto-replay toggle
-- spacebar replay at end of playback
-- accelerated keyboard seeking (hold for faster seek)
-- timeline appears briefly on keyboard seek
-- device-loss and resize recovery paths
-- external `.srt` subtitle overlay with runtime toggle
+- 90-degree view rotation
+- fit-to-screen window sizing with no black padding
 - volume control with on-screen overlay
-- playback metrics (open-to-frame, seek latency, dropped frames, etc.)
-- embedded application icon
-- no console window in release builds
-- narrow validation hook for forced software decode
 
-This is still a focused engineering project, not a general-purpose consumer media player.
+### Subtitles
+- external `.srt` subtitle overlay
+- runtime subtitle toggle
 
 ## Goals
 
@@ -65,44 +73,55 @@ FastPlay does **not** currently aim to provide:
 - playlists or media library management
 - streaming support
 - plugin support
-- browser/web UI
+- browser or web UI
 - advanced subtitle styling
 - embedded subtitle track selection
-- HDR/tone-mapping (deferred until full pipeline is ready)
+- HDR or tone mapping
 - extra hardware backends beyond the current D3D11-first design
 
-## Architecture
+## Controls
 
-FastPlay is built around these core paths:
+| Key | Action |
+|-----|--------|
+| `Space` | Pause / resume / replay at end |
+| `Left` | Seek backward 5s, hold for 15s steps |
+| `Right` | Seek forward 5s, hold for 15s steps |
+| `S` | Toggle subtitles |
+| `R` | Toggle auto-replay |
+| `MouseWheel` | Adjust volume |
+| `Ctrl+H` | Toggle borderless fullscreen |
+| `Ctrl+W` | Fill screen height with no black padding |
+| `Ctrl+R` | Rotate clockwise 90 degrees |
+| `Ctrl+E` | Rotate counter-clockwise 90 degrees |
+| `Ctrl+MouseWheel` | Zoom at cursor |
+| `Ctrl+0` | Reset zoom, pan, and rotation |
 
-### Preferred path
-`FFmpeg -> AV_PIX_FMT_D3D11 -> D3D11 video processor -> DXGI present`
+Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
 
-### Software fallback path
-`FFmpeg demux -> software decode -> D3D11 upload -> D3D11 video processor -> DXGI present`
+## Current limitations
 
-### Audio path
-`FFmpeg decode -> WASAPI shared-mode sink`
-
-### Subtitle path
-- external `.srt` sidecar only
-- CPU parsing/layout
-- GPU alpha composition during present
-
-For the full implementation charter, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
-
-For durable repo rules used during development, see [`AGENTS.md`](./AGENTS.md).
+- Windows-only
+- external `.srt` sidecar support only
+- no embedded subtitle track support
+- no ASS styling engine
+- no advanced subtitle settings UI
+- no HDR passthrough or tone mapping
+- no streaming
+- no playlists or library
+- limited audio-device endpoint handling
+- recovery paths are intentionally minimal and correctness-focused
+- software fallback is intentionally narrow and session-scoped
 
 ## Requirements
 
 - Windows 10 or later
 - Rust toolchain
-- FFmpeg development headers/libs available locally
+- FFmpeg development headers and libraries available locally
 - D3D11 / DXGI / WASAPI-capable system
 
 ## FFmpeg setup
 
-`build.rs` currently supports these FFmpeg discovery patterns:
+`build.rs` currently supports these FFmpeg discovery patterns.
 
 ### Preferred
 Set:
@@ -110,11 +129,13 @@ Set:
 - `FFMPEG_DIR`
 
 ### Or set explicitly
+
 - `FFMPEG_INCLUDE_DIR`
 - `FFMPEG_LIB_DIR`
 - optional: `FFMPEG_BIN_DIR`
 
 ### Current fallback search locations
+
 - `%VCPKG_ROOT%/installed/x64-windows`
 - `%USERPROFILE%/vcpkg/installed/x64-windows`
 - `C:\tools\vcpkg\installed\x64-windows`
@@ -125,7 +146,7 @@ The build expects the usual FFmpeg development layout with `include/` and `lib/`
 
 ```powershell
 cargo build --release
-```
+````
 
 ## Run
 
@@ -135,7 +156,7 @@ Normal playback:
 cargo run --release -- <path-to-media>
 ```
 
-Or drag and drop a media file onto the FastPlay window. Subsequent drops resize in place without moving the window.
+Or drag and drop a media file onto the FastPlay window.
 
 Force software decode fallback:
 
@@ -156,53 +177,29 @@ movie.srt
 
 The subtitle sidecar will be auto-loaded if present.
 
-## Controls
+## Architecture
 
-| Key | Action |
-|-----|--------|
-| `Space` | Pause / resume / replay at end |
-| `Left` | Seek backward 5s (hold for 15s steps) |
-| `Right` | Seek forward 5s (hold for 15s steps) |
-| `S` | Toggle subtitles on/off |
-| `R` | Toggle auto-replay |
-| `MouseWheel` | Adjust volume |
-| `Ctrl+H` | Toggle borderless fullscreen |
-| `Ctrl+W` | Fill screen height, no black padding |
-| `Ctrl+R` | Rotate clockwise 90 degrees |
-| `Ctrl+E` | Rotate counter-clockwise 90 degrees |
-| `Ctrl+MouseWheel` | Zoom at cursor |
-| `Ctrl+0` | Reset zoom / pan / rotation |
+### Preferred path
 
-Timeline scrubbing is available by hovering near the bottom of the window and clicking/dragging.
+`FFmpeg -> AV_PIX_FMT_D3D11 -> D3D11 video processor -> DXGI present`
 
-## Validation notes
+### Software fallback path
 
-The repo may generate local validation artifacts under `validation/`.
+`FFmpeg demux -> software decode -> D3D11 upload -> D3D11 video processor -> DXGI present`
 
-Ignored by default:
+### Audio path
 
-* `validation/*.log`
-* `validation/*.mp4`
+`FFmpeg decode -> WASAPI shared-mode sink`
 
-## Current limitations
+### Subtitle path
 
-* Windows-only
-* external `.srt` only
-* no embedded subtitle track support
-* no ASS styling engine
-* no advanced subtitle settings UI
-* no HDR passthrough or tone mapping
-* no streaming
-* no playlists/library
-* no broad endpoint-notification system for audio devices
-* recovery paths are intentionally minimal and correctness-focused
-* software fallback is intentionally narrow and session-scoped
+* external `.srt` sidecar only
+* CPU parsing and layout
+* GPU alpha composition during present
 
-## Important implementation note: software fallback textures
+For the full implementation charter, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-Software-decoded frames are uploaded into D3D11 and presented through the existing video-processor path.
-
-That path has a validated texture-compatibility requirement today, so changes to software-upload texture creation should be re-validated against runtime playback. The detailed constraint is documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`AGENTS.md`](./AGENTS.md).
+For durable repo rules used during development, see [`AGENTS.md`](./AGENTS.md).
 
 ## Project structure
 
@@ -217,30 +214,14 @@ src/
   render/     # presenter, swapchain, surface registry, timeline overlay
 ```
 
-## Development principles
+## Validation notes
 
-* `PlaybackSession` is the only coordinator
-* public APIs do not expose raw COM pointers
-* unsafe code stays boxed inside `src/ffi/*`
-* stale work is dropped before side effects
-* milestone-driven development
-* architecture changes are explicit, not accidental
+The repo may generate local validation artifacts under `validation/`.
 
-## Roadmap status
+Ignored by default:
 
-Completed milestones:
-
-* M0: window + D3D11 + DXGI shell
-* M1: first-frame FFmpeg D3D11 decode/present
-* M2: steady-state D3D11 video playback
-* M3: WASAPI audio playback + audio-master sync
-* M4: seek, stale-drop enforcement, and recovery paths
-* M5: software decode fallback path
-* M6: external `.srt` subtitle overlay
-* M7: borderless fullscreen, cursor-centered zoom, view rotation
-* M8: timeline scrubbing, playback overlays (volume, position)
-* M9: drag-and-drop, accelerated seek, fit-to-screen, auto-replay, metrics wiring
-* M10: end-of-playback replay, embedded icon, no-console release, timeline UX polish
+* `validation/*.log`
+* `validation/*.mp4`
 
 ## License
 
