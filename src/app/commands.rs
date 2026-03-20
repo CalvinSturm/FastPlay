@@ -17,4 +17,5 @@ pub enum SessionCommand {
     ResetView,
     ToggleAutoReplay,
     FitWindow,
+    HalfSizeWindow,
 }

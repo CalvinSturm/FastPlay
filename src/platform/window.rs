@@ -64,6 +64,10 @@ impl NativeWindow {
         self.inner.fit_window_to_content(content_width, content_height);
     }
 
+    pub fn set_window_client_size(&self, content_width: u32, content_height: u32) {
+        self.inner.set_window_client_size(content_width, content_height);
+    }
+
     pub fn toggle_borderless_fullscreen(&self) {
         self.inner.toggle_borderless_fullscreen();
     }

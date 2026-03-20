@@ -416,6 +416,48 @@ impl NativeWindowInner {
         }
     }
 
+    /// Resize the window so the client area is exactly `content_width × content_height`,
+    /// keeping the window's current horizontal center and top edge, clamped to the work area.
+    pub fn set_window_client_size(&self, content_width: u32, content_height: u32) {
+        if self.is_borderless.get() || content_width == 0 || content_height == 0 {
+            return;
+        }
+
+        unsafe {
+            let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return;
+            }
+            let work = info.rcWork;
+
+            let Ok((win_w, win_h)) = adjust_window_size(content_width, content_height) else {
+                return;
+            };
+
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut rect);
+            let old_center_x = (rect.left + rect.right) / 2;
+            let x = (old_center_x - win_w / 2)
+                .max(work.left)
+                .min(work.right - win_w);
+            let y = rect.top.max(work.top).min(work.bottom - win_h);
+
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND_TOP,
+                x,
+                y,
+                win_w,
+                win_h,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    }
+
     pub fn toggle_borderless_fullscreen(&self) {
         // SAFETY:
         // - hwnd is a live top-level window owned by this wrapper
@@ -961,6 +1003,10 @@ unsafe extern "system" fn window_proc(
                     // Ctrl+W → fit window to video (no black padding)
                     0x57 if ctrl_held => {
                         state.input_events.borrow_mut().push(InputEvent::FitWindow);
+                    }
+                    // Ctrl+Q → half the video's native resolution
+                    0x51 if ctrl_held => {
+                        state.input_events.borrow_mut().push(InputEvent::HalfSizeWindow);
                     }
                     // Ctrl+0 → reset view
                     0x30 if ctrl_held => {
