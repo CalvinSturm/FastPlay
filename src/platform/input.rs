@@ -12,6 +12,9 @@ pub enum InputEvent {
     ZoomAtCursor { delta: i16, cursor_x: i32, cursor_y: i32 },
     ResetView,
     ToggleAutoReplay,
+    SetInPoint,
+    SetOutPoint,
+    ToggleLoopRange,
     FitWindow,
     HalfSizeWindow,
     ToggleDecodeInfo,
@@ -20,4 +23,7 @@ pub enum InputEvent {
     StepPlaybackRate(i8),
     ResetPlaybackRate,
     FileDropped(PathBuf),
+    PanDelta { dx: i32, dy: i32 },
+    ShowHelp,
+    HideHelp,
 }

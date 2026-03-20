@@ -122,6 +122,9 @@ pub struct PlaybackSession {
     auto_replay: bool,
     pause_after_seek: bool,
     playback_rate: f64,
+    in_point: Option<Duration>,
+    out_point: Option<Duration>,
+    loop_range: bool,
 }
 
 impl PlaybackSession {
@@ -179,6 +182,9 @@ impl PlaybackSession {
             auto_replay: false,
             pause_after_seek: false,
             playback_rate: 1.0,
+            in_point: None,
+            out_point: None,
+            loop_range: false,
         })
     }
 
@@ -210,6 +216,18 @@ impl PlaybackSession {
 
     pub fn auto_replay(&self) -> bool {
         self.auto_replay
+    }
+
+    pub fn in_point(&self) -> Option<Duration> {
+        self.in_point
+    }
+
+    pub fn out_point(&self) -> Option<Duration> {
+        self.out_point
+    }
+
+    pub fn loop_range(&self) -> bool {
+        self.loop_range
     }
 
     pub fn decode_preference(&self) -> VideoDecodePreference {
@@ -264,6 +282,9 @@ impl PlaybackSession {
         self.overlay.active_subtitle_cue = None;
         self.overlay.active_subtitle_viewport = None;
         self.playback_rate = 1.0;
+        self.in_point = None;
+        self.out_point = None;
+        self.loop_range = false;
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
@@ -336,6 +357,30 @@ impl PlaybackSession {
                 self.auto_replay = !self.auto_replay;
                 self.overlay.replay_indicator_until = Some(now + Duration::from_millis(1500));
             }
+            SessionCommand::SetInPoint => {
+                self.in_point = Some(self.snapshot(now).position);
+                // If the new in-point is at or past the out-point, clear the out-point.
+                if let (Some(i), Some(o)) = (self.in_point, self.out_point) {
+                    if i >= o {
+                        self.out_point = None;
+                    }
+                }
+            }
+            SessionCommand::SetOutPoint => {
+                let pos = self.snapshot(now).position;
+                // Out-point must be strictly after the in-point (or after 0 if none set).
+                if pos > self.in_point.unwrap_or(Duration::ZERO) {
+                    self.out_point = Some(pos);
+                }
+            }
+            SessionCommand::ToggleLoopRange => {
+                if self.in_point.is_some() || self.out_point.is_some() {
+                    self.loop_range = !self.loop_range;
+                } else {
+                    self.auto_replay = !self.auto_replay;
+                    self.overlay.replay_indicator_until = Some(now + Duration::from_millis(1500));
+                }
+            }
             SessionCommand::FitWindow => {
                 self.fit_window();
             }
@@ -358,6 +403,23 @@ impl PlaybackSession {
                     self.queued_audio_frames.clear();
                     self.update_window_title();
                 }
+            }
+            SessionCommand::PanBy { dx, dy } => {
+                if self.view_zoom > 1.0 {
+                    self.view_pan_x += dx;
+                    self.view_pan_y += dy;
+                    self.present_needed = true;
+                }
+            }
+            SessionCommand::ShowHelp => {
+                if let Ok((vw, vh)) = self.presenter.viewport_size() {
+                    self.presenter.show_help_overlay(vw, vh)?;
+                    self.present_needed = true;
+                }
+            }
+            SessionCommand::HideHelp => {
+                self.presenter.clear_help_overlay();
+                self.present_needed = true;
             }
         }
         Ok(())
@@ -427,7 +489,9 @@ impl PlaybackSession {
         }
 
         self.submit_due_audio(now)?;
-        self.advance_video_playback(now);
+        if self.advance_video_playback(now)? {
+            return Ok(());
+        }
         self.update_subtitle_overlay(now)?;
         self.refresh_volume_overlay(now)?;
 
@@ -508,7 +572,7 @@ impl PlaybackSession {
                 self.drop_buckets.surface_mismatch,
                 self.drop_buckets.scheduler_late
             );
-            if self.auto_replay {
+            if self.auto_replay || self.loop_range {
                 self.replay(now)?;
             } else {
                 self.state = PlaybackState::Ended;
@@ -1093,16 +1157,16 @@ impl PlaybackSession {
         Ok(())
     }
 
-    fn advance_video_playback(&mut self, now: Instant) {
+    fn advance_video_playback(&mut self, now: Instant) -> Result<bool, Box<dyn std::error::Error>> {
         if self.state == PlaybackState::Paused {
-            return;
+            return Ok(false);
         }
 
         // Compute the master clock once — it is constant within this call since `now`
         // is fixed and audio state does not change mid-function.
         let audio_clock = if self.audio_clock_anchor_pts.is_some() {
             let Some(clock) = self.master_clock_position(now) else {
-                return;
+                return Ok(false);
             };
             Some(clock)
         } else {
@@ -1111,13 +1175,13 @@ impl PlaybackSession {
 
         loop {
             let Some(next_frame) = self.queued_video_frames.front() else {
-                return;
+                return Ok(false);
             };
 
             if let Some(audio_clock) = audio_clock {
                 let next_frame_time = self.media_time_for_pts(next_frame.pts());
                 if next_frame_time > audio_clock {
-                    return;
+                    return Ok(false);
                 }
 
                 let lateness = audio_clock.saturating_sub(next_frame_time);
@@ -1148,7 +1212,7 @@ impl PlaybackSession {
             } else if let Some(clock) = self.video_clock {
                 let due_at = clock.deadline_for(self.media_time_for_pts(next_frame.pts()));
                 if now < due_at {
-                    return;
+                    return Ok(false);
                 }
             }
 
@@ -1156,8 +1220,41 @@ impl PlaybackSession {
                 .queued_video_frames
                 .pop_front()
                 .expect("front frame existed");
+
+            // Check out-point by frame PTS before presenting, so we stop exactly
+            // on the right frame rather than relying on the lagging audio clock.
+            if let Some(out_pt) = self.out_point {
+                if matches!(
+                    self.state,
+                    PlaybackState::Playing | PlaybackState::Priming | PlaybackState::Draining
+                ) {
+                    let frame_pos = self.media_time_for_pts(frame.pts());
+                    if frame_pos >= out_pt {
+                        self.presenter.release_surface(frame.surface());
+                        if self.loop_range {
+                            let target = self.in_point.unwrap_or(Duration::ZERO);
+                            self.seek(SeekTarget::new(target), now)?;
+                        } else {
+                            self.cancel_active_worker();
+                            // Clear op_id so residual events in the channel
+                            // don't pass is_current_frame and restart playback.
+                            self.active_operation_id = None;
+                            self.clear_video_queue();
+                            self.queued_audio_frames.clear();
+                            if let Some(sink) = self.audio_sink.as_mut() {
+                                if sink.is_started() {
+                                    let _ = sink.pause();
+                                }
+                            }
+                            self.state = PlaybackState::Ended;
+                        }
+                        return Ok(true);
+                    }
+                }
+            }
+
             self.present_video_frame(frame, now);
-            return;
+            return Ok(false);
         }
     }
 
@@ -1292,8 +1389,9 @@ impl PlaybackSession {
     }
 
     fn replay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        self.seek(SeekTarget::new(Duration::ZERO), now)
+        self.seek(SeekTarget::new(self.in_point.unwrap_or(Duration::ZERO)), now)
     }
+
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.overlay.subtitle_track.is_none() {

@@ -88,6 +88,10 @@ impl NativeWindow {
         self.inner.is_left_button_down()
     }
 
+    pub fn is_ctrl_held(&self) -> bool {
+        self.inner.is_ctrl_held()
+    }
+
     pub fn is_in_modal_loop(&self) -> bool {
         self.inner.is_in_modal_loop()
     }

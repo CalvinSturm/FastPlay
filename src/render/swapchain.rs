@@ -31,9 +31,10 @@ impl SwapChainPresenter {
         subtitle_overlay: Option<&SubtitleOverlay>,
         timeline_overlay: Option<&SubtitleOverlay>,
         volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
     ) -> Result<PresentResult, Box<dyn std::error::Error>> {
         self.swap_chain
-            .render(device, clear_color, subtitle_overlay, timeline_overlay, volume_overlay)
+            .render(device, clear_color, subtitle_overlay, timeline_overlay, volume_overlay, help_overlay)
     }
 
     pub fn resize(
@@ -53,10 +54,11 @@ impl SwapChainPresenter {
         subtitle_overlay: Option<&SubtitleOverlay>,
         timeline_overlay: Option<&SubtitleOverlay>,
         volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
         view: &crate::render::ViewTransform,
     ) -> Result<PresentResult, Box<dyn std::error::Error>> {
         self.swap_chain
-            .render_surface(device, surface, subtitle_overlay, timeline_overlay, volume_overlay, view)
+            .render_surface(device, surface, subtitle_overlay, timeline_overlay, volume_overlay, help_overlay, view)
     }
 
     pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {

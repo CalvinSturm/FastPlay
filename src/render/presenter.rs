@@ -22,6 +22,7 @@ pub struct Presenter {
     volume_overlay: Option<SubtitleOverlay>,
     volume_text: Option<String>,
     idle_overlay: Option<SubtitleOverlay>,
+    help_overlay: Option<SubtitleOverlay>,
     has_ever_shown_content: bool,
 }
 
@@ -43,6 +44,7 @@ impl Presenter {
             volume_overlay: None,
             volume_text: None,
             idle_overlay,
+            help_overlay: None,
             has_ever_shown_content: false,
         })
     }
@@ -66,6 +68,7 @@ impl Presenter {
                     self.subtitle_overlay.as_ref(),
                     self.timeline_overlay.as_ref(),
                     self.volume_overlay.as_ref(),
+                    self.help_overlay.as_ref(),
                     view,
                 );
             }
@@ -77,6 +80,7 @@ impl Presenter {
             self.idle_overlay.as_ref(),
             self.timeline_overlay.as_ref(),
             self.volume_overlay.as_ref(),
+            self.help_overlay.as_ref(),
         )
     }
 
@@ -227,6 +231,21 @@ impl Presenter {
         };
         self.volume_text = next_text;
         Ok(true)
+    }
+
+    pub fn show_help_overlay(
+        &mut self,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.help_overlay.is_none() {
+            self.help_overlay = self.device.create_help_overlay(viewport_width, viewport_height)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_help_overlay(&mut self) {
+        self.help_overlay = None;
     }
 
     pub fn release_surface(&mut self, handle: VideoSurfaceHandle) {
