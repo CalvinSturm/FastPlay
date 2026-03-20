@@ -20,6 +20,10 @@ impl NativeWindow {
         })
     }
 
+    pub fn set_title(&self, title: &str) {
+        self.inner.set_title(title);
+    }
+
     pub fn pump_messages(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.inner.pump_messages()?;
         Ok(())
@@ -48,8 +52,8 @@ impl NativeWindow {
         self.inner.clear_modal_tick();
     }
 
-    pub fn take_input_events(&self) -> Vec<InputEvent> {
-        self.inner.take_input_events()
+    pub fn take_input_events(&self, out: &mut Vec<InputEvent>) {
+        self.inner.take_input_events(out);
     }
 
     pub fn resize_for_content(&self, content_width: u32, content_height: u32, center: bool) {

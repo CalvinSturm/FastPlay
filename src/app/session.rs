@@ -86,7 +86,7 @@ pub struct PlaybackSession {
     generations: GenerationState,
     operation_clock: OperationClock,
     active_operation_id: Option<OperationId>,
-    current_source: Option<MediaSource>,
+    current_source: Option<Arc<MediaSource>>,
     decode_preference: VideoDecodePreference,
     worker_nonce: Arc<AtomicU64>,
     event_tx: SyncSender<SessionEvent>,
@@ -283,7 +283,8 @@ impl PlaybackSession {
         self.subtitle_clock_base = None;
         self.active_subtitle_cue = None;
         self.active_subtitle_viewport = None;
-        self.current_source = Some(source.clone());
+        let source = Arc::new(source);
+        self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
         self.active_decode_mode = None;
         if let Some(track) = self.subtitle_track.as_ref() {
@@ -404,7 +405,6 @@ impl PlaybackSession {
             thread::sleep(Duration::from_millis(1));
             return Ok(());
         }
-        self.submit_due_audio(now)?;
 
         loop {
             if self.queued_video_frames.len() >= self.queued_video_capacity
@@ -574,72 +574,30 @@ impl PlaybackSession {
                     self.needs_initial_resize = false;
                     let center = !self.has_shown_content;
                     self.has_shown_content = true;
-                    let (fw, fh) = match &frame {
-                        ffmpeg::PendingVideoFrame::D3D11 { width, height, .. }
-                        | ffmpeg::PendingVideoFrame::Software { width, height, .. } => {
-                            (*width, *height)
-                        }
-                    };
-                    self.window.resize_for_content(fw, fh, center);
+                    let ffmpeg::PendingVideoFrame::D3D11 { width, height, .. } = &frame;
+                    self.window.resize_for_content(*width, *height, center);
                 }
 
-                match frame {
-                    ffmpeg::PendingVideoFrame::D3D11 {
-                        open_gen,
-                        seek_gen,
-                        op_id,
-                        pts,
-                        width,
-                        height,
-                        surface,
-                    } => {
-                        self.observe_media_time_origin(pts);
-                        let handle = self.presenter.register_surface(open_gen, seek_gen, surface);
-                        self.push_video_frame(DecodedVideoFrame::D3D11 {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                            pts,
-                            width,
-                            height,
-                            surface: handle,
-                        });
-                    }
-                    ffmpeg::PendingVideoFrame::Software {
-                        open_gen,
-                        seek_gen,
-                        op_id,
-                        pts,
-                        width,
-                        height,
-                        format,
-                        planes,
-                        strides,
-                    } => {
-                        self.observe_media_time_origin(pts);
-                        let software_frame = DecodedVideoFrame::Software {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                            pts,
-                            width,
-                            height,
-                            format,
-                            planes,
-                            strides,
-                        };
-                        let handle = self.presenter.upload_software_frame(&software_frame)?;
-                        self.push_video_frame(DecodedVideoFrame::D3D11 {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                            pts,
-                            width,
-                            height,
-                            surface: handle,
-                        });
-                    }
-                }
+                let ffmpeg::PendingVideoFrame::D3D11 {
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                    pts,
+                    width,
+                    height,
+                    surface,
+                } = frame;
+                self.observe_media_time_origin(pts);
+                let handle = self.presenter.register_surface(open_gen, seek_gen, surface);
+                self.push_video_frame(DecodedVideoFrame::D3D11 {
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                    pts,
+                    width,
+                    height,
+                    surface: handle,
+                });
                 if matches!(self.state, PlaybackState::Opening | PlaybackState::Seeking) {
                     self.state = PlaybackState::Priming;
                 }
@@ -778,7 +736,7 @@ impl PlaybackSession {
 
     fn begin_operation(
         &mut self,
-        source: MediaSource,
+        source: Arc<MediaSource>,
         start_position: Option<Duration>,
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,
@@ -869,7 +827,7 @@ impl PlaybackSession {
 
     fn spawn_stream_worker(
         &mut self,
-        source: MediaSource,
+        source: Arc<MediaSource>,
         start_position: Option<Duration>,
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,
@@ -888,7 +846,7 @@ impl PlaybackSession {
 
         thread::spawn(move || {
             let decode_result = ffmpeg::stream_media(
-                &source,
+                &*source,
                 &device,
                 audio_format,
                 start_position,
@@ -1086,15 +1044,16 @@ impl PlaybackSession {
             return Ok(());
         }
 
-        let Some(sink) = self.audio_sink.as_ref() else {
-            return Ok(());
+        let buffered = match self.audio_sink.as_ref() {
+            Some(sink) => sink.buffered_frames().unwrap_or(1),
+            None => return Ok(()),
         };
         if self.audio_stream_expected
             && self.state != PlaybackState::Paused
-            && sink.is_started()
+            && self.audio_sink.as_ref().map_or(false, |s| s.is_started())
             && self.queued_audio_frames.is_empty()
-            && sink.buffered_frames().unwrap_or(1) == 0
-            && !self.can_finish_playback()?
+            && buffered == 0
+            && !self.can_finish_with_buffered(0)?
         {
             self.metrics.note_audio_underrun();
         }
@@ -1109,7 +1068,7 @@ impl PlaybackSession {
             && matches!(self.state, PlaybackState::Draining | PlaybackState::Playing)
         {
             if let Some(sink) = self.audio_sink.as_mut() {
-                if sink.is_started() && sink.buffered_frames().unwrap_or(1) == 0 {
+                if sink.is_started() && buffered == 0 {
                     let _ = sink.pause();
                 }
             }
@@ -1239,11 +1198,14 @@ impl PlaybackSession {
     }
 
     fn push_video_frame(&mut self, frame: DecodedVideoFrame) {
-        let insert_at = self
-            .queued_video_frames
-            .iter()
-            .position(|queued| frame.pts() < queued.pts())
-            .unwrap_or(self.queued_video_frames.len());
+        let insert_at = if self.queued_video_frames.back().map_or(true, |last| frame.pts() >= last.pts()) {
+            self.queued_video_frames.len()
+        } else {
+            self.queued_video_frames
+                .iter()
+                .position(|queued| frame.pts() < queued.pts())
+                .unwrap_or(self.queued_video_frames.len())
+        };
         self.queued_video_frames.insert(insert_at, frame);
 
         while self.queued_video_frames.len() > self.queued_video_capacity {
@@ -1583,6 +1545,15 @@ impl PlaybackSession {
     }
 
     fn can_finish_playback(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        let buffered = self
+            .audio_sink
+            .as_ref()
+            .map(|s| s.buffered_frames().unwrap_or(0))
+            .unwrap_or(0);
+        self.can_finish_with_buffered(buffered)
+    }
+
+    fn can_finish_with_buffered(&self, buffered: u32) -> Result<bool, Box<dyn std::error::Error>> {
         if !self.video_stream_ended || !self.queued_video_frames.is_empty() {
             return Ok(false);
         }
@@ -1591,10 +1562,8 @@ impl PlaybackSession {
             if !self.audio_stream_ended || !self.queued_audio_frames.is_empty() {
                 return Ok(false);
             }
-            if let Some(sink) = self.audio_sink.as_ref() {
-                if sink.buffered_frames().unwrap_or(0) != 0 {
-                    return Ok(false);
-                }
+            if buffered != 0 {
+                return Ok(false);
             }
         }
 

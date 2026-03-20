@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -43,15 +44,28 @@ impl SubtitleTrack {
     }
 
     pub fn cue_at(&self, position: Duration) -> Option<(usize, &SubtitleCue)> {
-        self.cues
-            .iter()
-            .enumerate()
-            .find(|(_, cue)| cue.start <= position && position < cue.end)
+        // Binary search to the last cue whose start <= position, then check its end.
+        let idx = self.cues.partition_point(|cue| cue.start <= position);
+        // `partition_point` returns the first index where cue.start > position,
+        // so the candidate (if any) is at idx.saturating_sub(1).
+        if idx == 0 {
+            return None;
+        }
+        let candidate = idx - 1;
+        if position < self.cues[candidate].end {
+            Some((candidate, &self.cues[candidate]))
+        } else {
+            None
+        }
     }
 }
 
 fn parse_srt(contents: &str) -> Result<Vec<SubtitleCue>, String> {
-    let normalized = contents.replace("\r\n", "\n");
+    let normalized: Cow<str> = if contents.contains('\r') {
+        Cow::Owned(contents.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(contents)
+    };
     let mut cues = Vec::new();
 
     for block in normalized.split("\n\n") {

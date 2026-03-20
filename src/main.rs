@@ -186,21 +186,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(source) = media_path {
+        let title = window_title_for(&source);
         session.open(source, Instant::now())?;
+        session.window().set_title(&title);
     }
 
+    let mut input_events: Vec<InputEvent> = Vec::new();
     while session.window().is_open() {
         session.window().pump_messages()?;
-        for input in session.window().take_input_events() {
+        let now = Instant::now();
+        session.window().take_input_events(&mut input_events);
+        for input in input_events.drain(..) {
             match input {
                 InputEvent::TogglePause => {
-                    session.apply_command(SessionCommand::TogglePause, Instant::now())?;
+                    session.apply_command(SessionCommand::TogglePause, now)?;
                 }
                 InputEvent::ToggleSubtitles => {
-                    session.apply_command(SessionCommand::ToggleSubtitles, Instant::now())?;
+                    session.apply_command(SessionCommand::ToggleSubtitles, now)?;
                 }
                 InputEvent::SeekRelativeSeconds(offset_seconds) => {
-                    let snapshot = session.snapshot(Instant::now());
+                    let snapshot = session.snapshot(now);
                     let next_position = if offset_seconds >= 0 {
                         snapshot
                             .position
@@ -210,32 +215,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             .position
                             .saturating_sub(std::time::Duration::from_secs((-offset_seconds) as u64))
                     };
-                    session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), Instant::now())?;
-                    timeline_ui.seek_overlay_until = Some(Instant::now() + SEEK_OVERLAY_DURATION);
+                    session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), now)?;
+                    timeline_ui.seek_overlay_until = Some(now + SEEK_OVERLAY_DURATION);
                 }
                 InputEvent::AdjustVolumeSteps(steps) => {
-                    session.apply_command(SessionCommand::AdjustVolumeSteps(steps), Instant::now())?;
+                    session.apply_command(SessionCommand::AdjustVolumeSteps(steps), now)?;
                 }
                 InputEvent::RotateClockwise => {
-                    session.apply_command(SessionCommand::RotateClockwise, Instant::now())?;
+                    session.apply_command(SessionCommand::RotateClockwise, now)?;
                 }
                 InputEvent::RotateCounterClockwise => {
-                    session.apply_command(SessionCommand::RotateCounterClockwise, Instant::now())?;
+                    session.apply_command(SessionCommand::RotateCounterClockwise, now)?;
                 }
                 InputEvent::ToggleBorderlessFullscreen => {
-                    session.apply_command(SessionCommand::ToggleBorderlessFullscreen, Instant::now())?;
+                    session.apply_command(SessionCommand::ToggleBorderlessFullscreen, now)?;
                 }
                 InputEvent::ZoomAtCursor { delta, cursor_x, cursor_y } => {
-                    session.apply_command(SessionCommand::ZoomAtCursor { delta, cursor_x, cursor_y }, Instant::now())?;
+                    session.apply_command(SessionCommand::ZoomAtCursor { delta, cursor_x, cursor_y }, now)?;
                 }
                 InputEvent::ResetView => {
-                    session.apply_command(SessionCommand::ResetView, Instant::now())?;
+                    session.apply_command(SessionCommand::ResetView, now)?;
                 }
                 InputEvent::ToggleAutoReplay => {
-                    session.apply_command(SessionCommand::ToggleAutoReplay, Instant::now())?;
+                    session.apply_command(SessionCommand::ToggleAutoReplay, now)?;
                 }
                 InputEvent::FitWindow => {
-                    session.apply_command(SessionCommand::FitWindow, Instant::now())?;
+                    session.apply_command(SessionCommand::FitWindow, now)?;
                 }
                 InputEvent::FileDropped(path) => {
                     let source = MediaSource::new(path);
@@ -244,17 +249,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         source
                     };
-                    session.open(source, Instant::now())?;
+                    let title = window_title_for(&source);
+                    session.open(source, now)?;
+                    session.window().set_title(&title);
                 }
             }
         }
-        let now = Instant::now();
         timeline_ui.update(&mut session, now)?;
         session.tick(now)?;
     }
 
     session.window().clear_modal_tick();
     Ok(())
+}
+
+fn window_title_for(source: &MediaSource) -> String {
+    let name = source.path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("FastPlay");
+    format!("{name} - FastPlay")
 }
 
 fn parse_media_source_from_args() -> Result<Option<MediaSource>, Box<dyn std::error::Error>> {
