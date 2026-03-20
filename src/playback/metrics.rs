@@ -187,3 +187,196 @@ impl PlaybackMetrics {
         self.hw_fallback_count
     }
 }
+
+pub struct MetricsCollector {
+    inner: PlaybackMetrics,
+    pub measure_open_audio: bool,
+    pub pending_first_frame: bool,
+    pub pending_first_audio: bool,
+    pub pending_seek_first_frame: bool,
+    pub pending_seek_settled: bool,
+}
+
+impl MetricsCollector {
+    pub fn new() -> Self {
+        Self {
+            inner: PlaybackMetrics::default(),
+            measure_open_audio: false,
+            pending_first_frame: false,
+            pending_first_audio: false,
+            pending_seek_first_frame: false,
+            pending_seek_settled: false,
+        }
+    }
+
+    pub fn inner(&self) -> &PlaybackMetrics {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut PlaybackMetrics {
+        &mut self.inner
+    }
+
+    pub fn pending_seek_settled(&self) -> bool {
+        self.pending_seek_settled
+    }
+
+    pub fn reset_for_operation(&mut self) {
+        self.pending_first_frame = false;
+        self.pending_first_audio = false;
+    }
+
+    pub fn note_seek_pending(&mut self) {
+        self.pending_seek_first_frame = true;
+        self.pending_seek_settled = true;
+    }
+
+    pub fn disable_open_audio_metric(&mut self) {
+        self.measure_open_audio = false;
+    }
+
+    pub fn enable_open_audio_metric(&mut self) {
+        self.measure_open_audio = true;
+    }
+
+    pub fn take_pending_first_frame(&mut self) -> bool {
+        let val = self.pending_first_frame;
+        self.pending_first_frame = false;
+        val
+    }
+
+    pub fn take_pending_first_audio(&mut self) -> bool {
+        let val = self.pending_first_audio;
+        self.pending_first_audio = false;
+        val
+    }
+
+    pub fn take_pending_seek_first_frame(&mut self) -> bool {
+        let val = self.pending_seek_first_frame;
+        self.pending_seek_first_frame = false;
+        val
+    }
+
+    pub fn take_pending_seek_settled(&mut self) -> bool {
+        let val = self.pending_seek_settled;
+        self.pending_seek_settled = false;
+        val
+    }
+
+    pub fn measure_open_audio(&self) -> bool {
+        self.measure_open_audio
+    }
+
+    // Pass-throughs for PlaybackMetrics note_* methods
+    pub fn note_open_requested(&mut self, now: Instant) {
+        self.inner.note_open_requested(now);
+    }
+
+    pub fn note_present(&mut self, now: Instant) {
+        self.inner.note_present(now);
+    }
+
+    pub fn note_resize(&mut self, now: Instant) {
+        self.inner.note_resize(now);
+    }
+
+    pub fn note_seek_requested(&mut self, now: Instant) {
+        self.inner.note_seek_requested(now);
+    }
+
+    pub fn note_first_frame_presented(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_first_frame_presented(now)
+    }
+
+    pub fn note_first_audio_started(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_first_audio_started(now)
+    }
+
+    pub fn note_seek_first_frame_presented(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_seek_first_frame_presented(now)
+    }
+
+    pub fn note_seek_av_settled(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_seek_av_settled(now)
+    }
+
+    pub fn note_resize_recovery_started(&mut self, now: Instant) {
+        self.inner.note_resize_recovery_started(now);
+    }
+
+    pub fn note_resize_recovered(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_resize_recovered(now)
+    }
+
+    pub fn note_device_recovery_started(&mut self, now: Instant) {
+        self.inner.note_device_recovery_started(now);
+    }
+
+    pub fn note_device_recovered(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_device_recovered(now)
+    }
+
+    pub fn note_fullscreen_toggle_started(&mut self, now: Instant) {
+        self.inner.note_fullscreen_toggle_started(now);
+    }
+
+    pub fn note_fullscreen_toggle_completed(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_fullscreen_toggle_completed(now)
+    }
+
+    pub fn note_resume_requested(&mut self, now: Instant) {
+        self.inner.note_resume_requested(now);
+    }
+
+    pub fn note_resume_first_frame(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_resume_first_frame(now)
+    }
+
+    pub fn note_pause_requested(&mut self, now: Instant) {
+        self.inner.note_pause_requested(now);
+    }
+
+    pub fn note_pause_completed(&mut self, now: Instant) -> Option<Duration> {
+        self.inner.note_pause_completed(now)
+    }
+
+    pub fn note_decode_mode_selected(&mut self, mode: VideoDecodeMode, hw_fallback_count: u64) {
+        self.inner.note_decode_mode_selected(mode, hw_fallback_count);
+    }
+
+    pub fn note_video_frame_presented(&mut self) {
+        self.inner.note_video_frame_presented();
+    }
+
+    pub fn note_video_frame_dropped(&mut self) {
+        self.inner.note_video_frame_dropped();
+    }
+
+    pub fn note_audio_underrun(&mut self) {
+        self.inner.note_audio_underrun();
+    }
+
+    pub fn note_ended(&mut self, now: Instant) {
+        self.inner.note_ended(now);
+    }
+
+    pub fn presented_video_frames(&self) -> u64 {
+        self.inner.presented_video_frames()
+    }
+
+    pub fn dropped_video_frames(&self) -> u64 {
+        self.inner.dropped_video_frames()
+    }
+
+    pub fn audio_underruns(&self) -> u64 {
+        self.inner.audio_underruns()
+    }
+
+    pub fn decode_mode(&self) -> Option<VideoDecodeMode> {
+        self.inner.decode_mode()
+    }
+
+    pub fn hw_fallback_count(&self) -> u64 {
+        self.inner.hw_fallback_count()
+    }
+}
