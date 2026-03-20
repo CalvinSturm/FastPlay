@@ -32,10 +32,8 @@ use windows::{
             },
         },
         System::{
-            Com::{IDataObject, IStream, FORMATETC},
-            DataExchange::RegisterClipboardFormatW,
+            Com::{IDataObject, FORMATETC},
             LibraryLoader::GetModuleHandleW,
-            Memory::{GlobalLock, GlobalUnlock},
             Ole::{
                 IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, RevokeDragDrop,
                 DROPEFFECT, DROPEFFECT_COPY, ReleaseStgMedium,
@@ -44,7 +42,7 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_LBUTTON},
-            Shell::{DragQueryFileW, FILEGROUPDESCRIPTORW, HDROP},
+            Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
@@ -178,8 +176,6 @@ impl NativeWindowInner {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
 
-        // Register COM drop target so that drops from virtual folders (e.g.
-        // inside a zip) are handled via IDataObject in addition to real paths.
         let drop_target: IDropTarget = FastPlayDropTarget { hwnd }.into();
         unsafe {
             let _ = OleInitialize(None);
@@ -997,14 +993,8 @@ impl IDropTarget_Impl for FastPlayDropTarget_Impl {
     }
 }
 
-/// Try to resolve a drag-and-drop `IDataObject` to a filesystem path.
-///
-/// Handles two cases:
-/// 1. Real filesystem drop (`CF_HDROP`) — path exists on disk.
-/// 2. Virtual file from a shell namespace (e.g. inside a `.zip`) — reads the
-///    file contents via `CFSTR_FILECONTENTS` and writes them to a temp file.
+/// Try to resolve a drag-and-drop `IDataObject` to a filesystem path via `CF_HDROP`.
 unsafe fn extract_drop_path(data_obj: &IDataObject) -> Option<PathBuf> {
-    // ── 1. CF_HDROP — real path ───────────────────────────────────────────
     let hdrop_fmt = FORMATETC {
         cfFormat: 15u16, // CF_HDROP
         ptd: std::ptr::null_mut(),
@@ -1012,93 +1002,21 @@ unsafe fn extract_drop_path(data_obj: &IDataObject) -> Option<PathBuf> {
         lindex: -1,
         tymed: 1, // TYMED_HGLOBAL
     };
-    if let Ok(mut medium) = data_obj.GetData(&hdrop_fmt) {
-        let hdrop = HDROP(medium.u.hGlobal.0);
-        let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
-        let path = if count > 0 {
-            let len = DragQueryFileW(hdrop, 0, None) as usize;
-            let mut buf = vec![0u16; len + 1];
-            DragQueryFileW(hdrop, 0, Some(&mut buf));
-            buf.retain(|&c| c != 0);
-            let p = PathBuf::from(std::ffi::OsString::from_wide(&buf));
-            if p.exists() { Some(p) } else { None }
-        } else {
-            None
-        };
-        ReleaseStgMedium(&mut medium);
-        if path.is_some() {
-            return path;
-        }
-    }
-
-    // ── 2. Virtual file — extract to %TEMP% ──────────────────────────────
-    let desc_id = RegisterClipboardFormatW(w!("FileGroupDescriptorW"));
-    let contents_id = RegisterClipboardFormatW(w!("FileContents"));
-    if desc_id == 0 || contents_id == 0 {
-        return None;
-    }
-
-    // Get filename from FileGroupDescriptorW
-    let desc_fmt = FORMATETC {
-        cfFormat: desc_id as u16,
-        ptd: std::ptr::null_mut(),
-        dwAspect: 1, // DVASPECT_CONTENT
-        lindex: -1,
-        tymed: 1, // TYMED_HGLOBAL
+    let mut medium = data_obj.GetData(&hdrop_fmt).ok()?;
+    let hdrop = HDROP(medium.u.hGlobal.0);
+    let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+    let path = if count > 0 {
+        let len = DragQueryFileW(hdrop, 0, None) as usize;
+        let mut buf = vec![0u16; len + 1];
+        DragQueryFileW(hdrop, 0, Some(&mut buf));
+        buf.retain(|&c| c != 0);
+        let p = PathBuf::from(std::ffi::OsString::from_wide(&buf));
+        if p.exists() { Some(p) } else { None }
+    } else {
+        None
     };
-    let mut desc_medium = data_obj.GetData(&desc_fmt).ok()?;
-    let filename = {
-        let ptr = GlobalLock(desc_medium.u.hGlobal) as *const FILEGROUPDESCRIPTORW;
-        let name = if ptr.is_null() {
-            None
-        } else {
-            // FILEGROUPDESCRIPTORW is packed(1) — copy the filename out to avoid
-            // creating an unaligned reference.
-            let raw: [u16; 260] = std::ptr::read_unaligned(
-                std::ptr::addr_of!((*ptr).fgd[0].cFileName)
-            );
-            let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
-            let s = std::ffi::OsString::from_wide(&raw[..len]);
-            let _ = GlobalUnlock(desc_medium.u.hGlobal);
-            Some(PathBuf::from(s))
-        };
-        name
-    };
-    ReleaseStgMedium(&mut desc_medium);
-    let filename = filename?;
-
-    // Get file contents as IStream
-    let contents_fmt = FORMATETC {
-        cfFormat: contents_id as u16,
-        ptd: std::ptr::null_mut(),
-        dwAspect: 1, // DVASPECT_CONTENT
-        lindex: 0,   // first file
-        tymed: 4,    // TYMED_ISTREAM
-    };
-    let mut contents_medium = data_obj.GetData(&contents_fmt).ok()?;
-    let stream: Option<IStream> = (*contents_medium.u.pstm).clone();
-    ReleaseStgMedium(&mut contents_medium);
-    let stream = stream?;
-
-    // Write stream to a temp file
-    let mut temp_path = std::env::temp_dir();
-    temp_path.push(filename.file_name()?);
-    let mut file = std::fs::File::create(&temp_path).ok()?;
-    let mut buf = [0u8; 65536];
-    loop {
-        let mut read = 0u32;
-        let hr = stream.Read(buf.as_mut_ptr().cast(), buf.len() as u32, Some(&mut read));
-        if read > 0 {
-            use std::io::Write;
-            file.write_all(&buf[..read as usize]).ok()?;
-        }
-        // hr < 0 means error; hr == S_FALSE (1) or read == 0 means end of stream
-        if read == 0 || hr.is_err() {
-            break;
-        }
-    }
-    drop(file);
-    Some(temp_path)
+    ReleaseStgMedium(&mut medium);
+    path
 }
 
 unsafe extern "system" fn window_proc(
