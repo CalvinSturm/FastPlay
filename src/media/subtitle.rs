@@ -43,11 +43,32 @@ impl SubtitleTrack {
         self.cues.len()
     }
 
-    pub fn cue_at(&self, position: Duration) -> Option<(usize, &SubtitleCue)> {
-        // Binary search to the last cue whose start <= position, then check its end.
+    pub fn cue_at(&self, position: Duration, hint: Option<usize>) -> Option<(usize, &SubtitleCue)> {
+        // Fast path: check the hinted cue and its immediate successor first.
+        // During normal monotonic playback this avoids the binary search entirely.
+        if let Some(hint_idx) = hint {
+            if let Some(cue) = self.cues.get(hint_idx) {
+                if cue.start <= position && position < cue.end {
+                    return Some((hint_idx, cue));
+                }
+                // Check the next cue — the most common advance in forward playback.
+                if let Some(next_idx) = hint_idx.checked_add(1) {
+                    if let Some(next) = self.cues.get(next_idx) {
+                        if next.start > position {
+                            // Position is in the gap before the next cue.
+                            return None;
+                        }
+                        if position < next.end {
+                            return Some((next_idx, next));
+                        }
+                    }
+                }
+            }
+            // Hint is stale (e.g. after seek) — fall through to binary search.
+        }
+
+        // Binary search fallback.
         let idx = self.cues.partition_point(|cue| cue.start <= position);
-        // `partition_point` returns the first index where cue.start > position,
-        // so the candidate (if any) is at idx.saturating_sub(1).
         if idx == 0 {
             return None;
         }
@@ -87,11 +108,13 @@ fn parse_srt(contents: &str) -> Result<Vec<SubtitleCue>, String> {
         };
 
         let (start, end) = parse_timing_line(timing_line)?;
-        let text = lines
-            .map(str::trim_end)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut text = String::new();
+        for line in lines.map(str::trim_end).filter(|l| !l.is_empty()) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(line);
+        }
         if text.is_empty() {
             continue;
         }

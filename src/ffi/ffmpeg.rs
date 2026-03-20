@@ -140,7 +140,7 @@ where
         )?;
 
         let mut video = open_video_decoder(input.0, device, decode_preference)?;
-        let audio = open_audio_decoder(input.0, audio_output_format)?;
+        let mut audio = open_audio_decoder(input.0, audio_output_format)?;
         let mut audio_batch = audio
             .as_ref()
             .map(|audio| AudioBatcher::new(audio.output_format));
@@ -206,7 +206,7 @@ where
                 continue;
             }
 
-            if let Some(audio) = audio.as_ref() {
+            if let Some(audio) = audio.as_mut() {
                 if (*packet.0).stream_index == audio.stream_index as i32 {
                     ffmpeg_check(
                         avcodec_send_packet(audio.codec.0, packet.0),
@@ -249,7 +249,7 @@ where
             &mut on_video,
         )?;
 
-        if let Some(audio) = audio.as_ref() {
+        if let Some(audio) = audio.as_mut() {
             ffmpeg_check(
                 avcodec_send_packet(audio.codec.0, null()),
                 "avcodec_send_packet(audio flush)",
@@ -694,7 +694,7 @@ impl Drop for SoftwareVideoConverter {
 }
 
 unsafe fn receive_audio_frames<F>(
-    audio: &AudioDecoder,
+    audio: &mut AudioDecoder,
     frame: *mut AVFrame,
     open_gen: OpenGeneration,
     seek_gen: SeekGeneration,
@@ -721,7 +721,7 @@ where
             batcher.push(
                 pts,
                 frame_count,
-                &data,
+                data,
                 open_gen,
                 seek_gen,
                 op_id,
@@ -737,7 +737,7 @@ where
                 pts,
                 format: audio.output_format,
                 frame_count,
-                data,
+                data: data.to_vec(),
             })?;
         }
     }
@@ -746,6 +746,7 @@ where
 struct Resampler {
     context: *mut SwrContext,
     output_format: AudioStreamFormat,
+    output_buffer: Vec<u8>,
 }
 
 impl Resampler {
@@ -773,16 +774,17 @@ impl Resampler {
         Ok(Self {
             context,
             output_format,
+            output_buffer: Vec::new(),
         })
     }
 
-    unsafe fn convert(&self, frame: *mut AVFrame) -> Result<Vec<u8>, String> {
+    unsafe fn convert(&mut self, frame: *mut AVFrame) -> Result<&[u8], String> {
         let out_samples = swr_get_out_samples(self.context, (*frame).nb_samples);
         ffmpeg_check(out_samples, "swr_get_out_samples")?;
 
         let bytes_per_frame = self.output_format.bytes_per_frame() as usize;
-        let mut output = vec![0u8; out_samples as usize * bytes_per_frame];
-        let output_planes = [output.as_mut_ptr()];
+        self.output_buffer.resize(out_samples as usize * bytes_per_frame, 0);
+        let output_planes = [self.output_buffer.as_mut_ptr()];
         let converted = swr_convert(
             self.context,
             output_planes.as_ptr().cast(),
@@ -791,8 +793,8 @@ impl Resampler {
             (*frame).nb_samples,
         );
         ffmpeg_check(converted, "swr_convert")?;
-        output.truncate(converted as usize * bytes_per_frame);
-        Ok(output)
+        let len = converted as usize * bytes_per_frame;
+        Ok(&self.output_buffer[..len])
     }
 }
 

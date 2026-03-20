@@ -133,23 +133,22 @@ impl Presenter {
         self.surfaces.insert(open_gen, seek_gen, surface)
     }
 
-    pub fn select_surface(&mut self, handle: VideoSurfaceHandle) -> Option<VideoSurfaceHandle> {
-        if !self.surfaces.contains(handle) {
-            return self.current_surface;
-        }
-        self.current_surface.replace(handle)
-    }
-
-    pub fn surface_matches(
-        &self,
+    /// Validates that `handle` exists and matches the given generations, then
+    /// selects it as the current surface in one registry lookup.
+    /// Returns `Ok(previous_handle)` on success or `Err(())` on mismatch.
+    pub fn validate_and_select_surface(
+        &mut self,
         handle: VideoSurfaceHandle,
         open_gen: crate::playback::generations::OpenGeneration,
         seek_gen: crate::playback::generations::SeekGeneration,
-    ) -> bool {
-        matches!(
+    ) -> Result<Option<VideoSurfaceHandle>, ()> {
+        if !matches!(
             self.surfaces.get(handle),
             Some(entry) if entry.open_gen == open_gen && entry.seek_gen == seek_gen
-        )
+        ) {
+            return Err(());
+        }
+        Ok(self.current_surface.replace(handle))
     }
 
     pub fn has_selected_surface(&self) -> bool {
