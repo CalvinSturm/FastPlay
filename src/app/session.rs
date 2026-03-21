@@ -486,9 +486,17 @@ impl PlaybackSession {
             return Ok(());
         }
 
+        // At non-1.0x rates, audio is not submitted so the queue fills up
+        // and would block the drain loop from processing video and control
+        // events. Discard queued audio proactively so backpressure only
+        // depends on the video queue.
+        if self.playback_rate != 1.0 {
+            self.queued_audio_frames.clear();
+        }
+
         loop {
             if self.queued_video_frames.len() >= self.queued_video_capacity
-                && self.queued_audio_frames.len() >= self.queued_audio_capacity
+                || self.queued_audio_frames.len() >= self.queued_audio_capacity
             {
                 break;
             }
