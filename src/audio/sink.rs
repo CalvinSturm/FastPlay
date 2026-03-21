@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::{
     ffi::wasapi::WasapiAudioSink,
     media::audio::{AudioStreamFormat, DecodedAudioFrame},
@@ -83,10 +81,6 @@ impl AudioSink {
             .write_interleaved(&self.volume_scratch, remaining_frames, self.format)
     }
 
-    pub fn playback_position(&self) -> Result<Duration, Box<dyn std::error::Error>> {
-        self.inner.playback_position()
-    }
-
     pub fn buffered_frames(&self) -> Result<u32, Box<dyn std::error::Error>> {
         self.inner.buffered_frames()
     }
@@ -94,10 +88,6 @@ impl AudioSink {
     pub fn adjust_volume_steps(&mut self, steps: i16) {
         let delta = 0.05 * steps as f32;
         self.volume = (self.volume + delta).clamp(0.0, 1.5);
-    }
-
-    pub fn volume(&self) -> f32 {
-        self.volume
     }
 
     pub fn volume_percent(&self) -> u32 {

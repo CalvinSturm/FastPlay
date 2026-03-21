@@ -30,20 +30,4 @@ impl OverlayManager {
     pub fn replay_indicator_until(&self) -> Option<Instant> {
         self.replay_indicator_until
     }
-
-    pub fn reset_for_open(&mut self) {
-        self.subtitle_track = None;
-        self.subtitles_enabled = true;
-        self.reset_subtitle_clock();
-    }
-
-    pub fn reset_subtitle_clock(&mut self) {
-        self.subtitle_clock_base = None;
-        self.active_subtitle_cue = None;
-        self.active_subtitle_viewport = None;
-    }
-
-    pub fn set_subtitle_clock_base(&mut self, base: Option<Duration>) {
-        self.subtitle_clock_base = base;
-    }
 }

@@ -271,10 +271,6 @@ impl NativeWindowInner {
         self.is_borderless.get()
     }
 
-    pub fn is_in_modal_loop(&self) -> bool {
-        self.state.in_modal_loop.get()
-    }
-
     pub fn client_size(&self) -> Result<(u32, u32), Box<dyn Error>> {
         let mut rect = RECT::default();
         unsafe {
@@ -313,9 +309,6 @@ impl NativeWindowInner {
         unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 }
     }
 
-    pub fn is_ctrl_pan_active(&self) -> bool {
-        self.state.ctrl_pan_active.get()
-    }
 
     pub fn resize_for_content(&self, content_width: u32, content_height: u32, center: bool) {
         if self.is_borderless.get() || content_width == 0 || content_height == 0 {

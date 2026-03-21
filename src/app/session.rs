@@ -353,10 +353,6 @@ impl PlaybackSession {
             SessionCommand::ResetView => {
                 self.reset_view();
             }
-            SessionCommand::ToggleAutoReplay => {
-                self.auto_replay = !self.auto_replay;
-                self.overlay.replay_indicator_until = Some(now + Duration::from_millis(1500));
-            }
             SessionCommand::SetInPoint => {
                 self.in_point = Some(self.snapshot(now).position);
                 // If the new in-point is at or past the out-point, clear the out-point.
@@ -679,21 +675,16 @@ impl PlaybackSession {
                 let ffmpeg::PendingVideoFrame::D3D11 {
                     open_gen,
                     seek_gen,
-                    op_id,
                     pts,
-                    width,
-                    height,
                     surface,
+                    ..
                 } = frame;
                 self.observe_media_time_origin(pts);
                 let handle = self.presenter.register_surface(open_gen, seek_gen, surface);
                 self.push_video_frame(DecodedVideoFrame::D3D11 {
                     open_gen,
                     seek_gen,
-                    op_id,
                     pts,
-                    width,
-                    height,
                     surface: handle,
                 });
                 if matches!(self.state, PlaybackState::Opening | PlaybackState::Seeking) {

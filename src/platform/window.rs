@@ -92,10 +92,6 @@ impl NativeWindow {
         self.inner.is_ctrl_held()
     }
 
-    pub fn is_in_modal_loop(&self) -> bool {
-        self.inner.is_in_modal_loop()
-    }
-
     pub(crate) fn raw_window(&self) -> &NativeWindowInner {
         &self.inner
     }

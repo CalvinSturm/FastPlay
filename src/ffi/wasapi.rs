@@ -1,9 +1,9 @@
-use std::{cell::Cell, error::Error, fmt, time::Duration};
+use std::{error::Error, fmt};
 
 use windows::{
     Win32::{
         Media::Audio::{
-            eConsole, eRender, IAudioClient3, IAudioClock, IAudioRenderClient, IMMDevice,
+            eConsole, eRender, IAudioClient3, IAudioRenderClient, IMMDevice,
             IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
         },
         Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
@@ -56,9 +56,7 @@ pub struct WasapiAudioSink {
     _com: ComApartment,
     audio_client: IAudioClient3,
     render_client: IAudioRenderClient,
-    audio_clock: IAudioClock,
     buffer_frames: u32,
-    clock_origin: Cell<Option<u64>>,
 }
 
 impl WasapiAudioSink {
@@ -103,7 +101,6 @@ impl WasapiAudioSink {
         }
 
         let render_client: IAudioRenderClient = unsafe { audio_client.GetService()? };
-        let audio_clock: IAudioClock = unsafe { audio_client.GetService()? };
         let buffer_frames = unsafe { audio_client.GetBufferSize()? };
 
         Ok((
@@ -111,9 +108,7 @@ impl WasapiAudioSink {
                 _com: com,
                 audio_client,
                 render_client,
-                audio_clock,
                 buffer_frames,
-                clock_origin: Cell::new(None),
             },
             actual_format,
         ))
@@ -122,9 +117,6 @@ impl WasapiAudioSink {
     pub fn start(&self) -> Result<(), Box<dyn Error>> {
         unsafe {
             self.audio_client.Start()?;
-        }
-        if self.clock_origin.get().is_none() {
-            self.clock_origin.set(Some(self.raw_clock_position()?));
         }
         Ok(())
     }
@@ -141,7 +133,6 @@ impl WasapiAudioSink {
             self.audio_client.Stop()?;
             self.audio_client.Reset()?;
         }
-        self.clock_origin.set(None);
         Ok(())
     }
 
@@ -182,29 +173,8 @@ impl WasapiAudioSink {
         Ok(frames_to_write)
     }
 
-    pub fn playback_position(&self) -> Result<Duration, Box<dyn Error>> {
-        unsafe {
-            let frequency = self.audio_clock.GetFrequency()?;
-            if frequency == 0 {
-                return Ok(Duration::ZERO);
-            }
-            let current = self.raw_clock_position()?;
-            let origin = self.clock_origin.get().unwrap_or(current);
-            let delta = current.saturating_sub(origin);
-            return Ok(Duration::from_secs_f64(delta as f64 / frequency as f64));
-        }
-    }
-
     pub fn buffered_frames(&self) -> Result<u32, Box<dyn Error>> {
         Ok(unsafe { self.audio_client.GetCurrentPadding()? })
-    }
-
-    fn raw_clock_position(&self) -> Result<u64, Box<dyn Error>> {
-        let mut position = 0u64;
-        unsafe {
-            self.audio_clock.GetPosition(&mut position, None)?;
-        }
-        Ok(position)
     }
 }
 
