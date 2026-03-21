@@ -127,6 +127,8 @@ fastplay/
       state.rs
       events.rs
       commands.rs
+      overlay.rs
+      timeline_ui.rs
 
     playback/
       mod.rs
@@ -962,7 +964,7 @@ If not, it waits.
 
 **Architecture locked. Milestones M0–M6 complete.**
 
-Current release: v0.1.1
+Current release: v0.1.2
 
 Implemented:
 * single-crate Rust implementation matching all module stubs
@@ -973,5 +975,12 @@ Implemented:
 * software fallback path (D3D11 upload + video-processor present)
 * external `.srt` subtitle overlay
 * borderless fullscreen, zoom/pan, rotation, resize/device recovery
-* timeline scrub overlay
+* timeline scrub overlay with cancel
 * file associations and MSI installer
+* playback speed control
+* in/out point markers
+* help overlay (H key)
+* Ctrl+drag pan
+* auto-rotation from stream display matrix metadata
+* decode info toggle
+* 1 ms Windows timer resolution for smooth playback

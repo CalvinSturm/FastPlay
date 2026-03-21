@@ -488,7 +488,7 @@ impl PlaybackSession {
 
         loop {
             if self.queued_video_frames.len() >= self.queued_video_capacity
-                || self.queued_audio_frames.len() >= self.queued_audio_capacity
+                && self.queued_audio_frames.len() >= self.queued_audio_capacity
             {
                 break;
             }

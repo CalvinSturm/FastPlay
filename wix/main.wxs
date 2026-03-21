@@ -85,9 +85,12 @@
         <Property Id='DiskPrompt' Value='fastplay Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='FastPlay'/>
+            </Directory>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='fastplay'>
-                    
+
                     <!--
                       Enabling the license sidecar file in the installer is a four step process:
 
@@ -109,16 +112,6 @@
                     -->
 
                     <Directory Id='Bin' Name='bin'>
-                        <Component Id='Path' Guid='85629149-3900-4FAC-9AEE-3B83A2AD577C' KeyPath='yes'>
-                            <Environment
-                                Id='PATH'
-                                Name='PATH'
-                                Value='[Bin]'
-                                Permanent='no'
-                                Part='last'
-                                Action='set'
-                                System='yes'/>
-                        </Component>
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
@@ -151,6 +144,18 @@
                         <Component Id='dll_pkgconf' Guid='*'>
                             <File Id='pkgconf' Name='pkgconf-7.dll' DiskId='1' Source='$(var.CargoTargetBinDir)\pkgconf-7.dll' KeyPath='yes'/>
                         </Component>
+                        <Component Id='StartMenuShortcut' Guid='*'>
+                            <Shortcut
+                                Id='StartMenuShortcut'
+                                Name='FastPlay'
+                                Description='FastPlay media player'
+                                Directory='ApplicationProgramsFolder'
+                                Target='[Bin]fastplay.exe'
+                                WorkingDirectory='Bin'
+                                Icon='ProductICO'/>
+                            <RemoveFolder Id='CleanUpShortcutFolder' Directory='ApplicationProgramsFolder' On='uninstall'/>
+                            <RegistryValue Root='HKCU' Key='Software\FastPlay' Name='StartMenuShortcut' Type='integer' Value='1' KeyPath='yes'/>
+                        </Component>
                         <Component Id='FileAssociations' Guid='*'>
                             <!-- ProgId: description, icon, and open command -->
                             <RegistryValue Root='HKCR' Key='FastPlay.VideoFile' Value='FastPlay Video File' Type='string' KeyPath='yes'/>
@@ -174,20 +179,14 @@
         <Feature
             Id='Binaries'
             Title='Application'
-            Description='Installs all binaries and the license.'
+            Description='Installs FastPlay and registers video file associations.'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
             AllowAdvertise='no'
-            Display='expand'
             Absent='disallow'>
-            
-            <!--
-              Uncomment the following `ComponentRef` tag to add the license
-              sidecar file to the installer.
-            -->
-            <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='FileAssociations'/>
             <ComponentRef Id='dll_avcodec'/>
             <ComponentRef Id='dll_avformat'/>
@@ -197,15 +196,6 @@
             <ComponentRef Id='dll_swscale'/>
             <ComponentRef Id='dll_swresample'/>
             <ComponentRef Id='dll_pkgconf'/>
-
-            <Feature
-                Id='Environment'
-                Title='PATH Environment Variable'
-                Description='Add the install location of the [ProductName] executable to the PATH system environment variable. This allows the [ProductName] executable to be called from any location.'
-                Level='1'
-                Absent='allow'>
-                <ComponentRef Id='Path'/>
-            </Feature>
         </Feature>
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
@@ -232,22 +222,14 @@
         -->
         <!--<Property Id='ARPHELPLINK' Value='ChangeMe'/>-->
 
+        <Property Id='WIXUI_INSTALLDIR' Value='APPLICATIONFOLDER'/>
+
         <UI>
-            <UIRef Id='WixUI_FeatureTree'/>
-            
-            <!--
-              Enabling the EULA dialog in the installer is a three step process:
+            <UIRef Id='WixUI_InstallDir'/>
 
-                1. Comment out or remove the two `Publish` tags that follow the
-                   `WixVariable` tag.
-                2. Uncomment the `<WixVariable Id='WixUILicenseRtf' Value='Path\to\Eula.rft'>` tag further down
-                3. Replace the `Value` attribute of the `WixVariable` tag with
-                   the path to a RTF file that will be used as the EULA and
-                   displayed in the license agreement dialog.
-            -->
-            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
-            <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
-
+            <!-- Skip the license dialog (Welcome -> InstallDir -> Verify -> Install) -->
+            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='InstallDirDlg' Order='99'>1</Publish>
+            <Publish Dialog='InstallDirDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
         </UI>
 
         
