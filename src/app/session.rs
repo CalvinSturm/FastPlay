@@ -366,11 +366,27 @@ impl PlaybackSession {
                     }
                 }
             }
+            SessionCommand::ClearInPoint => {
+                self.in_point = None;
+                // Clearing the in-point while loop_range is active with only an in-point
+                // set would leave an invalid range — disable looping too.
+                if self.out_point.is_none() {
+                    self.loop_range = false;
+                }
+            }
             SessionCommand::SetOutPoint => {
                 let pos = self.snapshot(now).position;
                 // Out-point must be strictly after the in-point (or after 0 if none set).
                 if pos > self.in_point.unwrap_or(Duration::ZERO) {
                     self.out_point = Some(pos);
+                }
+            }
+            SessionCommand::ClearOutPoint => {
+                self.out_point = None;
+                // Clearing the out-point while loop_range is active with only an out-point
+                // set would leave an invalid range — disable looping too.
+                if self.in_point.is_none() {
+                    self.loop_range = false;
                 }
             }
             SessionCommand::ToggleLoopRange => {
@@ -1246,6 +1262,10 @@ impl PlaybackSession {
                                     let _ = sink.pause();
                                 }
                             }
+                            // Freeze the display clock so the timeline playhead
+                            // doesn't drift past the out-point after stopping.
+                            self.video_clock = None;
+                            self.paused_clock_position = Some(frame_pos);
                             self.state = PlaybackState::Ended;
                         }
                         return Ok(true);

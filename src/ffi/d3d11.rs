@@ -1583,26 +1583,11 @@ fn render_timeline_bitmap(
         [255, 255, 255, 60],
     );
 
-    // Played track — same pill shape, bright.
-    let played_right = (track_left + model.played_px).min(track_right);
-    if played_right > track_left {
-        fill_rounded_rect(
-            &mut pixels,
-            width,
-            height,
-            track_left,
-            track_top,
-            played_right,
-            track_bottom,
-            track_half_h,
-            [255, 255, 255, 230],
-        );
-    }
-
-    // In/out range fill — orange-tinted overlay spanning the active range.
-    if model.in_point_marker_x.is_some() || model.out_point_marker_x.is_some() {
-        let range_left = model.in_point_marker_x.unwrap_or(layout.track_left).max(0) as u32;
-        let range_right = model.out_point_marker_x.unwrap_or(layout.track_right).max(0) as u32;
+    // In/out range fill — drawn before the played track so the bright played portion
+    // sits on top of it; only shown when both markers are set.
+    if let (Some(ix), Some(ox)) = (model.in_point_marker_x, model.out_point_marker_x) {
+        let range_left = ix.max(0) as u32;
+        let range_right = ox.max(0) as u32;
         if range_right > range_left {
             fill_rounded_rect(
                 &mut pixels,
@@ -1616,6 +1601,24 @@ fn render_timeline_bitmap(
                 [60, 160, 255, 130],
             );
         }
+    }
+
+    // Played track — bright pill starting at the in-point (if set) so the region
+    // before I reads as dim/excluded rather than as played content.
+    let played_left = model.in_point_marker_x.map_or(track_left, |ix| (ix.max(0) as u32).max(track_left));
+    let played_right = (track_left + model.played_px).min(track_right);
+    if played_right > played_left {
+        fill_rounded_rect(
+            &mut pixels,
+            width,
+            height,
+            played_left,
+            track_top,
+            played_right,
+            track_bottom,
+            track_half_h,
+            [255, 255, 255, 230],
+        );
     }
 
     // In/out marker ticks — 2px-wide white vertical bars slightly taller than the track.
