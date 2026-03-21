@@ -23,11 +23,3 @@ impl Default for ViewTransform {
     }
 }
 
-impl ViewTransform {
-    pub fn is_identity(&self) -> bool {
-        self.zoom == 1.0
-            && self.pan_x == 0.0
-            && self.pan_y == 0.0
-            && self.rotation_quarter_turns == 0
-    }
-}

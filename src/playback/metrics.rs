@@ -209,18 +209,6 @@ impl MetricsCollector {
         }
     }
 
-    pub fn inner(&self) -> &PlaybackMetrics {
-        &self.inner
-    }
-
-    pub fn inner_mut(&mut self) -> &mut PlaybackMetrics {
-        &mut self.inner
-    }
-
-    pub fn pending_seek_settled(&self) -> bool {
-        self.pending_seek_settled
-    }
-
     pub fn reset_for_operation(&mut self) {
         self.pending_first_frame = false;
         self.pending_first_audio = false;
@@ -237,30 +225,6 @@ impl MetricsCollector {
 
     pub fn enable_open_audio_metric(&mut self) {
         self.measure_open_audio = true;
-    }
-
-    pub fn take_pending_first_frame(&mut self) -> bool {
-        let val = self.pending_first_frame;
-        self.pending_first_frame = false;
-        val
-    }
-
-    pub fn take_pending_first_audio(&mut self) -> bool {
-        let val = self.pending_first_audio;
-        self.pending_first_audio = false;
-        val
-    }
-
-    pub fn take_pending_seek_first_frame(&mut self) -> bool {
-        let val = self.pending_seek_first_frame;
-        self.pending_seek_first_frame = false;
-        val
-    }
-
-    pub fn take_pending_seek_settled(&mut self) -> bool {
-        let val = self.pending_seek_settled;
-        self.pending_seek_settled = false;
-        val
     }
 
     pub fn measure_open_audio(&self) -> bool {

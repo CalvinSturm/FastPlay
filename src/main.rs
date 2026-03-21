@@ -111,9 +111,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::ResetView => {
                     session.apply_command(SessionCommand::ResetView, now)?;
                 }
-                InputEvent::ToggleAutoReplay => {
-                    session.apply_command(SessionCommand::ToggleAutoReplay, now)?;
-                }
                 InputEvent::SetInPoint => {
                     session.apply_command(SessionCommand::SetInPoint, now)?;
                 }
