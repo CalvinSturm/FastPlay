@@ -117,6 +117,7 @@ pub struct PlaybackSession {
     view_pan_x: f32,
     view_pan_y: f32,
     view_rotation_quarter_turns: u8,
+    stream_rotation_quarter_turns: u8,
     needs_initial_resize: bool,
     has_shown_content: bool,
     auto_replay: bool,
@@ -177,6 +178,7 @@ impl PlaybackSession {
             view_pan_x: 0.0,
             view_pan_y: 0.0,
             view_rotation_quarter_turns: 0,
+            stream_rotation_quarter_turns: 0,
             needs_initial_resize: false,
             has_shown_content: false,
             auto_replay: false,
@@ -290,6 +292,7 @@ impl PlaybackSession {
         self.media_duration = None;
         self.active_decode_mode = None;
         self.view_rotation_quarter_turns = 0;
+        self.stream_rotation_quarter_turns = 0;
         if let Some(track) = self.overlay.subtitle_track.as_ref() {
             eprintln!(
                 "subtitle_track_loaded path={} cues={}",
@@ -628,6 +631,7 @@ impl PlaybackSession {
                 // Apply stream rotation on the initial decode mode event.
                 // On mid-stream HW→SW fallback the rotation is the same stream
                 // so this is idempotent.
+                self.stream_rotation_quarter_turns = rotation_quarter_turns;
                 self.view_rotation_quarter_turns = rotation_quarter_turns;
                 if self.overlay.show_decode_info {
                     self.update_window_title();
@@ -1477,7 +1481,7 @@ impl PlaybackSession {
         self.view_zoom = 1.0;
         self.view_pan_x = 0.0;
         self.view_pan_y = 0.0;
-        self.view_rotation_quarter_turns = 0;
+        self.view_rotation_quarter_turns = self.stream_rotation_quarter_turns;
         self.present_needed = true;
     }
 

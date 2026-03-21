@@ -405,10 +405,13 @@ unsafe fn stream_rotation_quarter_turns(codec_parameters: *const AVCodecParamete
         if scale < 1e-6 {
             break;
         }
-        // av_display_rotation_get returns -atan2(b, a) in degrees.
-        let degrees = -b.atan2(a).to_degrees();
+        // av_display_rotation_get uses CCW convention: -atan2(b, a).
+        // D3D11 VideoProcessorSetStreamRotation uses CW convention,
+        // so we negate to get CW degrees: atan2(b, a).
+        let cw_degrees = b.atan2(a).to_degrees();
         // Round to nearest 90° and express as clockwise quarter-turns.
-        let quarter = ((degrees / 90.0).round() as i32).rem_euclid(4) as u8;
+        let quarter = ((cw_degrees / 90.0).round() as i32).rem_euclid(4) as u8;
+        eprintln!("display_matrix rotation: {cw_degrees:.1}° CW → {quarter} quarter-turns");
         return quarter;
     }
     0
