@@ -1039,9 +1039,16 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::RotateClockwise);
                     }
-                    // I → set in-point, O → set out-point, R → toggle loop range
+                    // I → set in-point, Ctrl+I → clear in-point
+                    0x49 if ctrl_held => {
+                        state.input_events.borrow_mut().push(InputEvent::ClearInPoint);
+                    }
                     0x49 => {
                         state.input_events.borrow_mut().push(InputEvent::SetInPoint);
+                    }
+                    // O → set out-point, Ctrl+O → clear out-point
+                    0x4F if ctrl_held => {
+                        state.input_events.borrow_mut().push(InputEvent::ClearOutPoint);
                     }
                     0x4F => {
                         state.input_events.borrow_mut().push(InputEvent::SetOutPoint);

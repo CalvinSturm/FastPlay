@@ -117,8 +117,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::SetInPoint => {
                     session.apply_command(SessionCommand::SetInPoint, now)?;
                 }
+                InputEvent::ClearInPoint => {
+                    session.apply_command(SessionCommand::ClearInPoint, now)?;
+                }
                 InputEvent::SetOutPoint => {
                     session.apply_command(SessionCommand::SetOutPoint, now)?;
+                }
+                InputEvent::ClearOutPoint => {
+                    session.apply_command(SessionCommand::ClearOutPoint, now)?;
                 }
                 InputEvent::ToggleLoopRange => {
                     session.apply_command(SessionCommand::ToggleLoopRange, now)?;

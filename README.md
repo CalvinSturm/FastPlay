@@ -4,7 +4,7 @@ FastPlay is a Windows video player built for the parts of playback people actual
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/download/v0.1.1/fastplay-0.1.1-x86_64.msi) • [All releases](../../releases) • [Report an issue](../../issues)
+[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/download/v0.1.2/fastplay-0.1.2-x86_64.msi) • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
@@ -29,7 +29,9 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Ctrl+R` | Rotate clockwise 90 degrees |
 | `Ctrl+E` | Rotate counter-clockwise 90 degrees |
 | `Ctrl+MouseWheel` | Zoom at cursor |
+| `Ctrl+Drag` | Pan when zoomed in |
 | `Ctrl+0` | Reset zoom, pan, and rotation |
+| `H` (hold) | Show controls overlay |
 | `[` / `]` | Decrease / increase playback speed |
 | `\` | Reset playback speed to 1× |
 | `Backspace` | Cancel scrub and return to original position |
@@ -72,11 +74,12 @@ Press `R` while a range is active to loop it continuously. In/out points reset w
 
 ### Viewing controls
 - borderless fullscreen
-- cursor-centered zoom and pan
-- 90-degree view rotation
+- cursor-centered zoom and drag-to-pan
+- 90-degree view rotation with auto-rotate from stream display matrix metadata
 - fit-to-screen window sizing with no black padding
 - half native resolution window sizing
 - volume control with on-screen overlay
+- hold-to-show keybind reference overlay
 
 ### Subtitles
 - external `.srt` subtitle overlay
