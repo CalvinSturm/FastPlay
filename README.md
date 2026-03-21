@@ -19,7 +19,9 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Right` | Seek forward 5s, hold for 15s steps |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
+| `Ctrl+I` | Clear in-point |
 | `O` | Set out-point at current position |
+| `Ctrl+O` | Clear out-point |
 | `R` | Toggle loop range (if in/out set) · toggle auto-replay (if no range) |
 | `MouseWheel` | Adjust volume |
 | `Esc` | Exit borderless fullscreen |
@@ -50,7 +52,7 @@ Press `I` to mark where playback starts and `O` to mark where it ends. The range
 | — | ✓ | start → out-point | start |
 | ✓ | ✓ | in-point → out-point | in-point |
 
-Press `R` while a range is active to loop it continuously. In/out points reset when a new file is opened.
+Press `R` while a range is active to loop it continuously. Use `Ctrl+I` / `Ctrl+O` to clear individual points. In/out points reset when a new file is opened.
 
 ## Features
 
