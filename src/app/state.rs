@@ -1,6 +1,4 @@
-#![allow(dead_code)]
-
-/// Explicit coordinator state machine. M0 only exercises `Idle`.
+/// Explicit coordinator state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackState {
     Idle,
@@ -12,5 +10,4 @@ pub enum PlaybackState {
     Draining,
     Ended,
     Error,
-    Closing,
 }

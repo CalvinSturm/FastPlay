@@ -1213,7 +1213,7 @@ unsafe extern "system" fn window_proc(
                     // start custom drag tracking (DefWindowProcW normally
                     // handles this, but we bypass it to avoid its blocking
                     // DragDetect loop).
-                    BringWindowToTop(hwnd);
+                    let _ = BringWindowToTop(hwnd);
                     let mut pt = POINT::default();
                     let _ = GetCursorPos(&mut pt);
                     state.caption_tracking.set(true);
