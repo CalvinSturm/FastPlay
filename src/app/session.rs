@@ -423,6 +423,7 @@ impl PlaybackSession {
                 if self.view_zoom > 1.0 {
                     self.view_pan_x += dx;
                     self.view_pan_y += dy;
+                    self.clamp_pan();
                     self.present_needed = true;
                 }
             }
@@ -481,44 +482,49 @@ impl PlaybackSession {
 
     fn tick_inner(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         if self.state == PlaybackState::Error {
-            thread::sleep(Duration::from_millis(1));
-            return Ok(());
-        }
-
-        // At non-1.0x rates, audio is not submitted so the queue fills up
-        // and would block the drain loop from processing video and control
-        // events. Discard queued audio proactively so backpressure only
-        // depends on the video queue.
-        if self.playback_rate != 1.0 {
-            self.queued_audio_frames.clear();
-        }
-
-        loop {
-            if self.queued_video_frames.len() >= self.queued_video_capacity
-                || self.queued_audio_frames.len() >= self.queued_audio_capacity
-            {
-                break;
-            }
-
-            match self.event_rx.try_recv() {
-                Ok(event) => self.handle_event(event, now)?,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+            self.show_error_idle_overlay()?;
+            // Still handle resize so the error overlay re-renders at new size.
+            if let Some(size) = self.window.take_resize_request() {
+                self.handle_resize(size, now)?;
             }
         }
 
-        if let Some(size) = self.window.take_resize_request() {
-            self.handle_resize(size, now)?;
+        if self.state != PlaybackState::Error {
+            // At non-1.0x rates, audio is not submitted so the queue fills up
+            // and would block the drain loop from processing video and control
+            // events. Discard queued audio proactively so backpressure only
+            // depends on the video queue.
+            if self.playback_rate != 1.0 {
+                self.queued_audio_frames.clear();
+            }
+
+            loop {
+                if self.queued_video_frames.len() >= self.queued_video_capacity
+                    || self.queued_audio_frames.len() >= self.queued_audio_capacity
+                {
+                    break;
+                }
+
+                match self.event_rx.try_recv() {
+                    Ok(event) => self.handle_event(event, now)?,
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
+                }
+            }
+
+            if let Some(size) = self.window.take_resize_request() {
+                self.handle_resize(size, now)?;
+            }
+
+            self.submit_due_audio(now)?;
+            if self.advance_video_playback(now)? {
+                return Ok(());
+            }
+            self.update_subtitle_overlay(now)?;
+            self.refresh_volume_overlay(now)?;
         }
 
-        self.submit_due_audio(now)?;
-        if self.advance_video_playback(now)? {
-            return Ok(());
-        }
-        self.update_subtitle_overlay(now)?;
-        self.refresh_volume_overlay(now)?;
-
-        if self.present_needed && self.state != PlaybackState::Error {
+        if self.present_needed {
             let view = crate::render::ViewTransform {
                 zoom: self.view_zoom,
                 pan_x: self.view_pan_x,
@@ -810,6 +816,11 @@ impl PlaybackSession {
         let op_id = self.operation_clock.next();
         self.metrics.note_seek_requested(now);
         self.metrics.disable_open_audio_metric();
+        let clamped_position = match self.media_duration {
+            Some(dur) if target.position() > dur => dur,
+            _ => target.position(),
+        };
+        let target = SeekTarget::new(clamped_position);
         let absolute_target = self.absolute_media_position(target.position());
         // Keep the last presented surface alive during seeks so the user sees
         // the previous frame until the new one arrives, avoiding a grey flash.
@@ -946,7 +957,7 @@ impl PlaybackSession {
                 seek_gen,
                 op_id,
                 |mode, hw_fallback_count, rotation_quarter_turns| {
-                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -961,7 +972,7 @@ impl PlaybackSession {
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },
                 |duration| {
-                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -973,9 +984,9 @@ impl PlaybackSession {
                         })
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },
-                || worker_nonce.load(Ordering::Relaxed) != expected_nonce,
+                || worker_nonce.load(Ordering::Acquire) != expected_nonce,
                 |frame| {
-                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -983,7 +994,7 @@ impl PlaybackSession {
                         .map_err(|_| WORKER_CANCELLED.to_string())
                 },
                 |frame| {
-                    if worker_nonce.load(Ordering::Relaxed) != expected_nonce {
+                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
                     sender
@@ -1148,6 +1159,10 @@ impl PlaybackSession {
             && !self.can_finish_with_buffered(0)?
         {
             self.metrics.note_audio_underrun();
+            // Re-anchor the audio clock so the next submission re-establishes
+            // A/V sync instead of drifting permanently after the gap.
+            self.audio_clock_anchor_pts = None;
+            self.audio_submitted_frames = 0;
         }
 
         // Stop the audio sink once all audio has been submitted and the
@@ -1346,7 +1361,7 @@ impl PlaybackSession {
         self.queued_video_frames.insert(insert_at, frame);
 
         while self.queued_video_frames.len() > self.queued_video_capacity {
-            if let Some(dropped) = self.queued_video_frames.pop_back() {
+            if let Some(dropped) = self.queued_video_frames.pop_front() {
                 self.drop_video_frame(dropped, VideoDropCause::QueueOverflow);
             }
         }
@@ -1464,9 +1479,20 @@ impl PlaybackSession {
         } else {
             self.view_pan_x = new_pan_x;
             self.view_pan_y = new_pan_y;
+            self.clamp_pan();
         }
 
         self.present_needed = true;
+    }
+
+    /// Clamp pan so that at least 25% of the content remains visible on each
+    /// axis. Without this the user can drag the video entirely off-screen.
+    fn clamp_pan(&mut self) {
+        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1, 1));
+        let max_pan_x = vw as f32 * self.view_zoom * 0.75;
+        let max_pan_y = vh as f32 * self.view_zoom * 0.75;
+        self.view_pan_x = self.view_pan_x.clamp(-max_pan_x, max_pan_x);
+        self.view_pan_y = self.view_pan_y.clamp(-max_pan_y, max_pan_y);
     }
 
     fn rotate_view(&mut self, delta_quarter_turns: u8) {
@@ -1540,7 +1566,7 @@ impl PlaybackSession {
             let rate_str = if self.playback_rate.fract() == 0.0 {
                 format!("{}x", self.playback_rate as u32)
             } else {
-                format!("{:.2}x", self.playback_rate).trim_end_matches('0').trim_end_matches('.').to_owned() + "x"
+                format!("{:.2}", self.playback_rate).trim_end_matches('0').trim_end_matches('.').to_owned() + "x"
             };
             suffixes.push(rate_str);
         }
@@ -1619,7 +1645,7 @@ impl PlaybackSession {
         let master = self.master_clock_position(now).unwrap_or(Duration::ZERO);
         if let Some(base) = self.overlay.subtitle_clock_base {
             if master.saturating_add(Duration::from_secs(1)) < base {
-                return base.saturating_add(master);
+                return base;
             }
             self.overlay.subtitle_clock_base = None;
         }
@@ -1636,7 +1662,7 @@ impl PlaybackSession {
             (self.audio_clock_anchor_pts, self.audio_sink.as_ref())
         {
             if sink.is_started() {
-                let buffered_frames = sink.buffered_frames().ok()? as u64;
+                let buffered_frames = sink.buffered_frames().unwrap_or(0) as u64;
                 let played_frames = self.audio_submitted_frames.saturating_sub(buffered_frames);
                 let sample_rate = sink.format().sample_rate;
                 if sample_rate > 0 {
@@ -1791,6 +1817,18 @@ impl PlaybackSession {
         self.active_decode_mode = None;
         self.state = PlaybackState::Error;
         eprintln!("playback failed: {error}");
+    }
+
+    /// Show the idle "Drop a file" overlay during Error state so the user
+    /// knows how to recover.  Only rebuilds the overlay once (when
+    /// `has_ever_shown_content` was previously set by normal playback).
+    fn show_error_idle_overlay(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.presenter.is_showing_idle() {
+            let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
+            self.presenter.set_idle_overlay(vw, vh)?;
+            self.present_needed = true;
+        }
+        Ok(())
     }
 
     fn is_current_frame(

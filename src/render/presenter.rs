@@ -255,6 +255,22 @@ impl Presenter {
         let _ = self.surfaces.remove(handle);
     }
 
+    /// Replace the idle overlay with a custom message (e.g. for error state).
+    pub fn set_idle_overlay(
+        &mut self,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.idle_overlay = self.device.create_idle_overlay(viewport_width, viewport_height).ok().flatten();
+        self.has_ever_shown_content = false;
+        Ok(())
+    }
+
+    /// Returns true if the idle (no-content) overlay is currently showing.
+    pub fn is_showing_idle(&self) -> bool {
+        !self.has_ever_shown_content
+    }
+
     pub fn reset_surfaces(&mut self) {
         self.current_surface = None;
         self.surfaces.clear_for_new_epoch();

@@ -105,14 +105,14 @@ pub(crate) fn stream_media<V, A, C>(
     op_id: OperationId,
     mut on_decode_mode: impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
     mut on_duration: impl FnMut(Duration) -> Result<(), String>,
-    mut should_cancel: C,
+    should_cancel: C,
     mut on_video: V,
     mut on_audio: A,
 ) -> Result<StreamStatus, String>
 where
     V: FnMut(PendingVideoFrame) -> Result<(), String>,
     A: FnMut(PendingAudioFrame) -> Result<(), String>,
-    C: FnMut() -> bool,
+    C: Fn() -> bool,
 {
     let source_path = source
         .path()
@@ -231,6 +231,7 @@ where
                     op_id,
                     &mut summary.produced_video_frames,
                     &mut on_video,
+                    &|| should_cancel(),
                 )?;
                 continue;
             }
@@ -251,6 +252,7 @@ where
                     audio_batch.as_mut(),
                     &mut summary.produced_audio_frames,
                     &mut on_audio,
+                    &|| should_cancel(),
                 )?;
                 continue;
             }
@@ -276,6 +278,7 @@ where
             op_id,
             &mut summary.produced_video_frames,
             &mut on_video,
+            &|| should_cancel(),
         )?;
 
         if let Some(audio) = audio.as_mut() {
@@ -292,6 +295,7 @@ where
                 audio_batch.as_mut(),
                 &mut summary.produced_audio_frames,
                 &mut on_audio,
+                &|| should_cancel(),
             )?;
             if let Some(batch) = audio_batch.as_mut() {
                 batch.flush(open_gen, seek_gen, op_id, &mut summary.produced_audio_frames, &mut on_audio)?;
@@ -596,11 +600,15 @@ unsafe fn receive_video_frames<F>(
     op_id: OperationId,
     produced_frames: &mut u64,
     on_frame: &mut F,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<(), String>
 where
     F: FnMut(PendingVideoFrame) -> Result<(), String>,
 {
     loop {
+        if should_cancel() {
+            return Ok(());
+        }
         let status = avcodec_receive_frame(video.codec.0, frame);
         if status == fastplay_ffmpeg_error_eagain() || status == fastplay_ffmpeg_error_eof() {
             return Ok(());
@@ -779,11 +787,15 @@ unsafe fn receive_audio_frames<F>(
     mut batcher: Option<&mut AudioBatcher>,
     produced_frames: &mut u64,
     on_frame: &mut F,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<(), String>
 where
     F: FnMut(PendingAudioFrame) -> Result<(), String>,
 {
     loop {
+        if should_cancel() {
+            return Ok(());
+        }
         let status = avcodec_receive_frame(audio.codec.0, frame);
         if status == fastplay_ffmpeg_error_eagain() || status == fastplay_ffmpeg_error_eof() {
             return Ok(());
