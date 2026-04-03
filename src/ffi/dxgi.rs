@@ -69,12 +69,14 @@ use crate::{
     platform::input::InputEvent,
 };
 
-// SetCapture / ReleaseCapture / GetSystemMetrics are not exposed by the
-// `windows` 0.58 crate for our feature set, so we link them directly.
+// SetCapture / ReleaseCapture / GetSystemMetrics / BringWindowToTop are not
+// exposed by the `windows` 0.58 crate for our feature set, so we link them
+// directly.
 extern "system" {
     fn SetCapture(hwnd: HWND) -> HWND;
     fn ReleaseCapture() -> BOOL;
     fn GetSystemMetrics(index: i32) -> i32;
+    fn BringWindowToTop(hwnd: HWND) -> BOOL;
 }
 const SM_CXDRAG: i32 = 68;
 const SM_CYDRAG: i32 = 69;
@@ -1207,6 +1209,11 @@ unsafe extern "system" fn window_proc(
             const HTCAPTION: usize = 2;
             if wparam.0 == HTCAPTION {
                 if let Some(state) = window_state(hwnd) {
+                    // Activate the window so it comes to front before we
+                    // start custom drag tracking (DefWindowProcW normally
+                    // handles this, but we bypass it to avoid its blocking
+                    // DragDetect loop).
+                    BringWindowToTop(hwnd);
                     let mut pt = POINT::default();
                     let _ = GetCursorPos(&mut pt);
                     state.caption_tracking.set(true);
