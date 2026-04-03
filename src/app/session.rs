@@ -122,6 +122,8 @@ pub struct PlaybackSession {
     has_shown_content: bool,
     auto_replay: bool,
     pause_after_seek: bool,
+    deferred_seek: Option<SeekTarget>,
+    last_worker_spawned_at: Option<Instant>,
     playback_rate: f64,
     in_point: Option<Duration>,
     out_point: Option<Duration>,
@@ -183,6 +185,8 @@ impl PlaybackSession {
             has_shown_content: false,
             auto_replay: false,
             pause_after_seek: false,
+            deferred_seek: None,
+            last_worker_spawned_at: None,
             playback_rate: 1.0,
             in_point: None,
             out_point: None,
@@ -516,6 +520,20 @@ impl PlaybackSession {
                 self.handle_resize(size, now)?;
             }
 
+            // Execute any deferred seek once the throttle interval has
+            // elapsed and old worker events have been drained above.
+            if self.deferred_seek.is_some()
+                && !self.last_worker_spawned_at.is_some_and(|t| {
+                    now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL
+                })
+            {
+                if let Some(target) = self.deferred_seek.take() {
+                    if let Some(source) = self.current_source.clone() {
+                        self.execute_seek(source, target, now)?;
+                    }
+                }
+            }
+
             self.submit_due_audio(now)?;
             if self.advance_video_playback(now)? {
                 return Ok(());
@@ -806,21 +824,50 @@ impl PlaybackSession {
         Ok(())
     }
 
-    fn seek(&mut self, target: SeekTarget, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(source) = self.current_source.clone() else {
-            return Ok(());
-        };
+    /// Minimum interval between spawning decoder worker threads.  Rapid
+    /// scrubbing can request hundreds of seeks per second; each one opens the
+    /// file and allocates a hardware decoder on the GPU.  Most GPUs only
+    /// support 8-16 concurrent decode sessions, so spawning without throttling
+    /// can exhaust GPU resources and crash the driver.
+    const SEEK_WORKER_MIN_INTERVAL: Duration = Duration::from_millis(30);
 
-        let open_gen = self.generations.open();
-        let seek_gen = self.generations.bump_seek();
-        let op_id = self.operation_clock.next();
-        self.metrics.note_seek_requested(now);
-        self.metrics.disable_open_audio_metric();
+    fn seek(&mut self, target: SeekTarget, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
+        if self.current_source.is_none() {
+            return Ok(());
+        }
+
         let clamped_position = match self.media_duration {
             Some(dur) if target.position() > dur => dur,
             _ => target.position(),
         };
         let target = SeekTarget::new(clamped_position);
+
+        // If a worker was spawned very recently, defer this seek so we don't
+        // pile up concurrent hardware decoder sessions on the GPU.  The
+        // deferred target is picked up and executed in tick_inner().
+        if self.last_worker_spawned_at.is_some_and(|t| now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL) {
+            self.deferred_seek = Some(target);
+            // Update the visible seek state so the timeline preview stays
+            // responsive even while the worker spawn is deferred.
+            self.pending_seek_target = Some(target);
+            return Ok(());
+        }
+
+        let source = self.current_source.clone().unwrap();
+        self.execute_seek(source, target, now)
+    }
+
+    fn execute_seek(
+        &mut self,
+        source: Arc<MediaSource>,
+        target: SeekTarget,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let open_gen = self.generations.open();
+        let seek_gen = self.generations.bump_seek();
+        let op_id = self.operation_clock.next();
+        self.metrics.note_seek_requested(now);
+        self.metrics.disable_open_audio_metric();
         let absolute_target = self.absolute_media_position(target.position());
         // Keep the last presented surface alive during seeks so the user sees
         // the previous frame until the new one arrives, avoiding a grey flash.
@@ -828,7 +875,9 @@ impl PlaybackSession {
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
+        self.deferred_seek = None;
         self.spawn_stream_worker(source, Some(absolute_target), open_gen, seek_gen, op_id);
+        self.last_worker_spawned_at = Some(now);
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
         self.overlay.subtitle_clock_base = Some(target.position());
@@ -852,6 +901,7 @@ impl PlaybackSession {
         self.state = next_state;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
+        self.deferred_seek = None;
         self.spawn_stream_worker(source, start_position, open_gen, seek_gen, op_id);
         Ok(())
     }
