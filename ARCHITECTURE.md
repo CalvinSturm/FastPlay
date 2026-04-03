@@ -164,6 +164,8 @@ fastplay/
     ffi/
       mod.rs
       ffmpeg.rs
+      ffmpeg_shim.c
+      ffmpeg_shim.h
       d3d11.rs
       dxgi.rs
       wasapi.rs
@@ -235,19 +237,16 @@ Workers never mutate `PlaybackSession` fields directly.
 
 ```rust
 enum SessionEvent {
-    VideoFrameReady(DecodedVideoFrame),
-    AudioFrameReady(DecodedAudioFrame),
-    OpenFailed {
-        open_gen: OpenGeneration,
-        op_id: OperationId,
-        error: String,
-    },
-    DeviceLost {
-        op_id: OperationId,
-    },
-    AudioEndpointChanged {
-        op_id: OperationId,
-    },
+    DecodeModeSelected { open_gen, seek_gen, op_id, mode, hw_fallback_count, rotation_quarter_turns },
+    MediaDurationKnown { open_gen, seek_gen, op_id, duration },
+    VideoFrameReady(PendingVideoFrame),
+    AudioFrameReady(PendingAudioFrame),
+    VideoStreamEnded { open_gen, seek_gen, op_id },
+    AudioStreamEnded { open_gen, seek_gen, op_id },
+    OpenFailed { open_gen, op_id, error },
+    PlaybackFailed { open_gen, seek_gen, op_id, error },
+    DeviceLost { open_gen, seek_gen, op_id },
+    AudioEndpointChanged { open_gen, seek_gen, op_id },
 }
 ```
 
@@ -352,7 +351,6 @@ Seeking
 Draining
 Ended
 Error
-Closing
 ```
 
 ### State transition intent
@@ -392,10 +390,6 @@ Closing
 * `Any -> Error`
 
   * fatal error
-
-* `Any -> Closing`
-
-  * teardown in progress
 
 ---
 
@@ -799,36 +793,16 @@ pub enum DecodedVideoFrame {
     D3D11 {
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,
-        op_id: OperationId,
         pts: std::time::Duration,
-        width: u32,
-        height: u32,
         surface: VideoSurfaceHandle,
-    },
-    Software {
-        open_gen: OpenGeneration,
-        seek_gen: SeekGeneration,
-        op_id: OperationId,
-        pts: std::time::Duration,
-        width: u32,
-        height: u32,
-        planes: Vec<Vec<u8>>,
-        strides: Vec<usize>,
     },
 }
 ```
 
 ### Edge traits
 
-Traits are allowed at subsystem edges only.
-
-* `VideoDecoder`
-* `AudioDecoder`
-* `SwapChainPresenter`
-* `AudioSink`
-* `MetricsSink`
-
-`PlaybackSession` remains concrete.
+Traits are allowed at subsystem edges if needed but are not currently used.
+All subsystems are concrete types. `PlaybackSession` remains concrete.
 
 ---
 
@@ -964,7 +938,7 @@ If not, it waits.
 
 **Architecture locked. Milestones M0–M6 complete.**
 
-Current release: v0.1.2
+Current release: v0.1.3
 
 Implemented:
 * single-crate Rust implementation matching all module stubs
@@ -980,7 +954,11 @@ Implemented:
 * playback speed control
 * in/out point markers
 * help overlay (H key)
-* Ctrl+drag pan
-* auto-rotation from stream display matrix metadata
+* Ctrl+drag pan with clamping (content stays visible)
+* auto-rotation from stream display matrix metadata (CCW→CW corrected)
 * decode info toggle
 * 1 ms Windows timer resolution for smooth playback
+* seek worker throttling to prevent GPU resource exhaustion during scrubbing
+* audio underrun recovery (clock re-anchor)
+* error state idle overlay for recovery
+* Start Menu shortcut and custom install directory in MSI
