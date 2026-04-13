@@ -204,15 +204,19 @@ where
             ffmpeg_check(read_status, "av_read_frame")?;
 
             if (*packet.0).stream_index == video.stream_index as i32 {
-                // Bail out early if the D3D11 device was removed (GPU TDR)
-                // during hardware decode — avcodec_send_packet would call into
-                // the dead device via FFmpeg's D3D11VA backend and crash in
-                // avutil-60.dll.
-                if video.mode == VideoDecodeMode::HardwareD3D11 && device.is_device_removed() {
-                    av_packet_unref(packet.0);
-                    return Err("D3D11 device removed during hardware decode".into());
-                }
-                let send_result = avcodec_send_packet(video.codec.0, packet.0);
+                // D3D11VA's avcodec_send_packet may call into the video
+                // context — hold the lock to prevent racing with the UI
+                // thread's VideoProcessorBlt.
+                let send_result = if video.mode == VideoDecodeMode::HardwareD3D11 {
+                    if device.is_device_removed() {
+                        av_packet_unref(packet.0);
+                        return Err("D3D11 device removed during hardware decode".into());
+                    }
+                    let _lock = device.lock_context();
+                    avcodec_send_packet(video.codec.0, packet.0)
+                } else {
+                    avcodec_send_packet(video.codec.0, packet.0)
+                };
                 if send_result < 0
                     && video.mode == VideoDecodeMode::HardwareD3D11
                     && !hw_mid_fallback_done
@@ -287,10 +291,17 @@ where
             return Ok(StreamStatus::Cancelled);
         }
 
-        ffmpeg_check(
-            avcodec_send_packet(video.codec.0, null()),
-            "avcodec_send_packet(video flush)",
-        )?;
+        {
+            let _lock = if video.mode == VideoDecodeMode::HardwareD3D11 {
+                Some(device.lock_context())
+            } else {
+                None
+            };
+            ffmpeg_check(
+                avcodec_send_packet(video.codec.0, null()),
+                "avcodec_send_packet(video flush)",
+            )?;
+        }
         receive_video_frames(
             &mut video,
             frame.0,
@@ -627,17 +638,25 @@ unsafe fn receive_video_frames<F>(
 where
     F: FnMut(PendingVideoFrame) -> Result<(), String>,
 {
+    let is_hw = matches!(video.output, VideoDecoderOutput::Hardware);
     loop {
         if should_cancel() {
             return Ok(());
         }
         // When using hardware decode, FFmpeg's avcodec_receive_frame calls
-        // into D3D11 internally (av_hwframe_transfer_data).  If the GPU has
-        // TDR'd, those calls crash inside avutil/d3d11.dll.  Check device
-        // health before touching the codec so the worker exits cleanly.
-        if matches!(video.output, VideoDecoderOutput::Hardware) && device.is_device_removed() {
-            return Err("D3D11 device removed during hardware decode".into());
-        }
+        // D3D11VA methods (DecoderBeginFrame, SubmitDecoderBuffers,
+        // DecoderEndFrame) on the ID3D11VideoContext, which is NOT
+        // covered by SetMultithreadProtected.  Hold the context lock
+        // around the entire receive + CopySubresourceRegion sequence
+        // so the UI thread's VideoProcessorBlt cannot race.
+        let _hw_lock = if is_hw {
+            if device.is_device_removed() {
+                return Err("D3D11 device removed during hardware decode".into());
+            }
+            Some(device.lock_context())
+        } else {
+            None
+        };
         let status = avcodec_receive_frame(video.codec.0, frame);
         if status == fastplay_ffmpeg_error_eagain() || status == fastplay_ffmpeg_error_eof() {
             return Ok(());
@@ -697,6 +716,7 @@ where
                 }
             }
         };
+        drop(_hw_lock);
         av_frame_unref(frame);
         *produced_frames = (*produced_frames).saturating_add(1);
         on_frame(result)?;
