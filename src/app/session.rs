@@ -331,6 +331,18 @@ impl PlaybackSession {
         pause_after: bool,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.decode_preference != VideoDecodePreference::ForceSoftware
+            && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
+        {
+            // This file is reproducibly crashing in d3d11.dll under timeline
+            // stress-scrub while the hardware path is active. Switch the rest
+            // of the session to software decode before spawning the scrub seek.
+            self.decode_preference = VideoDecodePreference::ForceSoftware;
+            eprintln!("[scrub_seek] forcing software decode for session");
+            if self.overlay.show_decode_info {
+                self.update_window_title();
+            }
+        }
         self.pause_after_seek = pause_after;
         self.seek(target, now)
     }
@@ -879,6 +891,20 @@ impl PlaybackSession {
         let throttled = self.last_worker_spawned_at.is_some_and(|t| now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL);
         let should_defer = throttled || workers_alive >= 2;
         if should_defer {
+            if self.decode_preference != VideoDecodePreference::ForceSoftware
+                && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
+            {
+                // Repeated scrub seeks are still provoking d3d11.dll crashes
+                // on some files in the hardware path. Keep the rest of the
+                // session on software decode once seek churn is detected.
+                self.decode_preference = VideoDecodePreference::ForceSoftware;
+                eprintln!(
+                    "[seek] forcing software decode for session after hardware seek churn"
+                );
+                if self.overlay.show_decode_info {
+                    self.update_window_title();
+                }
+            }
             eprintln!(
                 "[seek] DEFERRED pos={:.3}s workers={} throttled={}",
                 clamped_position.as_secs_f64(),
@@ -922,9 +948,10 @@ impl PlaybackSession {
             self.queued_audio_frames.len(),
             self.presenter.device().is_device_removed()
         );
-        // Keep the last presented surface alive during seeks so the user sees
-        // the previous frame until the new one arrives, avoiding a grey flash.
-        self.prepare_runtime_for_operation_inner(false, false, false)?;
+        // Hardware seek churn is still more important than preserving the old
+        // frame during scrubs. Drop the selected surface at seek start so no
+        // prior generation's presentable texture survives into the next seek.
+        self.prepare_runtime_for_operation_inner(false, false, true)?;
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
@@ -1098,7 +1125,7 @@ impl PlaybackSession {
                                     return Err(WORKER_CANCELLED.to_string());
                                 }
                                 full_count.fetch_add(1, Ordering::Relaxed);
-                                thread::yield_now();
+                                thread::sleep(std::time::Duration::from_millis(1));
                                 event = returned;
                             }
                             Err(TrySendError::Disconnected(_)) => {

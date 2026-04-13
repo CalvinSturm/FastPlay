@@ -8,7 +8,7 @@ use windows::{
             Direct3D::{Fxc::D3DCompile, ID3DBlob, D3D_DRIVER_TYPE_HARDWARE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST},
             Direct3D11::{
                 D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
-                ID3D11BlendState, ID3D11Buffer, ID3D11InputLayout, ID3D11PixelShader,
+                ID3D11BlendState, ID3D11Buffer, ID3D11InputLayout, ID3D11PixelShader, ID3D11Query,
                 ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
                 ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice,
                 D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
@@ -17,6 +17,7 @@ use windows::{
                 D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_ELEMENT_DESC,
                 D3D11_INPUT_PER_VERTEX_DATA, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
+                D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
                 D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
                 D3D11_TEX2D_VPIV, D3D11_VIEWPORT,
                 D3D11_TEX2D_VPOV, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
@@ -68,10 +69,11 @@ pub struct D3D11Device {
     ///
     /// `ID3D11Multithread::SetMultithreadProtected` only covers
     /// `ID3D11DeviceContext` methods.  `ID3D11VideoContext` methods
-    /// like `VideoProcessorBlt` are **not** covered by that CritSec,
-    /// so a worker's `CopySubresourceRegion` can race with the UI
-    /// thread's `VideoProcessorBlt`, causing an access violation
-    /// inside d3d11.dll after ~20 rapid seeks.
+    /// (FFmpeg's D3D11VA DecoderBeginFrame/SubmitDecoderBuffers/
+    /// DecoderEndFrame, and our VideoProcessorBlt/Set*) are **not**
+    /// covered by that CritSec.  Without this lock, the decode worker
+    /// and UI render thread race on the same underlying immediate
+    /// context, causing access violations inside d3d11.dll.
     context_lock: Arc<Mutex<()>>,
 }
 
@@ -237,6 +239,13 @@ impl D3D11Device {
         hr.is_err()
     }
 
+    /// Acquire the context lock.  Must be held around any operation that
+    /// touches the `ID3D11VideoContext` (FFmpeg D3D11VA decode, video
+    /// processor Blt, CopySubresourceRegion).
+    pub(crate) fn lock_context(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.context_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub(crate) fn raw_device(&self) -> &ID3D11Device {
         &self.device
     }
@@ -248,6 +257,37 @@ impl D3D11Device {
         // an un-AddRef'd pointer is correct — the previous clone()
         // + into_raw() leaked one COM reference per call.
         self.device.as_raw()
+    }
+
+    fn wait_for_immediate_context_idle(&self) -> Result<(), Box<dyn Error>> {
+        let mut query = None;
+        let desc = D3D11_QUERY_DESC {
+            Query: D3D11_QUERY_EVENT,
+            MiscFlags: 0,
+        };
+        unsafe {
+            self.device.CreateQuery(&desc, Some(&mut query))?;
+        }
+        let query: ID3D11Query = query.ok_or(D3D11Error("CreateQuery returned no event query"))?;
+
+        unsafe {
+            self.context.End(&query);
+            loop {
+                let mut done = 0u32;
+                match self.context.GetData(
+                    &query,
+                    Some((&mut done as *mut u32).cast()),
+                    size_of::<u32>() as u32,
+                    0,
+                ) {
+                    Ok(()) if done != 0 => break,
+                    Ok(()) => std::thread::yield_now(),
+                    Err(error) => return Err(Box::new(error)),
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) unsafe fn surface_from_raw_texture(
@@ -295,19 +335,20 @@ impl D3D11Device {
         // SAFETY: both textures belong to the same D3D11 device. The source
         // subresource index selects one slice from the decoder's texture
         // array; the destination is a standalone single-slice texture.
-        {
-            let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
-            self.context.CopySubresourceRegion(
-                &owned_texture,
-                0,
-                0,
-                0,
-                0,
-                source,
-                subresource_index,
-                None,
-            );
-        }
+        // Caller must hold context_lock — this method does NOT acquire it
+        // internally because the lock must also cover the preceding
+        // avcodec_receive_frame (which uses the video context for D3D11VA).
+        self.context.CopySubresourceRegion(
+            &owned_texture,
+            0,
+            0,
+            0,
+            0,
+            source,
+            subresource_index,
+            None,
+        );
+        self.wait_for_immediate_context_idle()?;
 
         Ok(VideoSurface {
             texture: owned_texture,
@@ -561,6 +602,34 @@ impl D3D11Device {
             if flushed > 0 {
                 eprintln!("[vp_cache] flushed {} stale input views after surface release", flushed);
             }
+        }
+    }
+
+    /// Removes the cached input view for a single released video surface.
+    /// This keeps the raw-pointer identity cache in sync with surface
+    /// lifetimes without throwing away the whole video-processor cache.
+    pub(crate) fn invalidate_video_processor_input_view(
+        &self,
+        vp_cache: &mut Option<VideoProcessorCache>,
+        surface: &VideoSurface,
+    ) {
+        let Some(cache) = vp_cache.as_mut() else {
+            return;
+        };
+
+        let texture_identity = surface.texture.as_raw();
+        let before = cache.input_view_cache.len();
+        cache.input_view_cache.retain(|entry| {
+            !(entry.texture_identity == texture_identity
+                && entry.subresource_index == surface.subresource_index)
+        });
+
+        let removed = before.saturating_sub(cache.input_view_cache.len());
+        if removed > 0 {
+            eprintln!(
+                "[vp_cache] invalidated {} input view(s) for released surface",
+                removed
+            );
         }
     }
 
@@ -1197,6 +1266,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         // - `data` is a contiguous NV12 buffer (Y plane then interleaved UV plane)
         // - it stays alive for the duration of CreateTexture2D
         // - the created texture remains owned by the returned VideoSurface
+        //
+        // CreateTexture2D with pInitialData internally uses the immediate
+        // context to upload the data.  The runtime's CritSec (from
+        // SetMultithreadProtected) covers ID3D11DeviceContext methods, but
+        // NOT ID3D11VideoContext methods.  Hold context_lock to prevent
+        // racing with VideoProcessorBlt on the UI thread.
+        let _lock = self.lock_context();
         unsafe {
             self.device
                 .CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))?;
