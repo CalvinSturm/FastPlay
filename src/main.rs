@@ -190,6 +190,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_events: Vec<InputEvent> = Vec::new();
     while session.window().is_open() {
         session.window().pump_messages()?;
+        // WM_CLOSE may have destroyed the window during pump_messages.
+        if !session.window().is_open() {
+            break;
+        }
         let now = Instant::now();
         session.window().take_input_events(&mut input_events);
         for input in input_events.drain(..) {
