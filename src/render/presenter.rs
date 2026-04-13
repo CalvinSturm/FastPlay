@@ -258,7 +258,11 @@ impl Presenter {
         if self.current_surface == Some(handle) {
             self.current_surface = None;
         }
-        let _ = self.surfaces.remove(handle);
+        if let Some(entry) = self.surfaces.remove(handle) {
+            if let Some(sc) = self.swap_chain.as_mut() {
+                sc.invalidate_video_processor_input_view(&self.device, &entry.surface);
+            }
+        }
     }
 
     /// Replace the idle overlay with a custom message (e.g. for error state).
@@ -280,6 +284,9 @@ impl Presenter {
     pub fn reset_surfaces(&mut self) {
         self.current_surface = None;
         self.surfaces.clear_for_new_epoch();
+        if let Some(sc) = self.swap_chain.as_mut() {
+            sc.flush_video_processor_input_cache(&self.device);
+        }
         self.subtitle_overlay = None;
         self.timeline_overlay = None;
         self.timeline_model = None;
