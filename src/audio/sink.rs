@@ -85,6 +85,14 @@ impl AudioSink {
         self.inner.buffered_frames()
     }
 
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.5);
+    }
+
     pub fn adjust_volume_steps(&mut self, steps: i16) {
         let delta = 0.05 * steps as f32;
         self.volume = (self.volume + delta).clamp(0.0, 1.5);

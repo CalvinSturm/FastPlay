@@ -649,6 +649,14 @@ impl DxgiSwapChain {
         volume_overlay: Option<&SubtitleOverlay>,
         help_overlay: Option<&SubtitleOverlay>,
     ) -> Result<PresentResult, Box<dyn Error>> {
+        // Detect a removed device (GPU TDR / driver reset) *before* touching
+        // any D3D11 objects.  Without this gate the video processor cache and
+        // backbuffer references point at freed GPU resources and the resulting
+        // VideoProcessorBlt / ClearRenderTargetView call will access-violate.
+        if device.is_device_removed() {
+            return Ok(PresentResult::DeviceLost);
+        }
+
         let render_target = self
             .render_target
             .as_ref()
@@ -681,6 +689,14 @@ impl DxgiSwapChain {
         help_overlay: Option<&SubtitleOverlay>,
         view: &crate::render::ViewTransform,
     ) -> Result<PresentResult, Box<dyn Error>> {
+        // Detect a removed device (GPU TDR / driver reset) *before* touching
+        // any D3D11 objects.  Without this gate the video processor cache holds
+        // COM pointers to freed GPU resources and VideoProcessorBlt will
+        // access-violate (0xc0000005) — the crash seen in WER under BEX64.
+        if device.is_device_removed() {
+            return Ok(PresentResult::DeviceLost);
+        }
+
         let backbuffer = self
             .backbuffer
             .as_ref()
@@ -711,6 +727,10 @@ impl DxgiSwapChain {
         }
 
         self.present()
+    }
+
+    pub fn flush_video_processor_input_cache(&mut self, device: &D3D11Device) {
+        device.flush_video_processor_input_cache(&mut self.vp_cache);
     }
 
     pub fn resize(
@@ -1290,10 +1310,21 @@ unsafe extern "system" fn window_proc(
                     state.caption_tracking.set(false);
                     let _ = ReleaseCapture();
                 }
-                state
-                    .input_events
-                    .borrow_mut()
-                    .push(InputEvent::ToggleBorderlessFullscreen);
+                // Ignore double-clicks in the timeline activation zone at the
+                // bottom of the window.  Without this, rapidly clicking the
+                // timeline to seek triggers accidental fullscreen toggles.
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rect = RECT::default();
+                let in_timeline = GetClientRect(hwnd, &mut rect).is_ok() && {
+                    let height = rect.bottom - rect.top;
+                    height > 0 && y >= height - crate::render::timeline::TIMELINE_ACTIVATION_ZONE_PX
+                };
+                if !in_timeline {
+                    state
+                        .input_events
+                        .borrow_mut()
+                        .push(InputEvent::ToggleBorderlessFullscreen);
+                }
             }
             LRESULT(0)
         }

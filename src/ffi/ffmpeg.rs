@@ -139,7 +139,20 @@ where
             "avformat_find_stream_info",
         )?;
 
+        // Check cancellation before allocating a hardware decoder on the GPU.
+        // Without this, rapid seeks pile up concurrent decoder sessions from
+        // threads that haven't reached the main decode loop yet, exhausting
+        // the GPU's session limit (typically 8-16) and causing device loss.
+        if should_cancel() {
+            return Ok(StreamStatus::Cancelled);
+        }
+
         let mut video = open_video_decoder(input.0, device, decode_preference)?;
+        // Re-check after decoder creation so a cancel that arrived during
+        // open_video_decoder drops the session immediately.
+        if should_cancel() {
+            return Ok(StreamStatus::Cancelled);
+        }
         let mut audio = open_audio_decoder(input.0, audio_output_format)?;
         let mut audio_batch = audio
             .as_ref()
@@ -161,6 +174,7 @@ where
         }
 
         if let Some(target) = start_position {
+            eprintln!("[worker] seeking to {:.3}s", target.as_secs_f64());
             seek_and_flush(input.0, &video, audio.as_ref(), target)?;
         }
 
@@ -190,6 +204,14 @@ where
             ffmpeg_check(read_status, "av_read_frame")?;
 
             if (*packet.0).stream_index == video.stream_index as i32 {
+                // Bail out early if the D3D11 device was removed (GPU TDR)
+                // during hardware decode — avcodec_send_packet would call into
+                // the dead device via FFmpeg's D3D11VA backend and crash in
+                // avutil-60.dll.
+                if video.mode == VideoDecodeMode::HardwareD3D11 && device.is_device_removed() {
+                    av_packet_unref(packet.0);
+                    return Err("D3D11 device removed during hardware decode".into());
+                }
                 let send_result = avcodec_send_packet(video.codec.0, packet.0);
                 if send_result < 0
                     && video.mode == VideoDecodeMode::HardwareD3D11
@@ -609,11 +631,28 @@ where
         if should_cancel() {
             return Ok(());
         }
+        // When using hardware decode, FFmpeg's avcodec_receive_frame calls
+        // into D3D11 internally (av_hwframe_transfer_data).  If the GPU has
+        // TDR'd, those calls crash inside avutil/d3d11.dll.  Check device
+        // health before touching the codec so the worker exits cleanly.
+        if matches!(video.output, VideoDecoderOutput::Hardware) && device.is_device_removed() {
+            return Err("D3D11 device removed during hardware decode".into());
+        }
         let status = avcodec_receive_frame(video.codec.0, frame);
         if status == fastplay_ffmpeg_error_eagain() || status == fastplay_ffmpeg_error_eof() {
             return Ok(());
         }
         ffmpeg_check(status, "avcodec_receive_frame(video)")?;
+
+        // Check cancellation *after* receiving the frame but *before*
+        // the expensive CreateTexture2D + CopySubresourceRegion.  This
+        // prevents stale workers from allocating GPU textures for frames
+        // that will be immediately discarded, reducing VRAM pressure
+        // during rapid seeking.
+        if should_cancel() {
+            av_frame_unref(frame);
+            return Ok(());
+        }
 
         let result = match &mut video.output {
             VideoDecoderOutput::Hardware => {

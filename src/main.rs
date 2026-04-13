@@ -34,11 +34,132 @@ unsafe fn modal_tick_trampoline(ctx: *mut c_void) {
 }
 
 fn main() {
+    // ── Persistent stderr log ──────────────────────────────────────────
+    // Redirect stderr (fd 2) to a log file so that ALL eprintln! tracing
+    // is captured even when the process is killed by an access violation.
+    let log_dir = std::env::var_os("APPDATA")
+        .map(|a| std::path::PathBuf::from(a).join("FastPlay"));
+    if let Some(ref dir) = log_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let log_path = dir.join("session.log");
+        // Use the C runtime's _dup2 to redirect fd 2 (stderr) to the
+        // log file.  This works regardless of windows_subsystem and
+        // ensures Rust's eprintln! goes to the file.
+        if let Ok(file) = std::fs::File::create(&log_path) {
+            use std::os::windows::io::AsRawHandle;
+            extern "C" {
+                fn _open_osfhandle(osfhandle: isize, flags: i32) -> i32;
+                fn _dup2(fd1: i32, fd2: i32) -> i32;
+            }
+            let raw = file.as_raw_handle() as isize;
+            let fd = unsafe { _open_osfhandle(raw, 0) };
+            if fd >= 0 {
+                unsafe { _dup2(fd, 2) };
+            }
+            // `file` is dropped here but the fd stays open because
+            // _dup2 duplicated it onto fd 2.  The CRT owns it now.
+            std::mem::forget(file);
+        }
+    }
+
+    // ── Vectored Exception Handler ─────────────────────────────────────
+    // Access violations from d3d11.dll kill the process instantly —
+    // Rust's panic handler never fires.  A VEH runs BEFORE the default
+    // handler, giving us a chance to write crash context to disk.
+    install_crash_handler();
+
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("panic: {info}");
+        eprintln!("{msg}");
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let dir = std::path::PathBuf::from(appdata).join("FastPlay");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("crash.log"), &msg);
+        }
+    }));
     if let Err(error) = run() {
-        eprintln!("fastplay failed to start: {error}");
+        let msg = format!("fatal: {error}");
+        eprintln!("{msg}");
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let dir = std::path::PathBuf::from(appdata).join("FastPlay");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("crash.log"), &msg);
+        }
         std::process::exit(1);
     }
 }
+
+/// Installs a Windows Vectored Exception Handler that writes crash
+/// details to `%APPDATA%\FastPlay\crash.log` on access violations.
+fn install_crash_handler() {
+    use windows::Win32::System::Diagnostics::Debug::{
+        AddVectoredExceptionHandler, EXCEPTION_POINTERS,
+    };
+
+    unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
+        const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+        const EXCEPTION_ACCESS_VIOLATION: u32 = 0xC0000005;
+
+        if info.is_null() {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        let record = unsafe { &*(*info).ExceptionRecord };
+        if record.ExceptionCode.0 as u32 != EXCEPTION_ACCESS_VIOLATION {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Write crash context to crash.log.
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let dir = std::path::PathBuf::from(appdata).join("FastPlay");
+            let _ = std::fs::create_dir_all(&dir);
+
+            let addr = record.ExceptionAddress as usize;
+            let rw = if record.NumberParameters >= 1 {
+                match record.ExceptionInformation[0] {
+                    0 => "READ",
+                    1 => "WRITE",
+                    8 => "DEP",
+                    _ => "UNKNOWN",
+                }
+            } else {
+                "?"
+            };
+            let target = if record.NumberParameters >= 2 {
+                record.ExceptionInformation[1] as usize
+            } else {
+                0
+            };
+
+            let msg = format!(
+                "CRASH: ACCESS_VIOLATION at 0x{addr:016X}\n\
+                 Type: {rw}\n\
+                 Target address: 0x{target:016X}\n\
+                 \n\
+                 This is a hardware exception (not a Rust panic).\n\
+                 Check session.log for the eprintln! trace leading up to this crash.\n"
+            );
+            let _ = std::fs::write(dir.join("crash.log"), &msg);
+
+            // Also append to session.log so context is in one place.
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.join("session.log"))
+            {
+                let _ = writeln!(f, "\n=== CRASH ===\n{msg}");
+            }
+        }
+
+        EXCEPTION_CONTINUE_SEARCH
+    }
+
+    // SAFETY: handler follows the VEH calling convention and does not
+    // throw or unwind.  The 1 means "add to front of handler chain".
+    unsafe {
+        AddVectoredExceptionHandler(1, Some(handler));
+    }
+}
+
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Raise the Windows multimedia timer resolution to 1 ms so that

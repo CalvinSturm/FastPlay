@@ -66,4 +66,9 @@ impl SurfaceRegistry {
         let index = self.index_of(handle)?;
         self.entries.get_mut(index)?.take()
     }
+
+    /// Count how many surface slots currently hold a texture (diagnostic only).
+    pub fn count_alive(&self) -> usize {
+        self.entries.iter().filter(|e| e.is_some()).count()
+    }
 }
