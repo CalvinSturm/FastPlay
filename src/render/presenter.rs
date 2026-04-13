@@ -248,6 +248,12 @@ impl Presenter {
         self.help_overlay = None;
     }
 
+    pub fn flush_video_processor_input_cache(&mut self) {
+        if let Some(sc) = self.swap_chain.as_mut() {
+            sc.flush_video_processor_input_cache(&self.device);
+        }
+    }
+
     pub fn release_surface(&mut self, handle: VideoSurfaceHandle) {
         if self.current_surface == Some(handle) {
             self.current_surface = None;
@@ -279,5 +285,9 @@ impl Presenter {
         self.timeline_model = None;
         self.volume_overlay = None;
         self.volume_text = None;
+    }
+
+    pub fn surfaces_alive(&self) -> usize {
+        self.surfaces.count_alive()
     }
 }

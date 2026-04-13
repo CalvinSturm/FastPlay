@@ -1,4 +1,4 @@
-use std::{error::Error, ffi::c_void, fmt, mem::{size_of, ManuallyDrop}, ptr::null_mut};
+use std::{error::Error, ffi::c_void, fmt, mem::{size_of, ManuallyDrop}, ptr::null_mut, sync::{Arc, Mutex}};
 
 use windows::{
     core::{Interface, PCSTR},
@@ -64,6 +64,15 @@ pub struct D3D11Device {
     context: ID3D11DeviceContext,
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
+    /// Serializes all immediate-context operations across threads.
+    ///
+    /// `ID3D11Multithread::SetMultithreadProtected` only covers
+    /// `ID3D11DeviceContext` methods.  `ID3D11VideoContext` methods
+    /// like `VideoProcessorBlt` are **not** covered by that CritSec,
+    /// so a worker's `CopySubresourceRegion` can race with the UI
+    /// thread's `VideoProcessorBlt`, causing an access violation
+    /// inside d3d11.dll after ~20 rapid seeks.
+    context_lock: Arc<Mutex<()>>,
 }
 
 pub struct RenderTargetView {
@@ -176,6 +185,7 @@ impl D3D11Device {
             context,
             video_device,
             video_context,
+            context_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -218,6 +228,15 @@ impl D3D11Device {
         }
     }
 
+    /// Returns `true` if the D3D11 device has been removed (GPU TDR or driver
+    /// reset).  Must be checked **before** issuing any rendering commands so
+    /// that stale COM objects in the video processor cache are never touched.
+    pub(crate) fn is_device_removed(&self) -> bool {
+        // SAFETY: GetDeviceRemovedReason is a pure query with no side effects.
+        let hr = unsafe { self.device.GetDeviceRemovedReason() };
+        hr.is_err()
+    }
+
     pub(crate) fn raw_device(&self) -> &ID3D11Device {
         &self.device
     }
@@ -238,6 +257,13 @@ impl D3D11Device {
         width: u32,
         height: u32,
     ) -> Result<VideoSurface, Box<dyn Error>> {
+        // Guard: if the device was removed (GPU TDR) bail out before touching
+        // any D3D11 objects.  Without this the worker thread crashes inside
+        // d3d11.dll when calling CopySubresourceRegion on a dead device.
+        if self.is_device_removed() {
+            return Err(Box::new(D3D11Error("D3D11 device removed (TDR) during surface copy")));
+        }
+
         let source = ID3D11Texture2D::from_raw_borrowed(&texture)
             .ok_or(D3D11Error("decoded frame exposed a null D3D11 texture"))?;
 
@@ -269,16 +295,19 @@ impl D3D11Device {
         // SAFETY: both textures belong to the same D3D11 device. The source
         // subresource index selects one slice from the decoder's texture
         // array; the destination is a standalone single-slice texture.
-        self.context.CopySubresourceRegion(
-            &owned_texture,
-            0,
-            0,
-            0,
-            0,
-            source,
-            subresource_index,
-            None,
-        );
+        {
+            let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
+            self.context.CopySubresourceRegion(
+                &owned_texture,
+                0,
+                0,
+                0,
+                0,
+                source,
+                subresource_index,
+                None,
+            );
+        }
 
         Ok(VideoSurface {
             texture: owned_texture,
@@ -452,59 +481,87 @@ impl D3D11Device {
                 ppFutureSurfacesRight: std::ptr::null_mut(),
             };
 
-            self.video_context.VideoProcessorSetStreamOutputRate(
-                &cache.processor,
-                0,
-                D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
-                BOOL(0),
-                None,
-            );
-            self.video_context.VideoProcessorSetStreamRotation(
-                &cache.processor,
-                0,
-                BOOL(1),
-                match rotation_quarter_turns {
-                    1 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
-                    2 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
-                    3 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
-                    _ => D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
-                },
-            );
-            self.video_context.VideoProcessorSetStreamSourceRect(
-                &cache.processor,
-                0,
-                BOOL(1),
-                Some(&source_rect),
-            );
-            self.video_context.VideoProcessorSetStreamDestRect(
-                &cache.processor,
-                0,
-                BOOL(1),
-                Some(&dest_rect),
-            );
-            self.video_context.VideoProcessorSetOutputTargetRect(
-                &cache.processor,
-                BOOL(1),
-                Some(&RECT {
-                    left: 0,
-                    top: 0,
-                    right: output_width as i32,
-                    bottom: output_height as i32,
-                }),
-            );
-            // VideoProcessorBlt borrows the stream array. The pInputSurface
-            // field is ManuallyDrop so its COM reference is never released
-            // on drop — we explicitly drop it afterwards so the kernel-mode
-            // input view is freed every frame. Drop before propagating any
-            // error so the COM reference is always released.
+            // The context_lock serialises all ID3D11VideoContext calls
+            // with CopySubresourceRegion on worker threads.
+            // ID3D11VideoContext methods (Set*, Blt) are NOT covered by
+            // SetMultithreadProtected; without the lock the two threads
+            // race on the same underlying immediate context, crashing
+            // in d3d11.dll.
             let mut streams = [stream];
-            let blt_result = self.video_context
-                .VideoProcessorBlt(&cache.processor, &cache.output_view, 0, &streams);
+            let blt_result = {
+                let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
+                self.video_context.VideoProcessorSetStreamOutputRate(
+                    &cache.processor,
+                    0,
+                    D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
+                    BOOL(0),
+                    None,
+                );
+                self.video_context.VideoProcessorSetStreamRotation(
+                    &cache.processor,
+                    0,
+                    BOOL(1),
+                    match rotation_quarter_turns {
+                        1 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
+                        2 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
+                        3 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
+                        _ => D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+                    },
+                );
+                self.video_context.VideoProcessorSetStreamSourceRect(
+                    &cache.processor,
+                    0,
+                    BOOL(1),
+                    Some(&source_rect),
+                );
+                self.video_context.VideoProcessorSetStreamDestRect(
+                    &cache.processor,
+                    0,
+                    BOOL(1),
+                    Some(&dest_rect),
+                );
+                self.video_context.VideoProcessorSetOutputTargetRect(
+                    &cache.processor,
+                    BOOL(1),
+                    Some(&RECT {
+                        left: 0,
+                        top: 0,
+                        right: output_width as i32,
+                        bottom: output_height as i32,
+                    }),
+                );
+                // VideoProcessorBlt borrows the stream array. The pInputSurface
+                // field is ManuallyDrop so its COM reference is never released
+                // on drop — we explicitly drop it afterwards so the kernel-mode
+                // input view is freed every frame.
+                self.video_context
+                    .VideoProcessorBlt(&cache.processor, &cache.output_view, 0, &streams)
+            };
             ManuallyDrop::drop(&mut streams[0].pInputSurface);
             blt_result?;
         }
 
         Ok(())
+    }
+
+    /// Clears only the input-view sub-cache inside the video processor
+    /// cache.  Call this after releasing video surfaces (e.g. after a seek
+    /// clears the video queue) so that stale raw-pointer identities are
+    /// not matched against newly allocated textures at the same address.
+    ///
+    /// The heavy objects (enumerator, processor, output view) are kept so
+    /// the next frame does not pay the kernel-mode allocation cost.
+    pub(crate) fn flush_video_processor_input_cache(
+        &self,
+        vp_cache: &mut Option<VideoProcessorCache>,
+    ) {
+        if let Some(cache) = vp_cache.as_mut() {
+            let flushed = cache.input_view_cache.len();
+            cache.input_view_cache.clear();
+            if flushed > 0 {
+                eprintln!("[vp_cache] flushed {} stale input views after surface release", flushed);
+            }
+        }
     }
 
     pub(crate) fn create_subtitle_renderer(&self) -> Result<SubtitleRenderer, Box<dyn Error>> {
@@ -1109,6 +1166,12 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
             return Err(Box::new(D3D11Error("software upload requires non-zero dimensions")));
+        }
+        // Guard: bail out if the device was removed (GPU TDR) before issuing
+        // any GPU commands.  The worker thread calls this from background
+        // threads and would otherwise crash inside d3d11.dll.
+        if self.is_device_removed() {
+            return Err(Box::new(D3D11Error("D3D11 device removed (TDR) during software upload")));
         }
 
         let desc = D3D11_TEXTURE2D_DESC {

@@ -2,8 +2,8 @@ use std::{
     cell::Cell,
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender, TryRecvError},
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc,
     },
     thread::{self, ThreadId},
@@ -89,6 +89,7 @@ pub struct PlaybackSession {
     current_source: Option<Arc<MediaSource>>,
     decode_preference: VideoDecodePreference,
     worker_nonce: Arc<AtomicU64>,
+    active_worker_count: Arc<AtomicU32>,
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
     metrics: MetricsCollector,
@@ -128,11 +129,13 @@ pub struct PlaybackSession {
     in_point: Option<Duration>,
     out_point: Option<Duration>,
     loop_range: bool,
+    saved_volume: f32,
 }
 
 impl PlaybackSession {
     pub fn new(window: NativeWindow) -> Result<Self, Box<dyn std::error::Error>> {
         let presenter = Presenter::new(&window)?;
+        let saved_volume = super::settings::load_volume();
         let queue_defaults = QueueDefaults::default();
         let event_capacity =
             queue_defaults.decoded_video_frames + queue_defaults.decoded_audio_frames + 4;
@@ -152,6 +155,7 @@ impl PlaybackSession {
             current_source: None,
             decode_preference: VideoDecodePreference::Auto,
             worker_nonce: Arc::new(AtomicU64::new(0)),
+            active_worker_count: Arc::new(AtomicU32::new(0)),
             event_tx,
             event_rx,
             metrics: MetricsCollector::new(),
@@ -191,6 +195,7 @@ impl PlaybackSession {
             in_point: None,
             out_point: None,
             loop_range: false,
+            saved_volume,
         })
     }
 
@@ -450,6 +455,8 @@ impl PlaybackSession {
             return;
         };
         sink.adjust_volume_steps(steps);
+        self.saved_volume = sink.volume();
+        super::settings::save_volume(self.saved_volume);
         let volume_percent = sink.volume_percent();
         if let Ok((viewport_width, viewport_height)) = self.presenter.viewport_size() {
             if self
@@ -521,11 +528,13 @@ impl PlaybackSession {
             }
 
             // Execute any deferred seek once the throttle interval has
-            // elapsed and old worker events have been drained above.
+            // elapsed, old worker events have been drained above, and the
+            // number of live worker threads is below the concurrency cap.
             if self.deferred_seek.is_some()
                 && !self.last_worker_spawned_at.is_some_and(|t| {
                     now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL
                 })
+                && self.active_worker_count.load(Ordering::Acquire) < 2
             {
                 if let Some(target) = self.deferred_seek.take() {
                     if let Some(source) = self.current_source.clone() {
@@ -679,6 +688,13 @@ impl PlaybackSession {
             }
             SessionEvent::VideoFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen(), frame.seek_gen(), frame.op_id()) {
+                    eprintln!(
+                        "[stale_video] frame_seek={} current_seek={} frame_op={:?} current_op={:?}",
+                        frame.seek_gen().0,
+                        self.generations.seek().0,
+                        frame.op_id(),
+                        self.active_operation_id
+                    );
                     return Ok(());
                 }
 
@@ -762,6 +778,7 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
+                eprintln!("[video_stream_ended] seek={} op={:?}", seek_gen.0, op_id);
                 self.video_stream_ended = true;
                 if matches!(self.state, PlaybackState::Playing | PlaybackState::Priming) {
                     self.state = PlaybackState::Draining;
@@ -797,7 +814,11 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
+                let error_msg = error.clone();
                 self.fail_playback(error);
+                eprintln!(
+                    "playback failed: {error_msg}"
+                );
             }
             SessionEvent::DeviceLost {
                 open_gen,
@@ -807,7 +828,8 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
-                self.recover_device(now, "device lost event".to_string())?;
+                eprintln!("[DEVICE_LOST] seek={} op={:?} workers={}", seek_gen.0, op_id, self.active_worker_count.load(Ordering::Acquire));
+                self.recover_device(now, "worker reported device-lost".to_string())?;
             }
             SessionEvent::AudioEndpointChanged {
                 open_gen,
@@ -835,6 +857,12 @@ impl PlaybackSession {
         if self.current_source.is_none() {
             return Ok(());
         }
+        // Don't seek during states where it makes no sense or would break
+        // the open/recovery sequence.
+        if matches!(self.state, PlaybackState::Idle | PlaybackState::Opening | PlaybackState::Error) {
+            eprintln!("[seek] rejected: state={:?}", self.state);
+            return Ok(());
+        }
 
         let clamped_position = match self.media_duration {
             Some(dur) if target.position() > dur => dur,
@@ -842,10 +870,21 @@ impl PlaybackSession {
         };
         let target = SeekTarget::new(clamped_position);
 
-        // If a worker was spawned very recently, defer this seek so we don't
-        // pile up concurrent hardware decoder sessions on the GPU.  The
-        // deferred target is picked up and executed in tick_inner().
-        if self.last_worker_spawned_at.is_some_and(|t| now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL) {
+        // Defer if a worker was spawned very recently or if too many worker
+        // threads are still alive.  Each worker holds a hardware decoder on
+        // the GPU; allowing more than 2 concurrent workers risks exhausting
+        // the GPU's session limit (typically 8-16), especially when multiple
+        // FastPlay instances are running.
+        let workers_alive = self.active_worker_count.load(Ordering::Acquire);
+        let throttled = self.last_worker_spawned_at.is_some_and(|t| now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL);
+        let should_defer = throttled || workers_alive >= 2;
+        if should_defer {
+            eprintln!(
+                "[seek] DEFERRED pos={:.3}s workers={} throttled={}",
+                clamped_position.as_secs_f64(),
+                workers_alive,
+                throttled
+            );
             self.deferred_seek = Some(target);
             // Update the visible seek state so the timeline preview stays
             // responsive even while the worker spawn is deferred.
@@ -869,6 +908,20 @@ impl PlaybackSession {
         self.metrics.note_seek_requested(now);
         self.metrics.disable_open_audio_metric();
         let absolute_target = self.absolute_media_position(target.position());
+        let workers_before = self.active_worker_count.load(Ordering::Acquire);
+        eprintln!(
+            "[execute_seek] pos={:.3}s abs={:.3}s open={} seek={} op={:?} workers={} surfaces={} vq={} aq={} device_removed={}",
+            target.position().as_secs_f64(),
+            absolute_target.as_secs_f64(),
+            open_gen.0,
+            seek_gen.0,
+            op_id,
+            workers_before,
+            self.surfaces_alive(),
+            self.queued_video_frames.len(),
+            self.queued_audio_frames.len(),
+            self.presenter.device().is_device_removed()
+        );
         // Keep the last presented surface alive during seeks so the user sees
         // the previous frame until the new one arrives, avoiding a grey flash.
         self.prepare_runtime_for_operation_inner(false, false, false)?;
@@ -921,14 +974,15 @@ impl PlaybackSession {
         reset_surfaces: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.cancel_active_worker();
+        eprintln!("[prepare_runtime] cancelled worker, nonce now={}", self.worker_nonce.load(Ordering::Acquire));
         self.clear_video_queue();
         self.queued_audio_frames.clear();
         if reset_surfaces {
             self.presenter.reset_surfaces();
+            self.presenter.set_timeline_overlay(None)?;
+            self.presenter.set_volume_overlay(None, 0, 0)?;
         }
         self.presenter.clear_subtitle_overlay();
-        self.presenter.set_timeline_overlay(None)?;
-        self.presenter.set_volume_overlay(None, 0, 0)?;
         self.video_clock = None;
         if reset_audio_expectation {
             self.media_time_origin_pts = None;
@@ -952,7 +1006,8 @@ impl PlaybackSession {
 
         if rebuild_audio_sink {
             self.audio_sink = match AudioSink::create_shared_default() {
-                Ok(sink) => {
+                Ok(mut sink) => {
+                    sink.set_volume(self.saved_volume);
                     self.audio_sink_error = None;
                     Some(sink)
                 }
@@ -995,8 +1050,65 @@ impl PlaybackSession {
         let decode_preference = self.decode_preference;
         let worker_nonce = self.worker_nonce.clone();
         let expected_nonce = self.reserve_worker_nonce();
+        let worker_count = self.active_worker_count.clone();
+        worker_count.fetch_add(1, Ordering::Release);
+
+        eprintln!(
+            "[spawn_worker] nonce={} workers_now={}",
+            expected_nonce,
+            worker_count.load(Ordering::Acquire)
+        );
 
         thread::spawn(move || {
+            // Ensure the counter is decremented when this thread exits,
+            // regardless of the exit path (success, cancel, or error).
+            struct WorkerGuard(Arc<AtomicU32>, u64);
+            impl Drop for WorkerGuard {
+                fn drop(&mut self) {
+                    let remaining = self.0.fetch_sub(1, Ordering::Release).saturating_sub(1);
+                    eprintln!("[worker_exit] nonce={} workers_remaining={}", self.1, remaining);
+                }
+            }
+            let _guard = WorkerGuard(worker_count, expected_nonce);
+
+            // Non-blocking send with cancellation check.  When the bounded
+            // channel is full the worker yields and re-checks the nonce.
+            // This prevents stale workers from blocking indefinitely on a
+            // full channel, holding GPU decoder sessions open and causing
+            // TDR crashes during rapid seeking.
+            let worker_send = {
+                let full_count = std::sync::atomic::AtomicU32::new(0);
+                move |event: SessionEvent,
+                      nonce: &AtomicU64,
+                      expected: u64,
+                      tx: &SyncSender<SessionEvent>| -> Result<(), String> {
+                    let mut event = event;
+                    loop {
+                        match tx.try_send(event) {
+                            Ok(()) => {
+                                let prev = full_count.swap(0, Ordering::Relaxed);
+                                if prev > 0 {
+                                    eprintln!("[worker_send] nonce={} unblocked after {} full retries", expected, prev);
+                                }
+                                return Ok(());
+                            }
+                            Err(TrySendError::Full(returned)) => {
+                                if nonce.load(Ordering::Acquire) != expected {
+                                    eprintln!("[worker_send] nonce={} CANCELLED while channel full", expected);
+                                    return Err(WORKER_CANCELLED.to_string());
+                                }
+                                full_count.fetch_add(1, Ordering::Relaxed);
+                                thread::yield_now();
+                                event = returned;
+                            }
+                            Err(TrySendError::Disconnected(_)) => {
+                                return Err(WORKER_CANCELLED.to_string());
+                            }
+                        }
+                    }
+                }
+            };
+
             let decode_result = ffmpeg::stream_media(
                 &*source,
                 &device,
@@ -1010,46 +1122,58 @@ impl PlaybackSession {
                     if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
-                    sender
-                        .send(SessionEvent::DecodeModeSelected {
+                    worker_send(
+                        SessionEvent::DecodeModeSelected {
                             open_gen,
                             seek_gen,
                             op_id,
                             mode,
                             hw_fallback_count,
                             rotation_quarter_turns,
-                        })
-                        .map_err(|_| WORKER_CANCELLED.to_string())
+                        },
+                        &worker_nonce,
+                        expected_nonce,
+                        &sender,
+                    )
                 },
                 |duration| {
                     if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
-                    sender
-                        .send(SessionEvent::MediaDurationKnown {
+                    worker_send(
+                        SessionEvent::MediaDurationKnown {
                             open_gen,
                             seek_gen,
                             op_id,
                             duration,
-                        })
-                        .map_err(|_| WORKER_CANCELLED.to_string())
+                        },
+                        &worker_nonce,
+                        expected_nonce,
+                        &sender,
+                    )
                 },
                 || worker_nonce.load(Ordering::Acquire) != expected_nonce,
                 |frame| {
                     if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
-                    sender
-                        .send(SessionEvent::VideoFrameReady(frame))
-                        .map_err(|_| WORKER_CANCELLED.to_string())
+                    worker_send(
+                        SessionEvent::VideoFrameReady(frame),
+                        &worker_nonce,
+                        expected_nonce,
+                        &sender,
+                    )
                 },
                 |frame| {
                     if worker_nonce.load(Ordering::Acquire) != expected_nonce {
                         return Err(WORKER_CANCELLED.to_string());
                     }
-                    sender
-                        .send(SessionEvent::AudioFrameReady(frame))
-                        .map_err(|_| WORKER_CANCELLED.to_string())
+                    worker_send(
+                        SessionEvent::AudioFrameReady(frame),
+                        &worker_nonce,
+                        expected_nonce,
+                        &sender,
+                    )
                 },
             );
 
@@ -1071,7 +1195,18 @@ impl PlaybackSession {
                 Ok(StreamStatus::Cancelled) => {}
                 Err(error) if error == WORKER_CANCELLED => {}
                 Err(error) => {
-                    let _ = sender.send(if start_position.is_some() {
+                    // Device-removed errors from the worker thread should
+                    // trigger the normal device recovery path rather than
+                    // entering the terminal Error state.
+                    let event = if error.contains("device removed")
+                        || device.is_device_removed()
+                    {
+                        SessionEvent::DeviceLost {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                        }
+                    } else if start_position.is_some() {
                         SessionEvent::PlaybackFailed {
                             open_gen,
                             seek_gen,
@@ -1084,7 +1219,8 @@ impl PlaybackSession {
                             op_id,
                             error,
                         }
-                    });
+                    };
+                    let _ = sender.send(event);
                 }
             }
         });
@@ -1398,6 +1534,14 @@ impl PlaybackSession {
         while let Some(frame) = self.queued_video_frames.pop_front() {
             self.presenter.release_surface(frame.surface());
         }
+        // After releasing surfaces their D3D11 texture memory may be
+        // returned to the allocator and reused for new textures at the
+        // same address.  The VideoProcessorCache keeps a raw-pointer
+        // identity cache of input views keyed by texture address — if
+        // we don't flush it here, a new texture at the same old address
+        // matches a stale cached view, and VideoProcessorBlt reads
+        // through a dangling COM pointer → ACCESS_VIOLATION at 0x...00D8.
+        self.presenter.flush_video_processor_input_cache();
     }
 
     fn push_video_frame(&mut self, frame: DecodedVideoFrame) {
@@ -1879,6 +2023,13 @@ impl PlaybackSession {
             self.present_needed = true;
         }
         Ok(())
+    }
+
+    fn surfaces_alive(&self) -> usize {
+        // Count how many surface slots currently hold a texture.
+        // This is a diagnostic-only method; the cost is acceptable
+        // since it's only called from the tracing path.
+        self.presenter.surfaces_alive()
     }
 
     fn is_current_frame(

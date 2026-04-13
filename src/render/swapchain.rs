@@ -37,6 +37,10 @@ impl SwapChainPresenter {
             .render(device, clear_color, subtitle_overlay, timeline_overlay, volume_overlay, help_overlay)
     }
 
+    pub fn flush_video_processor_input_cache(&mut self, device: &D3D11Device) {
+        self.swap_chain.flush_video_processor_input_cache(device);
+    }
+
     pub fn resize(
         &mut self,
         device: &D3D11Device,
