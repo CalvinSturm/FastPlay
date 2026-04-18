@@ -649,11 +649,16 @@ impl PlaybackSession {
                 if mode == VideoDecodeMode::Software {
                     self.decode_preference = VideoDecodePreference::ForceSoftware;
                 }
-                // Apply stream rotation on the initial decode mode event.
-                // On mid-stream HW→SW fallback the rotation is the same stream
-                // so this is idempotent.
-                self.stream_rotation_quarter_turns = rotation_quarter_turns;
-                self.view_rotation_quarter_turns = rotation_quarter_turns;
+                // Apply stream rotation to the view only when the stream
+                // rotation actually changes (initial open, or a new media
+                // file). Mid-stream re-inits — HW→SW fallback, scrub seeks —
+                // fire this event again with the same stream rotation; in
+                // that case the user may have rotated the view manually, and
+                // we must not clobber their choice.
+                if self.stream_rotation_quarter_turns != rotation_quarter_turns {
+                    self.stream_rotation_quarter_turns = rotation_quarter_turns;
+                    self.view_rotation_quarter_turns = rotation_quarter_turns;
+                }
                 if self.overlay.show_decode_info {
                     self.update_window_title();
                 }
