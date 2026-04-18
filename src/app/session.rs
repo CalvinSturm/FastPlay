@@ -11,7 +11,13 @@ use std::{
 };
 
 use crate::{
-    app::{commands::SessionCommand, events::SessionEvent, overlay::OverlayManager, state::PlaybackState},
+    app::{
+        commands::SessionCommand,
+        drop_stats::{VideoDropBuckets, VideoDropCause},
+        events::SessionEvent,
+        overlay::OverlayManager,
+        state::PlaybackState,
+    },
     audio::sink::AudioSink,
     ffi::{
         dxgi::ResizeRequest,
@@ -39,36 +45,6 @@ use crate::{
 const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
 const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
-
-#[derive(Clone, Copy, Debug)]
-enum VideoDropCause {
-    QueueOverflow,
-    SurfaceMismatch,
-    SchedulerLate,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct VideoDropBuckets {
-    queue_overflow: u64,
-    surface_mismatch: u64,
-    scheduler_late: u64,
-}
-
-impl VideoDropBuckets {
-    fn note(&mut self, cause: VideoDropCause) {
-        match cause {
-            VideoDropCause::QueueOverflow => {
-                self.queue_overflow = self.queue_overflow.saturating_add(1);
-            }
-            VideoDropCause::SurfaceMismatch => {
-                self.surface_mismatch = self.surface_mismatch.saturating_add(1);
-            }
-            VideoDropCause::SchedulerLate => {
-                self.scheduler_late = self.scheduler_late.saturating_add(1);
-            }
-        }
-    }
-}
 
 struct QueuedAudioFrame {
     frame: DecodedAudioFrame,
@@ -948,10 +924,12 @@ impl PlaybackSession {
             self.queued_audio_frames.len(),
             self.presenter.device().is_device_removed()
         );
-        // Hardware seek churn is still more important than preserving the old
-        // frame during scrubs. Drop the selected surface at seek start so no
-        // prior generation's presentable texture survives into the next seek.
-        self.prepare_runtime_for_operation_inner(false, false, true)?;
+        // Keep the previously selected surface visible until the new frame
+        // arrives — `validate_and_select_surface` will swap it atomically
+        // when the first frame of the new seek generation is presented.
+        // The hardware-churn motivation for dropping it has moved to the
+        // software-decode fallback above.
+        self.prepare_runtime_for_operation_inner(false, false, false)?;
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
