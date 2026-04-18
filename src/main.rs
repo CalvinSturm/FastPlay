@@ -1,4 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Baseline allow-list for CI: these categories are pervasive in the Win32/FFI
+// shims (self-transmutes through typed HANDLEs, Win32 naming conventions,
+// high-arity GPU render calls) or represent stylistic debt we haven't paid
+// down yet. New violations in other categories still fail `-D warnings`.
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::useless_transmute)]
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_c_str_literals)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::explicit_auto_deref)]
+#![allow(clippy::manual_dangling_ptr)]
+#![allow(clippy::cmp_null)]
 
 mod app;
 mod audio;

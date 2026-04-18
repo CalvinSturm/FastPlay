@@ -1,0 +1,68 @@
+name: CI
+# rustfmt is intentionally not enforced yet: the existing codebase is not
+# rustfmt-clean and reformatting it is a separate task.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache FFmpeg prebuilt
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg
+          key: ffmpeg-btbn-gpl-shared-20250401
+
+      - name: Download FFmpeg (BtbN shared build)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath .
+          # The zip contains a single top-level folder like ffmpeg-master-latest-win64-gpl-shared.
+          # Normalize it to a stable `ffmpeg/` directory so the env var below is deterministic.
+          $extracted = Get-ChildItem -Directory -Filter "ffmpeg-master-*" | Select-Object -First 1
+          Rename-Item -Path $extracted.FullName -NewName "ffmpeg"
+
+      - name: Export FFMPEG_DIR
+        shell: pwsh
+        run: |
+          $ffmpegDir = Join-Path $PWD "ffmpeg"
+          "FFMPEG_DIR=$ffmpegDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --all-targets
