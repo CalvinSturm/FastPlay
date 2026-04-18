@@ -126,12 +126,7 @@ impl TimelineUiState {
             && (hovered || self.scrubbing || replay_indicator_active || seek_overlay_active);
         let snapshot = session.snapshot(now);
         let display_position = self.scrub_origin.unwrap_or(snapshot.position).min(duration);
-        let overlay = if self.scrubbing {
-            // Rapid scrub overlay rebuilds are unstable on some hardware/D3D11
-            // stacks. Keep scrubbing responsive, but suspend the overlay for
-            // the duration of the drag and restore it once scrubbing ends.
-            None
-        } else if visible {
+        let overlay = if visible {
             timeline::build_overlay_model(
                 viewport_width,
                 viewport_height,
