@@ -124,6 +124,11 @@ pub struct NativeWindowInner {
     _drop_target: IDropTarget,
 }
 
+pub trait ModalTickTarget {
+    fn modal_tick(&mut self);
+    fn modal_tick_window(&self) -> &NativeWindowInner;
+}
+
 impl NativeWindowInner {
     pub fn create(title: &str, width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
         let instance = module_handle()?;
@@ -255,7 +260,7 @@ impl NativeWindowInner {
     /// `ctx` must remain valid for as long as the callback is installed.
     /// The callback will be invoked on the UI thread during the Win32
     /// modal move/resize loop via `WM_TIMER`.
-    pub unsafe fn install_modal_tick(&self, ctx: *mut c_void, tick_fn: unsafe fn(*mut c_void)) {
+    fn install_modal_tick(&self, ctx: *mut c_void, tick_fn: unsafe fn(*mut c_void)) {
         self.state.modal_tick_fn.set(Some(tick_fn));
         self.state.modal_tick_ctx.set(ctx);
     }
@@ -545,6 +550,18 @@ impl NativeWindowInner {
     pub(crate) fn hwnd(&self) -> HWND {
         self.hwnd
     }
+}
+
+pub fn install_modal_tick<T: ModalTickTarget>(target: &mut T) {
+    let ctx = target as *mut T as *mut c_void;
+    target
+        .modal_tick_window()
+        .install_modal_tick(ctx, modal_tick_trampoline::<T>);
+}
+
+unsafe fn modal_tick_trampoline<T: ModalTickTarget>(ctx: *mut c_void) {
+    let target = &mut *(ctx as *mut T);
+    target.modal_tick();
 }
 
 impl Drop for NativeWindowInner {
@@ -1098,11 +1115,11 @@ unsafe extern "system" fn window_proc(
                         state.input_events.borrow_mut().push(InputEvent::ResetView);
                     }
                     // H (no Ctrl) → show help overlay while held
-                    0x48 if !ctrl_held => {
+                    0x48 if !ctrl_held
                         // Only emit on first press (bit 30 of lparam = 0).
-                        if (lparam.0 as u32 >> 30) & 1 == 0 {
-                            state.input_events.borrow_mut().push(InputEvent::ShowHelp);
-                        }
+                        && (lparam.0 as u32 >> 30) & 1 == 0 =>
+                    {
+                        state.input_events.borrow_mut().push(InputEvent::ShowHelp);
                     }
                     0x53 => {
                         state

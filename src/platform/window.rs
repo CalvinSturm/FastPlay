@@ -1,5 +1,3 @@
-use std::ffi::c_void;
-
 use crate::{
     ffi::dxgi::{NativeWindowInner, ResizeRequest},
     platform::input::InputEvent,
@@ -35,17 +33,6 @@ impl NativeWindow {
 
     pub fn take_resize_request(&self) -> Option<ResizeRequest> {
         self.inner.take_resize_request()
-    }
-
-    /// # Safety
-    ///
-    /// `ctx` must remain valid for as long as the callback is installed.
-    pub unsafe fn install_modal_tick(
-        &self,
-        ctx: *mut c_void,
-        tick_fn: unsafe fn(*mut c_void),
-    ) {
-        self.inner.install_modal_tick(ctx, tick_fn);
     }
 
     pub fn clear_modal_tick(&self) {
