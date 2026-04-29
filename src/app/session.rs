@@ -20,7 +20,7 @@ use crate::{
     },
     audio::sink::AudioSink,
     ffi::{
-        dxgi::ResizeRequest,
+        dxgi::{ModalTickTarget, NativeWindowInner, ResizeRequest},
         ffmpeg::{self, StreamStatus},
     },
     media::{
@@ -106,6 +106,7 @@ pub struct PlaybackSession {
     out_point: Option<Duration>,
     loop_range: bool,
     saved_volume: f32,
+    idle_pace_requested: bool,
 }
 
 impl PlaybackSession {
@@ -172,6 +173,7 @@ impl PlaybackSession {
             out_point: None,
             loop_range: false,
             saved_volume,
+            idle_pace_requested: false,
         })
     }
 
@@ -479,7 +481,13 @@ impl PlaybackSession {
         result
     }
 
+    pub fn take_idle_pace_request(&mut self) -> bool {
+        std::mem::take(&mut self.idle_pace_requested)
+    }
+
     fn tick_inner(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
+        self.idle_pace_requested = false;
+
         if self.state == PlaybackState::Error {
             self.show_error_idle_overlay()?;
             // Still handle resize so the error overlay re-renders at new size.
@@ -567,7 +575,7 @@ impl PlaybackSession {
                 }
             }
         } else {
-            thread::sleep(Duration::from_millis(1));
+            self.idle_pace_requested = true;
         }
 
         if self.metrics.pending_first_frame && self.presenter.has_selected_surface() {
@@ -1291,11 +1299,7 @@ impl PlaybackSession {
                 return Ok(());
             };
 
-            loop {
-                let Some(front) = self.queued_audio_frames.front_mut() else {
-                    break;
-                };
-
+            while let Some(front) = self.queued_audio_frames.front_mut() {
                 let written = match sink.write_frame(&front.frame, front.submitted_frames) {
                     Ok(written) => written,
                     Err(error) => {
@@ -2051,5 +2055,15 @@ impl PlaybackSession {
         open_gen == self.generations.open()
             && seek_gen == self.generations.seek()
             && Some(op_id) == self.active_operation_id
+    }
+}
+
+impl ModalTickTarget for PlaybackSession {
+    fn modal_tick(&mut self) {
+        let _ = self.tick(Instant::now());
+    }
+
+    fn modal_tick_window(&self) -> &NativeWindowInner {
+        self.window.raw_window()
     }
 }

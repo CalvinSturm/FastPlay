@@ -20,7 +20,7 @@ cargo build --release
 3. Build the MSI:
 
 ```powershell
-cargo wix --release
+cargo wix
 ```
 
 4. Verify the output exists under `target\wix\`.
