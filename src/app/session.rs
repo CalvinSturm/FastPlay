@@ -219,10 +219,6 @@ impl PlaybackSession {
         self.loop_range
     }
 
-    pub fn decode_preference(&self) -> VideoDecodePreference {
-        self.decode_preference
-    }
-
     pub fn replay_indicator_until(&self) -> Option<Instant> {
         self.overlay.replay_indicator_until()
     }
@@ -527,8 +523,8 @@ impl PlaybackSession {
             // elapsed, old worker events have been drained above, and the
             // number of live worker threads is below the concurrency cap.
             if self.deferred_seek.is_some()
-                && !self.last_worker_spawned_at.is_some_and(|t| {
-                    now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL
+                && self.last_worker_spawned_at.is_none_or(|t| {
+                    now.duration_since(t) >= Self::SEEK_WORKER_MIN_INTERVAL
                 })
                 && self.active_worker_count.load(Ordering::Acquire) < 2
             {
@@ -1197,17 +1193,31 @@ impl PlaybackSession {
 
             match decode_result {
                 Ok(StreamStatus::Completed(summary)) => {
-                    let _ = sender.send(SessionEvent::VideoStreamEnded {
-                        open_gen,
-                        seek_gen,
-                        op_id,
-                    });
-                    if summary.had_audio_stream {
-                        let _ = sender.send(SessionEvent::AudioStreamEnded {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                        });
+                    if worker_nonce.load(Ordering::Acquire) == expected_nonce {
+                        let _ = worker_send(
+                            SessionEvent::VideoStreamEnded {
+                                open_gen,
+                                seek_gen,
+                                op_id,
+                            },
+                            &worker_nonce,
+                            expected_nonce,
+                            &sender,
+                        );
+                    }
+                    if summary.had_audio_stream
+                        && worker_nonce.load(Ordering::Acquire) == expected_nonce
+                    {
+                        let _ = worker_send(
+                            SessionEvent::AudioStreamEnded {
+                                open_gen,
+                                seek_gen,
+                                op_id,
+                            },
+                            &worker_nonce,
+                            expected_nonce,
+                            &sender,
+                        );
                     }
                 }
                 Ok(StreamStatus::Cancelled) => {}
@@ -1238,7 +1248,9 @@ impl PlaybackSession {
                             error,
                         }
                     };
-                    let _ = sender.send(event);
+                    if worker_nonce.load(Ordering::Acquire) == expected_nonce {
+                        let _ = worker_send(event, &worker_nonce, expected_nonce, &sender);
+                    }
                 }
             }
         });
