@@ -193,11 +193,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 InputEvent::FileDropped(path) => {
                     let source = MediaSource::new(path);
-                    let source = if session.decode_preference() == VideoDecodePreference::ForceSoftware {
-                        source.with_decode_preference(VideoDecodePreference::ForceSoftware)
-                    } else {
-                        source
-                    };
                     let title = window_title_for(&source);
                     session.open(source, now)?;
                     session.window().set_title(&title);
