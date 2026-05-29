@@ -16,6 +16,8 @@
 #![allow(clippy::manual_dangling_ptr)]
 #![allow(clippy::cmp_null)]
 
+#[macro_use]
+mod logging;
 mod app;
 mod audio;
 mod ffi;
@@ -38,20 +40,18 @@ use platform::input::InputEvent;
 use platform::window::NativeWindow;
 
 fn main() {
-    // ── Persistent stderr log ──────────────────────────────────────────
-    // Redirect stderr (fd 2) to a log file so that ALL eprintln! tracing
-    // is captured even when the process is killed by an access violation.
-    ffi::runtime::redirect_stderr_to_appdata_log();
-
     // ── Vectored Exception Handler ─────────────────────────────────────
     // Access violations from d3d11.dll kill the process instantly —
     // Rust's panic handler never fires.  A VEH runs BEFORE the default
-    // handler, giving us a chance to write crash context to disk.
+    // handler and flushes the in-memory log ring to disk, so the trace
+    // leading up to a hard crash is still captured.
     ffi::runtime::install_crash_handler();
 
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("panic: {info}");
-        eprintln!("{msg}");
+        flog!("{msg}");
+        // Flush the buffered trace so the panic context survives.
+        logging::dump_to_session_log();
         if let Some(appdata) = std::env::var_os("APPDATA") {
             let dir = std::path::PathBuf::from(appdata).join("FastPlay");
             let _ = std::fs::create_dir_all(&dir);
@@ -60,7 +60,8 @@ fn main() {
     }));
     if let Err(error) = run() {
         let msg = format!("fatal: {error}");
-        eprintln!("{msg}");
+        flog!("{msg}");
+        logging::dump_to_session_log();
         if let Some(appdata) = std::env::var_os("APPDATA") {
             let dir = std::path::PathBuf::from(appdata).join("FastPlay");
             let _ = std::fs::create_dir_all(&dir);
@@ -68,6 +69,9 @@ fn main() {
         }
         std::process::exit(1);
     }
+
+    // Normal exit: flush the buffered trace (metrics, mode changes, etc.).
+    logging::dump_to_session_log();
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {

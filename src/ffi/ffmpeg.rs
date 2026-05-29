@@ -174,7 +174,7 @@ where
         }
 
         if let Some(target) = start_position {
-            eprintln!("[worker] seeking to {:.3}s", target.as_secs_f64());
+            flog!("[worker] seeking to {:.3}s", target.as_secs_f64());
             seek_and_flush(input.0, &video, audio.as_ref(), target)?;
         }
 
@@ -225,7 +225,7 @@ where
                     av_packet_unref(packet.0);
                     match open_software_video_decoder(input.0) {
                         Ok(mut sw_decoder) => {
-                            eprintln!(
+                            flog!(
                                 "hw decode failed mid-stream ({}), falling back to software",
                                 send_result
                             );
@@ -404,7 +404,7 @@ unsafe fn open_video_decoder(
             Err(hw_error) => match open_software_video_decoder(format_context) {
                 Ok(mut decoder) => {
                     decoder.hw_fallback_count = 1;
-                    eprintln!("video decode fallback: {hw_error}");
+                    flog!("video decode fallback: {hw_error}");
                     Ok(decoder)
                 }
                 Err(sw_error) => Err(format!(
@@ -448,7 +448,7 @@ unsafe fn stream_rotation_quarter_turns(codec_parameters: *const AVCodecParamete
         let cw_degrees = b.atan2(a).to_degrees();
         // Round to nearest 90° and express as clockwise quarter-turns.
         let quarter = ((cw_degrees / 90.0).round() as i32).rem_euclid(4) as u8;
-        eprintln!("display_matrix rotation: {cw_degrees:.1}° CW → {quarter} quarter-turns");
+        flog!("display_matrix rotation: {cw_degrees:.1}° CW → {quarter} quarter-turns");
         return quarter;
     }
     0
@@ -960,17 +960,20 @@ struct AudioBatcher {
     frame_count: u32,
     data: Vec<u8>,
     target_frames: u32,
+    target_bytes: usize,
 }
 
 impl AudioBatcher {
     fn new(format: AudioStreamFormat) -> Self {
         let target_frames = (format.sample_rate / 10).max(1024);
+        let target_bytes = target_frames as usize * format.bytes_per_frame() as usize;
         Self {
             format,
             pts: None,
             frame_count: 0,
-            data: Vec::new(),
+            data: Vec::with_capacity(target_bytes),
             target_frames,
+            target_bytes,
         }
     }
 
@@ -1014,7 +1017,10 @@ impl AudioBatcher {
             return Ok(());
         };
         *produced_frames = (*produced_frames).saturating_add(1);
-        let data = std::mem::take(&mut self.data);
+        // Hand off the accumulated buffer and start the next batch pre-sized,
+        // so the next run of `extend_from_slice` calls doesn't re-grow from
+        // zero capacity on every batch.
+        let data = std::mem::replace(&mut self.data, Vec::with_capacity(self.target_bytes));
         let frame_count = std::mem::take(&mut self.frame_count);
         on_frame(PendingAudioFrame {
             open_gen,

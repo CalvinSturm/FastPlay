@@ -600,7 +600,7 @@ impl D3D11Device {
             let flushed = cache.input_view_cache.len();
             cache.input_view_cache.clear();
             if flushed > 0 {
-                eprintln!("[vp_cache] flushed {} stale input views after surface release", flushed);
+                flog!("[vp_cache] flushed {} stale input views after surface release", flushed);
             }
         }
     }
@@ -626,7 +626,7 @@ impl D3D11Device {
 
         let removed = before.saturating_sub(cache.input_view_cache.len());
         if removed > 0 {
-            eprintln!(
+            flog!(
                 "[vp_cache] invalidated {} input view(s) for released surface",
                 removed
             );

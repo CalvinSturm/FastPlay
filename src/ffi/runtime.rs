@@ -1,14 +1,7 @@
-use std::os::windows::io::AsRawHandle;
-
 use windows::Win32::{
     Media::{timeBeginPeriod, timeEndPeriod},
     System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS},
 };
-
-extern "C" {
-    fn _open_osfhandle(osfhandle: isize, flags: i32) -> i32;
-    fn _dup2(fd1: i32, fd2: i32) -> i32;
-}
 
 pub struct MultimediaTimerResolution {
     period_ms: u32,
@@ -30,24 +23,6 @@ impl Drop for MultimediaTimerResolution {
     }
 }
 
-pub fn redirect_stderr_to_appdata_log() {
-    let log_dir =
-        std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("FastPlay"));
-    if let Some(ref dir) = log_dir {
-        let _ = std::fs::create_dir_all(dir);
-        let log_path = dir.join("session.log");
-        if let Ok(file) = std::fs::File::create(&log_path) {
-            let raw = file.as_raw_handle() as isize;
-            let fd = unsafe { _open_osfhandle(raw, 0) };
-            if fd >= 0 {
-                unsafe { _dup2(fd, 2) };
-            }
-            // _dup2 duplicated this onto fd 2; the CRT owns it now.
-            std::mem::forget(file);
-        }
-    }
-}
-
 pub fn install_crash_handler() {
     unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
         const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
@@ -60,6 +35,11 @@ pub fn install_crash_handler() {
         if record.ExceptionCode.0 as u32 != EXCEPTION_ACCESS_VIOLATION {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+
+        // Flush the in-memory trace ring to session.log first (best effort,
+        // never blocks on the ring lock) so the lines leading up to the fault
+        // are on disk before we append the crash marker below.
+        crate::logging::dump_to_session_log_crash_safe();
 
         if let Some(appdata) = std::env::var_os("APPDATA") {
             let dir = std::path::PathBuf::from(appdata).join("FastPlay");
@@ -88,7 +68,7 @@ pub fn install_crash_handler() {
                  Target address: 0x{target:016X}\n\
                  \n\
                  This is a hardware exception (not a Rust panic).\n\
-                 Check session.log for the eprintln! trace leading up to this crash.\n"
+                 Check session.log for the buffered trace leading up to this crash.\n"
             );
             let _ = std::fs::write(dir.join("crash.log"), &msg);
 

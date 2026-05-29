@@ -70,11 +70,16 @@ impl AudioSink {
 
         let data = &frame.data[start..];
         self.volume_scratch.resize(data.len(), 0);
-        self.volume_scratch.copy_from_slice(data);
-        for sample in self.volume_scratch.chunks_exact_mut(4) {
+        // Scale input samples directly into the scratch buffer in a single
+        // pass — avoids the extra full-buffer memcpy of a copy-then-scale.
+        for (out, sample) in self
+            .volume_scratch
+            .chunks_exact_mut(4)
+            .zip(data.chunks_exact(4))
+        {
             let value = f32::from_ne_bytes([sample[0], sample[1], sample[2], sample[3]]);
             let scaled_value = (value * self.volume).clamp(-1.0, 1.0);
-            sample.copy_from_slice(&scaled_value.to_ne_bytes());
+            out.copy_from_slice(&scaled_value.to_ne_bytes());
         }
 
         self.inner
