@@ -911,7 +911,7 @@ fn load_fastplay_icon(width: i32, height: i32) -> HICON {
     match handle {
         Ok(handle) => HICON(handle.0),
         Err(error) => {
-            eprintln!("icon load error width={} height={} error={}", width, height, error);
+            flog!("icon load error width={} height={} error={}", width, height, error);
             HICON::default()
         }
     }

@@ -107,6 +107,11 @@ pub struct PlaybackSession {
     loop_range: bool,
     saved_volume: f32,
     idle_pace_requested: bool,
+    /// Audio sink buffered-frame count cached for the duration of one `tick`.
+    /// `GetCurrentPadding` is a driver/COM call and the master clock is
+    /// recomputed several times per tick; the value is stable across those
+    /// reads because no audio is submitted between them.
+    cached_buffered_frames: Cell<Option<u32>>,
 }
 
 impl PlaybackSession {
@@ -174,6 +179,7 @@ impl PlaybackSession {
             loop_range: false,
             saved_volume,
             idle_pace_requested: false,
+            cached_buffered_frames: Cell::new(None),
         })
     }
 
@@ -258,7 +264,7 @@ impl PlaybackSession {
         self.overlay.subtitle_track = match SubtitleTrack::load_sidecar(&source) {
             Ok(track) => track,
             Err(error) => {
-                eprintln!("subtitle load failed: {error}");
+                flog!("subtitle load failed: {error}");
                 None
             }
         };
@@ -277,7 +283,7 @@ impl PlaybackSession {
         self.view_rotation_quarter_turns = 0;
         self.stream_rotation_quarter_turns = 0;
         if let Some(track) = self.overlay.subtitle_track.as_ref() {
-            eprintln!(
+            flog!(
                 "subtitle_track_loaded path={} cues={}",
                 track.path().display(),
                 track.len()
@@ -312,7 +318,7 @@ impl PlaybackSession {
             // stress-scrub while the hardware path is active. Switch the rest
             // of the session to software decode before spawning the scrub seek.
             self.decode_preference = VideoDecodePreference::ForceSoftware;
-            eprintln!("[scrub_seek] forcing software decode for session");
+            flog!("[scrub_seek] forcing software decode for session");
             if self.overlay.show_decode_info {
                 self.update_window_title();
             }
@@ -338,7 +344,7 @@ impl PlaybackSession {
                 self.metrics.note_fullscreen_toggle_started(now);
                 self.window.toggle_borderless_fullscreen();
                 if let Some(elapsed) = self.metrics.note_fullscreen_toggle_completed(Instant::now()) {
-                    eprintln!("fullscreen_toggle_ms={}", elapsed.as_millis());
+                    flog!("fullscreen_toggle_ms={}", elapsed.as_millis());
                 }
             }
             SessionCommand::ZoomAtCursor {
@@ -458,7 +464,7 @@ impl PlaybackSession {
             }
         }
         self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
-        eprintln!("volume={volume_percent}");
+        flog!("volume={volume_percent}");
     }
 
     pub fn tick(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
@@ -483,6 +489,9 @@ impl PlaybackSession {
 
     fn tick_inner(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         self.idle_pace_requested = false;
+        // Invalidate the per-tick audio-buffer cache; it is repopulated by the
+        // first WASAPI query within this tick and reused thereafter.
+        self.cached_buffered_frames.set(None);
 
         if self.state == PlaybackState::Error {
             self.show_error_idle_overlay()?;
@@ -576,14 +585,14 @@ impl PlaybackSession {
 
         if self.metrics.pending_first_frame && self.presenter.has_selected_surface() {
             if let Some(elapsed) = self.metrics.note_first_frame_presented(now) {
-                eprintln!("open_to_first_frame_ms={}", elapsed.as_millis());
+                flog!("open_to_first_frame_ms={}", elapsed.as_millis());
             }
             self.metrics.pending_first_frame = false;
         }
 
         if self.metrics.pending_first_audio {
             if let Some(elapsed) = self.metrics.note_first_audio_started(now) {
-                eprintln!("open_to_first_audio_ms={}", elapsed.as_millis());
+                flog!("open_to_first_audio_ms={}", elapsed.as_millis());
             }
             self.metrics.pending_first_audio = false;
             self.metrics.disable_open_audio_metric();
@@ -591,14 +600,14 @@ impl PlaybackSession {
 
         if self.metrics.pending_seek_first_frame && self.presenter.has_selected_surface() {
             if let Some(elapsed) = self.metrics.note_seek_first_frame_presented(now) {
-                eprintln!("seek_to_first_frame_ms={}", elapsed.as_millis());
+                flog!("seek_to_first_frame_ms={}", elapsed.as_millis());
             }
             self.metrics.pending_seek_first_frame = false;
         }
 
         if self.metrics.pending_seek_settled && self.seek_is_settled() {
             if let Some(elapsed) = self.metrics.note_seek_av_settled(now) {
-                eprintln!("seek_to_av_settled_ms={}", elapsed.as_millis());
+                flog!("seek_to_av_settled_ms={}", elapsed.as_millis());
             }
             self.metrics.pending_seek_settled = false;
             self.pending_seek_target = None;
@@ -606,7 +615,7 @@ impl PlaybackSession {
 
         if self.can_finish_playback()? {
             self.metrics.note_ended(now);
-            eprintln!(
+            flog!(
                 "playback_summary decode_mode={} hw_fallback_count={} presented_frames={} dropped_video_frames={} audio_underruns={} drop_queue_overflow={} drop_surface_mismatch={} drop_scheduler_late={}",
                 self.metrics
                     .decode_mode()
@@ -666,7 +675,7 @@ impl PlaybackSession {
                 if self.overlay.show_decode_info {
                     self.update_window_title();
                 }
-                eprintln!(
+                flog!(
                     "decode_mode={} hw_fallback_count={}",
                     mode.label(),
                     self.metrics.hw_fallback_count()
@@ -685,7 +694,7 @@ impl PlaybackSession {
             }
             SessionEvent::VideoFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen(), frame.seek_gen(), frame.op_id()) {
-                    eprintln!(
+                    flog!(
                         "[stale_video] frame_seek={} current_seek={} frame_op={:?} current_op={:?}",
                         frame.seek_gen().0,
                         self.generations.seek().0,
@@ -775,7 +784,7 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
-                eprintln!("[video_stream_ended] seek={} op={:?}", seek_gen.0, op_id);
+                flog!("[video_stream_ended] seek={} op={:?}", seek_gen.0, op_id);
                 self.video_stream_ended = true;
                 if matches!(self.state, PlaybackState::Playing | PlaybackState::Priming) {
                     self.state = PlaybackState::Draining;
@@ -813,7 +822,7 @@ impl PlaybackSession {
                 }
                 let error_msg = error.clone();
                 self.fail_playback(error);
-                eprintln!(
+                flog!(
                     "playback failed: {error_msg}"
                 );
             }
@@ -825,7 +834,7 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
-                eprintln!("[DEVICE_LOST] seek={} op={:?} workers={}", seek_gen.0, op_id, self.active_worker_count.load(Ordering::Acquire));
+                flog!("[DEVICE_LOST] seek={} op={:?} workers={}", seek_gen.0, op_id, self.active_worker_count.load(Ordering::Acquire));
                 self.recover_device(now, "worker reported device-lost".to_string())?;
             }
             SessionEvent::AudioEndpointChanged {
@@ -857,7 +866,7 @@ impl PlaybackSession {
         // Don't seek during states where it makes no sense or would break
         // the open/recovery sequence.
         if matches!(self.state, PlaybackState::Idle | PlaybackState::Opening | PlaybackState::Error) {
-            eprintln!("[seek] rejected: state={:?}", self.state);
+            flog!("[seek] rejected: state={:?}", self.state);
             return Ok(());
         }
 
@@ -883,14 +892,14 @@ impl PlaybackSession {
                 // on some files in the hardware path. Keep the rest of the
                 // session on software decode once seek churn is detected.
                 self.decode_preference = VideoDecodePreference::ForceSoftware;
-                eprintln!(
+                flog!(
                     "[seek] forcing software decode for session after hardware seek churn"
                 );
                 if self.overlay.show_decode_info {
                     self.update_window_title();
                 }
             }
-            eprintln!(
+            flog!(
                 "[seek] DEFERRED pos={:.3}s workers={} throttled={}",
                 clamped_position.as_secs_f64(),
                 workers_alive,
@@ -920,7 +929,7 @@ impl PlaybackSession {
         self.metrics.disable_open_audio_metric();
         let absolute_target = self.absolute_media_position(target.position());
         let workers_before = self.active_worker_count.load(Ordering::Acquire);
-        eprintln!(
+        flog!(
             "[execute_seek] pos={:.3}s abs={:.3}s open={} seek={} op={:?} workers={} surfaces={} vq={} aq={} device_removed={}",
             target.position().as_secs_f64(),
             absolute_target.as_secs_f64(),
@@ -988,7 +997,7 @@ impl PlaybackSession {
         reset_surfaces: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.cancel_active_worker();
-        eprintln!("[prepare_runtime] cancelled worker, nonce now={}", self.worker_nonce.load(Ordering::Acquire));
+        flog!("[prepare_runtime] cancelled worker, nonce now={}", self.worker_nonce.load(Ordering::Acquire));
         self.clear_video_queue();
         self.queued_audio_frames.clear();
         if reset_surfaces {
@@ -1067,7 +1076,7 @@ impl PlaybackSession {
         let worker_count = self.active_worker_count.clone();
         worker_count.fetch_add(1, Ordering::Release);
 
-        eprintln!(
+        flog!(
             "[spawn_worker] nonce={} workers_now={}",
             expected_nonce,
             worker_count.load(Ordering::Acquire)
@@ -1080,7 +1089,7 @@ impl PlaybackSession {
             impl Drop for WorkerGuard {
                 fn drop(&mut self) {
                     let remaining = self.0.fetch_sub(1, Ordering::Release).saturating_sub(1);
-                    eprintln!("[worker_exit] nonce={} workers_remaining={}", self.1, remaining);
+                    flog!("[worker_exit] nonce={} workers_remaining={}", self.1, remaining);
                 }
             }
             let _guard = WorkerGuard(worker_count, expected_nonce);
@@ -1102,13 +1111,13 @@ impl PlaybackSession {
                             Ok(()) => {
                                 let prev = full_count.swap(0, Ordering::Relaxed);
                                 if prev > 0 {
-                                    eprintln!("[worker_send] nonce={} unblocked after {} full retries", expected, prev);
+                                    flog!("[worker_send] nonce={} unblocked after {} full retries", expected, prev);
                                 }
                                 return Ok(());
                             }
                             Err(TrySendError::Full(returned)) => {
                                 if nonce.load(Ordering::Acquire) != expected {
-                                    eprintln!("[worker_send] nonce={} CANCELLED while channel full", expected);
+                                    flog!("[worker_send] nonce={} CANCELLED while channel full", expected);
                                     return Err(WORKER_CANCELLED.to_string());
                                 }
                                 full_count.fetch_add(1, Ordering::Relaxed);
@@ -1278,7 +1287,7 @@ impl PlaybackSession {
             Ok(()) => {
                 self.present_needed = true;
                 if let Some(elapsed) = self.metrics.note_resize_recovered(now) {
-                    eprintln!("resize_recover_ms={}", elapsed.as_millis());
+                    flog!("resize_recover_ms={}", elapsed.as_millis());
                 }
                 Ok(())
             }
@@ -1286,11 +1295,11 @@ impl PlaybackSession {
                 if self.presenter.rebuild_swap_chain(&self.window).is_ok() {
                     self.present_needed = true;
                     if let Some(elapsed) = self.metrics.note_resize_recovered(now) {
-                        eprintln!("resize_recover_ms={}", elapsed.as_millis());
+                        flog!("resize_recover_ms={}", elapsed.as_millis());
                     }
                     return Ok(());
                 }
-                eprintln!("resize recovery deferred: {error}");
+                flog!("resize recovery deferred: {error}");
                 let _ = self.metrics.note_resize_recovered(now);
                 Ok(())
             }
@@ -1363,6 +1372,9 @@ impl PlaybackSession {
             Some(sink) => sink.buffered_frames().unwrap_or(1),
             None => return Ok(()),
         };
+        // Seed the per-tick cache so the master clock / end-of-playback checks
+        // later in this tick reuse this value instead of re-querying WASAPI.
+        self.cached_buffered_frames.set(Some(buffered));
         if self.audio_stream_expected
             && self.state != PlaybackState::Paused
             && self.audio_sink.as_ref().map_or(false, |s| s.is_started())
@@ -1535,7 +1547,7 @@ impl PlaybackSession {
         self.present_needed = true;
         self.metrics.note_video_frame_presented();
         if let Some(elapsed) = self.metrics.note_resume_first_frame(now) {
-            eprintln!("play_to_motion_ms={}", elapsed.as_millis());
+            flog!("play_to_motion_ms={}", elapsed.as_millis());
         }
         self.metrics.pending_first_frame |= self.metrics.presented_video_frames() == 1;
         self.seek_frame_presented_since_request |= self.metrics.pending_seek_settled;
@@ -1610,7 +1622,7 @@ impl PlaybackSession {
                 }
                 self.state = PlaybackState::Paused;
                 if let Some(elapsed) = self.metrics.note_pause_completed(Instant::now()) {
-                    eprintln!("pause_to_stop_ms={}", elapsed.as_millis());
+                    flog!("pause_to_stop_ms={}", elapsed.as_millis());
                 }
             }
             PlaybackState::Paused => {
@@ -1653,7 +1665,7 @@ impl PlaybackSession {
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.overlay.subtitle_track.is_none() {
-            eprintln!("subtitle toggle ignored: no external .srt sidecar was loaded");
+            flog!("subtitle toggle ignored: no external .srt sidecar was loaded");
             return Ok(());
         }
 
@@ -1664,7 +1676,7 @@ impl PlaybackSession {
         if !self.overlay.subtitles_enabled {
             self.presenter.clear_subtitle_overlay();
         }
-        eprintln!("subtitles_enabled={}", self.overlay.subtitles_enabled);
+        flog!("subtitles_enabled={}", self.overlay.subtitles_enabled);
         Ok(())
     }
 
@@ -1838,7 +1850,7 @@ impl PlaybackSession {
                     .set_subtitle_overlay(Some(&cue.text), viewport.0, viewport.1)?;
                 self.overlay.active_subtitle_cue = Some(index);
                 self.overlay.active_subtitle_viewport = Some(viewport);
-                eprintln!(
+                flog!(
                     "subtitle_cue index={} start_ms={} end_ms={}",
                     index,
                     cue.start.as_millis(),
@@ -1847,7 +1859,7 @@ impl PlaybackSession {
             }
             None => {
                 if self.overlay.active_subtitle_cue.take().is_some() {
-                    eprintln!("subtitle_cue cleared");
+                    flog!("subtitle_cue cleared");
                 }
                 self.overlay.active_subtitle_viewport = Some(viewport);
                 self.presenter.clear_subtitle_overlay();
@@ -1882,7 +1894,7 @@ impl PlaybackSession {
             (self.audio_clock_anchor_pts, self.audio_sink.as_ref())
         {
             if sink.is_started() {
-                let buffered_frames = sink.buffered_frames().unwrap_or(0) as u64;
+                let buffered_frames = self.current_buffered_frames() as u64;
                 let played_frames = self.audio_submitted_frames.saturating_sub(buffered_frames);
                 let sample_rate = sink.format().sample_rate;
                 if sample_rate > 0 {
@@ -1936,7 +1948,7 @@ impl PlaybackSession {
         let open_gen = self.generations.open();
         let seek_gen = self.generations.bump_seek();
         let op_id = self.operation_clock.next();
-        eprintln!("audio endpoint recovery: {reason}");
+        flog!("audio endpoint recovery: {reason}");
         self.metrics.disable_open_audio_metric();
         self.begin_operation(
             source,
@@ -1962,9 +1974,9 @@ impl PlaybackSession {
         };
 
         self.metrics.note_device_recovery_started(now);
-        eprintln!("device recovery: {reason}");
+        flog!("device recovery: {reason}");
         if let Err(error) = self.presenter.rebuild_device(&self.window) {
-            eprintln!("device recovery failed: {error}");
+            flog!("device recovery failed: {error}");
             self.fail_playback(format!("device recovery failed: {error}"));
             return Ok(());
         }
@@ -1985,18 +1997,34 @@ impl PlaybackSession {
         )?;
         self.overlay.subtitle_clock_base = Some(restart_target);
         if let Some(elapsed) = self.metrics.note_device_recovered(now) {
-            eprintln!("device_recovery_ms={}", elapsed.as_millis());
+            flog!("device_recovery_ms={}", elapsed.as_millis());
         }
         Ok(())
     }
 
     fn can_finish_playback(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        let buffered = self
+        let buffered = self.current_buffered_frames();
+        self.can_finish_with_buffered(buffered)
+    }
+
+    /// Audio sink buffered-frame count, cached for the duration of a single
+    /// `tick` (see [`Self::cached_buffered_frames`]). Outside a tick it always
+    /// queries fresh so callers like `snapshot` never observe a stale value.
+    fn current_buffered_frames(&self) -> u32 {
+        if self.tick_active.get() {
+            if let Some(cached) = self.cached_buffered_frames.get() {
+                return cached;
+            }
+        }
+        let value = self
             .audio_sink
             .as_ref()
-            .map(|s| s.buffered_frames().unwrap_or(0))
+            .map(|sink| sink.buffered_frames().unwrap_or(0))
             .unwrap_or(0);
-        self.can_finish_with_buffered(buffered)
+        if self.tick_active.get() {
+            self.cached_buffered_frames.set(Some(value));
+        }
+        value
     }
 
     fn can_finish_with_buffered(&self, buffered: u32) -> Result<bool, Box<dyn std::error::Error>> {
@@ -2026,7 +2054,7 @@ impl PlaybackSession {
         self.active_operation_id = None;
         self.active_decode_mode = None;
         self.state = PlaybackState::Error;
-        eprintln!("open failed: {error}");
+        flog!("open failed: {error}");
     }
 
     fn fail_playback(&mut self, error: String) {
@@ -2036,7 +2064,7 @@ impl PlaybackSession {
         self.active_operation_id = None;
         self.active_decode_mode = None;
         self.state = PlaybackState::Error;
-        eprintln!("playback failed: {error}");
+        flog!("playback failed: {error}");
     }
 
     /// Show the idle "Drop a file" overlay during Error state so the user
