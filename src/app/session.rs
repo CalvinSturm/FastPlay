@@ -66,8 +66,14 @@ pub struct PlaybackSession {
     decode_preference: VideoDecodePreference,
     worker_nonce: Arc<AtomicU64>,
     active_worker_count: Arc<AtomicU32>,
+    /// Worker→UI channel for video frames and all control/error events.
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
+    /// Separate worker→UI channel for audio frames and audio-stream-end.
+    /// Decoupled from `event_rx` so a full video queue can't stall the drain
+    /// loop from delivering audio (which would underrun WASAPI and stutter).
+    audio_event_tx: SyncSender<SessionEvent>,
+    audio_event_rx: Receiver<SessionEvent>,
     metrics: MetricsCollector,
     video_clock: Option<PlaybackClock>,
     media_time_origin_pts: Option<Duration>,
@@ -112,6 +118,12 @@ pub struct PlaybackSession {
     /// recomputed several times per tick; the value is stable across those
     /// reads because no audio is submitted between them.
     cached_buffered_frames: Cell<Option<u32>>,
+    /// True when timeline scrub churn forced this session from hardware to
+    /// software decode as a d3d11 crash workaround. Distinguishes that
+    /// auto-fallback (revertible to hardware once scrubbing settles) from a
+    /// user `--force-sw` request or a genuine hardware-unavailable fallback,
+    /// neither of which should be reverted.
+    scrub_forced_software: bool,
 }
 
 impl PlaybackSession {
@@ -119,9 +131,17 @@ impl PlaybackSession {
         let presenter = Presenter::new(&window)?;
         let saved_volume = super::settings::load_volume();
         let queue_defaults = QueueDefaults::default();
-        let event_capacity =
-            queue_defaults.decoded_video_frames + queue_defaults.decoded_audio_frames + 4;
-        let (event_tx, event_rx) = mpsc::sync_channel(event_capacity);
+        // Independent bounded channels for video/control vs audio events. A
+        // single shared channel meant the drain loop stopped pulling *both*
+        // streams as soon as *either* queue filled — so a full video queue
+        // starved audio delivery, draining WASAPI to an underrun that reset
+        // the A/V clock and stalled video (the "stutter"). Separate channels
+        // let each stream be drained on its own gate. The `+ 4` is headroom
+        // for the infrequent control/end/error events sharing the video path.
+        let video_event_capacity = queue_defaults.decoded_video_frames + 4;
+        let audio_event_capacity = queue_defaults.decoded_audio_frames + 4;
+        let (event_tx, event_rx) = mpsc::sync_channel(video_event_capacity);
+        let (audio_event_tx, audio_event_rx) = mpsc::sync_channel(audio_event_capacity);
 
         Ok(Self {
             ui_thread_id: thread::current().id(),
@@ -140,6 +160,8 @@ impl PlaybackSession {
             active_worker_count: Arc::new(AtomicU32::new(0)),
             event_tx,
             event_rx,
+            audio_event_tx,
+            audio_event_rx,
             metrics: MetricsCollector::new(),
             video_clock: None,
             media_time_origin_pts: None,
@@ -180,6 +202,7 @@ impl PlaybackSession {
             saved_volume,
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
+            scrub_forced_software: false,
         })
     }
 
@@ -276,6 +299,7 @@ impl PlaybackSession {
         self.in_point = None;
         self.out_point = None;
         self.loop_range = false;
+        self.scrub_forced_software = false;
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
@@ -315,16 +339,61 @@ impl PlaybackSession {
             && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
         {
             // This file is reproducibly crashing in d3d11.dll under timeline
-            // stress-scrub while the hardware path is active. Switch the rest
-            // of the session to software decode before spawning the scrub seek.
+            // stress-scrub while the hardware path is active. Switch to
+            // software decode for the scrub churn; tick() reverts to hardware
+            // once scrubbing settles so steady playback isn't stuck on the
+            // slower (stuttering) software path.
             self.decode_preference = VideoDecodePreference::ForceSoftware;
-            flog!("[scrub_seek] forcing software decode for session");
+            self.scrub_forced_software = true;
+            flog!("[scrub_seek] forcing software decode for scrub churn");
             if self.overlay.show_decode_info {
                 self.update_window_title();
             }
         }
         self.pause_after_seek = pause_after;
         self.seek(target, now)
+    }
+
+    /// Minimum quiet period after the last seek-worker spawn before reverting a
+    /// scrub-forced software session back to hardware decode. Long enough to be
+    /// confident the scrub drag has ended, so we never re-enter the hardware
+    /// path during the rapid-churn window that crashes d3d11.
+    const HARDWARE_REVERT_SETTLE: Duration = Duration::from_millis(1500);
+
+    /// If scrub churn dropped this session to software decode and scrubbing has
+    /// since settled, re-prime the hardware path at the current position so
+    /// steady playback isn't stuck on the slower (stuttering) software decoder.
+    /// Software decode is retained only for the brief churn window; the crash
+    /// guard targets rapid scrubbing, not a single settled seek or steady play.
+    fn maybe_revert_to_hardware(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.scrub_forced_software {
+            return Ok(());
+        }
+        // Only revert during steady, hardware-eligible playback: not mid-seek,
+        // no pending or deferred scrub, worker count down to the single steady
+        // decode worker, and after a quiet settle window.
+        if self.state != PlaybackState::Playing
+            || self.pending_seek_target.is_some()
+            || self.deferred_seek.is_some()
+            || self.active_worker_count.load(Ordering::Acquire) >= 2
+            || self
+                .last_worker_spawned_at
+                .is_none_or(|t| now.duration_since(t) < Self::HARDWARE_REVERT_SETTLE)
+        {
+            return Ok(());
+        }
+
+        let position = self.snapshot(now).position;
+        flog!(
+            "[revert_hw] scrub settled, re-priming hardware decode at {:.3}s",
+            position.as_secs_f64()
+        );
+        self.scrub_forced_software = false;
+        self.decode_preference = VideoDecodePreference::Auto;
+        self.seek(SeekTarget::new(position), now)
     }
 
     pub fn apply_command(
@@ -510,17 +579,26 @@ impl PlaybackSession {
                 self.queued_audio_frames.clear();
             }
 
+            // Drain audio and video independently. Each loop gates only on its
+            // own queue, so a full video queue no longer stops audio from being
+            // pulled and submitted to WASAPI (and vice versa) — the coupling
+            // that periodically starved audio and stuttered playback.
             loop {
-                if self.queued_video_frames.len() >= self.queued_video_capacity
-                    || self.queued_audio_frames.len() >= self.queued_audio_capacity
-                {
+                if self.queued_audio_frames.len() >= self.queued_audio_capacity {
                     break;
                 }
-
+                match self.audio_event_rx.try_recv() {
+                    Ok(event) => self.handle_event(event, now)?,
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                }
+            }
+            loop {
+                if self.queued_video_frames.len() >= self.queued_video_capacity {
+                    break;
+                }
                 match self.event_rx.try_recv() {
                     Ok(event) => self.handle_event(event, now)?,
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 }
             }
 
@@ -543,6 +621,8 @@ impl PlaybackSession {
                     }
                 }
             }
+
+            self.maybe_revert_to_hardware(now)?;
 
             self.submit_due_audio(now)?;
             if self.advance_video_playback(now)? {
@@ -889,11 +969,13 @@ impl PlaybackSession {
                 && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
             {
                 // Repeated scrub seeks are still provoking d3d11.dll crashes
-                // on some files in the hardware path. Keep the rest of the
-                // session on software decode once seek churn is detected.
+                // on some files in the hardware path. Use software decode while
+                // seek churn is detected; tick() reverts to hardware once it
+                // settles.
                 self.decode_preference = VideoDecodePreference::ForceSoftware;
+                self.scrub_forced_software = true;
                 flog!(
-                    "[seek] forcing software decode for session after hardware seek churn"
+                    "[seek] forcing software decode after hardware seek churn"
                 );
                 if self.overlay.show_decode_info {
                     self.update_window_title();
@@ -1064,6 +1146,7 @@ impl PlaybackSession {
         op_id: OperationId,
     ) {
         let sender = self.event_tx.clone();
+        let audio_sender = self.audio_event_tx.clone();
         let device = self.presenter.device().clone();
         let audio_format = self
             .audio_sink
@@ -1195,7 +1278,7 @@ impl PlaybackSession {
                         SessionEvent::AudioFrameReady(frame),
                         &worker_nonce,
                         expected_nonce,
-                        &sender,
+                        &audio_sender,
                     )
                 },
             );
@@ -1225,7 +1308,7 @@ impl PlaybackSession {
                             },
                             &worker_nonce,
                             expected_nonce,
-                            &sender,
+                            &audio_sender,
                         );
                     }
                 }
@@ -1383,10 +1466,19 @@ impl PlaybackSession {
             && !self.can_finish_with_buffered(0)?
         {
             self.metrics.note_audio_underrun();
-            // Re-anchor the audio clock so the next submission re-establishes
-            // A/V sync instead of drifting permanently after the gap.
+            // Audio drained dry. Capture the current position *before* clearing
+            // the anchor, then hand the master clock to a video clock seeded at
+            // that position. Without this, master_clock_position falls through
+            // to a None video_clock: the playhead collapses to zero and queued
+            // video frames present unpaced (burst) until audio re-anchors. The
+            // next successful submission clears video_clock and re-establishes
+            // the audio clock (see the anchor handoff above).
+            let resume_pts = self.master_clock_position(now).unwrap_or(Duration::ZERO);
             self.audio_clock_anchor_pts = None;
             self.audio_submitted_frames = 0;
+            if self.video_clock.is_none() {
+                self.video_clock = Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
+            }
         }
 
         // Stop the audio sink once all audio has been submitted and the
