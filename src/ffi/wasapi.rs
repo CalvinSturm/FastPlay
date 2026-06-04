@@ -3,8 +3,9 @@ use std::{error::Error, fmt};
 use windows::{
     Win32::{
         Media::Audio::{
-            eConsole, eRender, IAudioClient3, IAudioRenderClient, IMMDevice,
-            IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+            eConsole, eRender, AUDCLNT_SHAREMODE_SHARED, IAudioClient3, IAudioRenderClient,
+            IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
+            WAVEFORMATEXTENSIBLE,
         },
         Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
         Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT,
@@ -52,6 +53,11 @@ impl Drop for ComApartment {
     }
 }
 
+/// Shared-mode render buffer size, in `REFERENCE_TIME` units (100 ns).
+/// 200 ms of headroom so transient UI-thread stalls don't underrun the
+/// audio engine (which would otherwise reset the A/V clock and stutter video).
+const SHARED_BUFFER_DURATION_HNS: i64 = 200 * 10_000;
+
 pub struct WasapiAudioSink {
     _com: ComApartment,
     audio_client: IAudioClient3,
@@ -78,23 +84,20 @@ impl WasapiAudioSink {
             ))));
         }
 
-        let mut default_period_in_frames = 0u32;
-        let mut fundamental_period_in_frames = 0u32;
-        let mut min_period_in_frames = 0u32;
-        let mut max_period_in_frames = 0u32;
-
+        // Initialize shared mode with a deep buffer instead of the
+        // IAudioClient3 low-latency engine period (~10 ms). A media player
+        // wants headroom, not minimum latency: the ~10 ms path underran
+        // thousands of times per clip whenever the UI thread was busy for
+        // more than one device period (Present, VideoProcessorBlt, a stalled
+        // drain loop), and each underrun reset the A/V clock anchor and
+        // stalled video presentation — the visible "stutter". A 200 ms buffer
+        // tolerates those hitches without draining dry.
         unsafe {
-            audio_client.GetSharedModeEnginePeriod(
-                mix_format.as_ptr(),
-                &mut default_period_in_frames,
-                &mut fundamental_period_in_frames,
-                &mut min_period_in_frames,
-                &mut max_period_in_frames,
-            )?;
-            let _ = (fundamental_period_in_frames, min_period_in_frames, max_period_in_frames);
-            audio_client.InitializeSharedAudioStream(
+            audio_client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
                 0,
-                default_period_in_frames,
+                SHARED_BUFFER_DURATION_HNS,
+                0,
                 mix_format.as_ptr(),
                 None,
             )?;
@@ -102,6 +105,12 @@ impl WasapiAudioSink {
 
         let render_client: IAudioRenderClient = unsafe { audio_client.GetService()? };
         let buffer_frames = unsafe { audio_client.GetBufferSize()? };
+        crate::flog!(
+            "[wasapi] init buffer_frames={} ({:.1}ms @ {}Hz)",
+            buffer_frames,
+            buffer_frames as f64 * 1000.0 / actual_format.sample_rate as f64,
+            actual_format.sample_rate
+        );
 
         Ok((
             Self {
