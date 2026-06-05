@@ -12,7 +12,14 @@ use crate::{
 };
 
 pub struct Presenter {
-    device: D3D11Device,
+    // Field order is drop order. The swap chain, surface registry, and overlays
+    // all hold COM objects (textures, views, processors) created from `device`.
+    // A D3D11 child object's final Release notifies its owning device, so the
+    // device must outlive them all — `device` is declared LAST so it drops last.
+    // Getting this wrong is a shutdown use-after-free that only surfaces once
+    // the decode worker (which holds its own device clone) has exited, leaving
+    // this the last device reference — e.g. closing the window after the clip
+    // has finished playing.
     swap_chain: Option<SwapChainPresenter>,
     surfaces: SurfaceRegistry,
     current_surface: Option<VideoSurfaceHandle>,
@@ -24,6 +31,7 @@ pub struct Presenter {
     idle_overlay: Option<SubtitleOverlay>,
     help_overlay: Option<SubtitleOverlay>,
     has_ever_shown_content: bool,
+    device: D3D11Device,
 }
 
 impl Presenter {
@@ -269,6 +277,30 @@ impl Presenter {
     /// Returns true if the idle (no-content) overlay is currently showing.
     pub fn is_showing_idle(&self) -> bool {
         !self.has_ever_shown_content
+    }
+
+    /// Release every GPU resource except the device and idle the immediate
+    /// context, so the device can be dropped afterwards without racing pending
+    /// GPU work or leaving bound state — this avoids the intermittent crash
+    /// inside d3d11.dll while destroying the device at process exit. Call this
+    /// while the window HWND is still alive (correct DXGI teardown order).
+    pub fn prepare_for_shutdown(&mut self) {
+        self.reset_surfaces();
+        self.help_overlay = None;
+        self.idle_overlay = None;
+        // Releases swap-chain resources, then ClearState + Flush the context.
+        self.drop_swap_chain();
+
+        // Deliberately leak one reference to the D3D11 device (and, via Clone,
+        // its contexts) so the in-process device destructor never runs.
+        // Destroying a D3D11 device at process exit intermittently faults
+        // inside the driver (d3d11.dll) even after the swap chain, every child
+        // resource, and the immediate context have been released and idled — a
+        // teardown race we cannot control from user code. Holding one extra ref
+        // keeps the device alive until the OS reclaims the process's GPU
+        // resources on exit, which is correct and crash-free. Only ever called
+        // from PlaybackSession::shutdown at process teardown.
+        std::mem::forget(self.device.clone());
     }
 
     pub fn reset_surfaces(&mut self) {

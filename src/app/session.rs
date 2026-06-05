@@ -54,8 +54,11 @@ struct QueuedAudioFrame {
 pub struct PlaybackSession {
     ui_thread_id: ThreadId,
     tick_active: Cell<bool>,
-    window: NativeWindow,
+    // `presenter` is declared before `window` so it drops first: the swap chain
+    // and D3D11 device are released while the window HWND is still alive
+    // (correct DXGI teardown order), then `window` drops and destroys the HWND.
     presenter: Presenter,
+    window: NativeWindow,
     audio_sink: Option<AudioSink>,
     audio_sink_error: Option<String>,
     state: PlaybackState,
@@ -554,6 +557,26 @@ impl PlaybackSession {
 
     pub fn take_idle_pace_request(&mut self) -> bool {
         std::mem::take(&mut self.idle_pace_requested)
+    }
+
+    /// Orderly teardown before the session is dropped. Cancels and waits for any
+    /// decode worker (so no other thread holds a D3D11 device clone or touches
+    /// the immediate context), then releases GPU resources and idles the device.
+    /// Must run while the window HWND is still alive. Prevents the intermittent
+    /// use-after-free inside d3d11.dll when the device is destroyed at exit.
+    pub fn shutdown(&mut self) {
+        self.cancel_active_worker();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while self.active_worker_count.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        self.clear_video_queue();
+        self.queued_audio_frames.clear();
+        if let Some(sink) = self.audio_sink.as_mut() {
+            let _ = sink.pause();
+        }
+        self.audio_sink = None;
+        self.presenter.prepare_for_shutdown();
     }
 
     fn tick_inner(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
