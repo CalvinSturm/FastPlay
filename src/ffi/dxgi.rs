@@ -1037,11 +1037,15 @@ unsafe extern "system" fn window_proc(
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_CLOSE => {
+            // Only signal close here; do NOT DestroyWindow yet. The main loop
+            // observes is_open=false, exits, and drops the session — which
+            // releases the swap chain and D3D11 device while this HWND is still
+            // alive (correct DXGI teardown order), then destroys the window via
+            // NativeWindowInner::Drop. Destroying the HWND here instead would
+            // tear the swap chain down after its window is gone, racing the
+            // driver and intermittently crashing during device release at exit.
             if let Some(state) = window_state(hwnd) {
                 state.is_open.set(false);
-            }
-            unsafe {
-                let _ = DestroyWindow(hwnd);
             }
             LRESULT(0)
         }

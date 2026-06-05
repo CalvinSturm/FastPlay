@@ -211,6 +211,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     session.window().clear_modal_tick();
+    // Tear down GPU/worker resources in a controlled order while the window
+    // HWND is still alive, before the session is dropped.
+    session.shutdown();
     Ok(())
 }
 

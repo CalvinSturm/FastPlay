@@ -60,10 +60,17 @@ impl Error for D3D11Error {}
 
 #[derive(Clone)]
 pub struct D3D11Device {
-    device: ID3D11Device,
+    // Field order is drop order, and these device children (the immediate
+    // context, video device, and video context) hold references back to the
+    // ID3D11Device. The device must outlive them, so `device` is declared
+    // AFTER the contexts and released last. Declaring it first releases the
+    // device before its children, whose final Release then touches a destroyed
+    // device — a use-after-free that only surfaces once this is the last
+    // surviving device clone (decode worker exited, surfaces already freed).
     context: ID3D11DeviceContext,
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
+    device: ID3D11Device,
     /// Serializes all immediate-context operations across threads.
     ///
     /// `ID3D11Multithread::SetMultithreadProtected` only covers
