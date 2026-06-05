@@ -1664,14 +1664,6 @@ impl PlaybackSession {
         while let Some(frame) = self.queued_video_frames.pop_front() {
             self.presenter.release_surface(frame.surface());
         }
-        // After releasing surfaces their D3D11 texture memory may be
-        // returned to the allocator and reused for new textures at the
-        // same address.  The VideoProcessorCache keeps a raw-pointer
-        // identity cache of input views keyed by texture address — if
-        // we don't flush it here, a new texture at the same old address
-        // matches a stale cached view, and VideoProcessorBlt reads
-        // through a dangling COM pointer → ACCESS_VIOLATION at 0x...00D8.
-        self.presenter.flush_video_processor_input_cache();
     }
 
     fn push_video_frame(&mut self, frame: DecodedVideoFrame) {

@@ -746,18 +746,6 @@ impl DxgiSwapChain {
         self.present()
     }
 
-    pub fn flush_video_processor_input_cache(&mut self, device: &D3D11Device) {
-        device.flush_video_processor_input_cache(&mut self.vp_cache);
-    }
-
-    pub fn invalidate_video_processor_input_view(
-        &mut self,
-        device: &D3D11Device,
-        surface: &VideoSurface,
-    ) {
-        device.invalidate_video_processor_input_view(&mut self.vp_cache, surface);
-    }
-
     pub fn resize(
         &mut self,
         device: &D3D11Device,
