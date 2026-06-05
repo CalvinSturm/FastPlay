@@ -30,7 +30,7 @@ use windows::{
                 D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
                 D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
                 ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-                ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+                ID3D11VideoProcessorOutputView,
             },
             Dxgi::Common::{
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32_FLOAT,
@@ -105,17 +105,15 @@ pub(crate) struct VideoSurface {
     pub(crate) height: u32,
 }
 
-/// Entry in the per-frame input view cache inside `VideoProcessorCache`.
-struct InputViewEntry {
-    /// Raw texture pointer used only for identity comparison — never dereferenced.
-    texture_identity: *mut c_void,
-    subresource_index: u32,
-    view: ID3D11VideoProcessorInputView,
-}
-
 /// Cached D3D11 video processor objects reused across frames when the
 /// input/output dimensions and backbuffer identity haven't changed.
 /// Avoids per-frame kernel-mode allocations that stress the GPU driver.
+///
+/// Input views are deliberately *not* cached: every decoded frame is copied
+/// into a freshly allocated texture (subresource 0), so a texture-identity
+/// cache key never produces a correct hit — it could only ever match a stale
+/// entry after the allocator reused a freed texture's address, which is a
+/// crash hazard, not a win. Each frame creates and drops its own input view.
 pub(crate) struct VideoProcessorCache {
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
@@ -126,11 +124,6 @@ pub(crate) struct VideoProcessorCache {
     output_height: u32,
     /// Raw pointer used only for identity comparison — never dereferenced.
     backbuffer_identity: *mut c_void,
-    /// Cached input views keyed by (texture identity, subresource index).
-    /// Hardware decoders use a fixed pool of surfaces (typically 8–16), so
-    /// a Vec with linear search outperforms a HashMap at this size.
-    /// Automatically invalidated when the enumerator changes (whole cache replaced).
-    input_view_cache: Vec<InputViewEntry>,
 }
 
 #[repr(C)]
@@ -439,7 +432,6 @@ impl D3D11Device {
                         output_width,
                         output_height,
                         backbuffer_identity: bb_identity,
-                        input_view_cache: Vec::new(),
                     });
                     slot.as_mut().unwrap()
                 }
@@ -477,36 +469,18 @@ impl D3D11Device {
                 },
             };
 
-            let texture_identity = surface.texture.as_raw();
-            let input_view = if let Some(entry) = cache.input_view_cache.iter().find(|e| {
-                e.texture_identity == texture_identity
-                    && e.subresource_index == surface.subresource_index
-            }) {
-                entry.view.clone()
-            } else {
-                let mut new_view = None;
-                self.video_device.CreateVideoProcessorInputView(
-                    &surface.texture,
-                    &cache.enumerator,
-                    &input_desc,
-                    Some(&mut new_view),
-                )?;
-                let new_view = new_view
-                    .ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
-                // Each decoded frame is copied to a unique texture, so the
-                // cache key (texture identity) never repeats.  Evict the
-                // oldest entry when the cache reaches the hardware pool
-                // size to prevent unbounded VRAM growth.
-                if cache.input_view_cache.len() >= 16 {
-                    cache.input_view_cache.remove(0);
-                }
-                cache.input_view_cache.push(InputViewEntry {
-                    texture_identity,
-                    subresource_index: surface.subresource_index,
-                    view: new_view.clone(),
-                });
-                new_view
-            };
+            // Create a fresh input view for this frame's texture. It is moved
+            // into the stream below and dropped right after the Blt, so the
+            // kernel-mode view is allocated and freed within this call.
+            let mut new_view = None;
+            self.video_device.CreateVideoProcessorInputView(
+                &surface.texture,
+                &cache.enumerator,
+                &input_desc,
+                Some(&mut new_view),
+            )?;
+            let input_view = new_view
+                .ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
 
             let stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),
@@ -583,54 +557,6 @@ impl D3D11Device {
         }
 
         Ok(())
-    }
-
-    /// Clears only the input-view sub-cache inside the video processor
-    /// cache.  Call this after releasing video surfaces (e.g. after a seek
-    /// clears the video queue) so that stale raw-pointer identities are
-    /// not matched against newly allocated textures at the same address.
-    ///
-    /// The heavy objects (enumerator, processor, output view) are kept so
-    /// the next frame does not pay the kernel-mode allocation cost.
-    pub(crate) fn flush_video_processor_input_cache(
-        &self,
-        vp_cache: &mut Option<VideoProcessorCache>,
-    ) {
-        if let Some(cache) = vp_cache.as_mut() {
-            let flushed = cache.input_view_cache.len();
-            cache.input_view_cache.clear();
-            if flushed > 0 {
-                flog!("[vp_cache] flushed {} stale input views after surface release", flushed);
-            }
-        }
-    }
-
-    /// Removes the cached input view for a single released video surface.
-    /// This keeps the raw-pointer identity cache in sync with surface
-    /// lifetimes without throwing away the whole video-processor cache.
-    pub(crate) fn invalidate_video_processor_input_view(
-        &self,
-        vp_cache: &mut Option<VideoProcessorCache>,
-        surface: &VideoSurface,
-    ) {
-        let Some(cache) = vp_cache.as_mut() else {
-            return;
-        };
-
-        let texture_identity = surface.texture.as_raw();
-        let before = cache.input_view_cache.len();
-        cache.input_view_cache.retain(|entry| {
-            !(entry.texture_identity == texture_identity
-                && entry.subresource_index == surface.subresource_index)
-        });
-
-        let removed = before.saturating_sub(cache.input_view_cache.len());
-        if removed > 0 {
-            flog!(
-                "[vp_cache] invalidated {} input view(s) for released surface",
-                removed
-            );
-        }
     }
 
     pub(crate) fn create_subtitle_renderer(&self) -> Result<SubtitleRenderer, Box<dyn Error>> {
