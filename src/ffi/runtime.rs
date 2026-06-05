@@ -62,13 +62,23 @@ pub fn install_crash_handler() {
                 0
             };
 
+            // Diagnostic: capture a symbolized backtrace of the faulting
+            // thread. For an access violation the stack is intact, so this
+            // pinpoints the teardown frame that faulted.
+            let backtrace = std::panic::catch_unwind(|| {
+                format!("{}", std::backtrace::Backtrace::force_capture())
+            })
+            .unwrap_or_else(|_| "<backtrace capture failed>".to_string());
+
             let msg = format!(
                 "CRASH: ACCESS_VIOLATION at 0x{addr:016X}\n\
                  Type: {rw}\n\
                  Target address: 0x{target:016X}\n\
                  \n\
                  This is a hardware exception (not a Rust panic).\n\
-                 Check session.log for the buffered trace leading up to this crash.\n"
+                 Check session.log for the buffered trace leading up to this crash.\n\
+                 \n\
+                 Backtrace:\n{backtrace}\n"
             );
             let _ = std::fs::write(dir.join("crash.log"), &msg);
 
