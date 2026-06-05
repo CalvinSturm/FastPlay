@@ -150,7 +150,7 @@ where
 /// persistent-decoder design can seek within an open session instead of
 /// reopening the file per operation. Phase 1: behavior is identical — exactly
 /// one session is opened and run to EOF per `stream_media` call.
-struct DecodeSession {
+pub(crate) struct DecodeSession {
     input: InputContext,
     video: VideoDecoder,
     audio: Option<AudioDecoder>,
@@ -164,11 +164,17 @@ struct DecodeSession {
 }
 
 impl DecodeSession {
+    /// Whether this session decoded any audio stream (drives the audio
+    /// stream-ended event after a run completes).
+    pub(crate) fn had_audio_stream(&self) -> bool {
+        self.summary.had_audio_stream
+    }
+
     /// Open the file, find streams, and allocate the video/audio decoders.
     /// Returns `Ok(None)` if cancellation was signalled during the (expensive)
     /// open so no decode work begins. Reports the selected decode mode and the
     /// media duration through the callbacks, then applies `start_position`.
-    unsafe fn open(
+    pub(crate) unsafe fn open(
         source: &MediaSource,
         device: &D3D11Device,
         audio_output_format: AudioStreamFormat,
@@ -265,10 +271,18 @@ impl DecodeSession {
         }))
     }
 
+    /// Seek within the already-open file to `target` and flush the decoders,
+    /// without reopening anything. The next `run_to_eof` resumes from here.
+    pub(crate) unsafe fn seek(&mut self, target: Duration) -> Result<(), String> {
+        seek_and_flush(self.input.0, &self.video, self.audio.as_ref(), target)?;
+        self.position = Some(target);
+        Ok(())
+    }
+
     /// Decode from the current position to end of stream, delivering frames
     /// through the callbacks. Returns `Cancelled` if cancellation was signalled
     /// mid-stream, otherwise `Completed` with the run summary.
-    unsafe fn run_to_eof(
+    pub(crate) unsafe fn run_to_eof(
         &mut self,
         device: &D3D11Device,
         open_gen: OpenGeneration,

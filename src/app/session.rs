@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc,
     },
@@ -21,7 +21,7 @@ use crate::{
     audio::sink::AudioSink,
     ffi::{
         dxgi::{ModalTickTarget, NativeWindowInner, ResizeRequest},
-        ffmpeg::{self, StreamStatus},
+        ffmpeg::{self, DecodeSession, StreamStatus},
     },
     media::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
@@ -33,6 +33,7 @@ use crate::{
     platform::window::NativeWindow,
     playback::{
         clock::PlaybackClock,
+        decode_control::{DecodeCommand, DecodeControl},
         generations::{
             GenerationState, OpenGeneration, OperationClock, OperationId, SeekGeneration,
         },
@@ -67,7 +68,14 @@ pub struct PlaybackSession {
     active_operation_id: Option<OperationId>,
     current_source: Option<Arc<MediaSource>>,
     decode_preference: VideoDecodePreference,
-    worker_nonce: Arc<AtomicU64>,
+    /// Command channel to the current persistent decode thread (if any). A
+    /// same-preference position seek is delivered to it as a command (seek
+    /// within the open file) instead of spawning a fresh worker that reopens
+    /// the file. `None` when no decode thread is running.
+    decode_control: Option<Arc<DecodeControl>>,
+    /// Decode preference the running thread was spawned with. A seek that keeps
+    /// this preference reuses the thread; a change (HW↔SW) respawns it.
+    decode_thread_preference: Option<VideoDecodePreference>,
     active_worker_count: Arc<AtomicU32>,
     /// Worker→UI channel for video frames and all control/error events.
     event_tx: SyncSender<SessionEvent>,
@@ -159,7 +167,8 @@ impl PlaybackSession {
             active_operation_id: None,
             current_source: None,
             decode_preference: VideoDecodePreference::Auto,
-            worker_nonce: Arc::new(AtomicU64::new(0)),
+            decode_control: None,
+            decode_thread_preference: None,
             active_worker_count: Arc::new(AtomicU32::new(0)),
             event_tx,
             event_rx,
@@ -565,11 +574,7 @@ impl PlaybackSession {
     /// Must run while the window HWND is still alive. Prevents the intermittent
     /// use-after-free inside d3d11.dll when the device is destroyed at exit.
     pub fn shutdown(&mut self) {
-        self.cancel_active_worker();
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while self.active_worker_count.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(2));
-        }
+        self.teardown_decode_thread(true);
         self.clear_video_queue();
         self.queued_audio_frames.clear();
         if let Some(sink) = self.audio_sink.as_mut() {
@@ -1057,7 +1062,18 @@ impl PlaybackSession {
         self.active_operation_id = Some(op_id);
         self.last_error = None;
         self.deferred_seek = None;
-        self.spawn_stream_worker(source, Some(absolute_target), open_gen, seek_gen, op_id);
+        if self.decode_thread_serves_current() {
+            // Reuse the open file: tell the running thread to seek in place.
+            // Bumping seek_gen above already gates out its old in-flight frames.
+            self.decode_control
+                .as_ref()
+                .expect("decode_thread_serves_current implies a control")
+                .send_seek(absolute_target, seek_gen, op_id);
+        } else {
+            // No thread, or the decode preference changed (HW↔SW): reopen.
+            self.teardown_decode_thread(false);
+            self.spawn_decode_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
+        }
         self.last_worker_spawned_at = Some(now);
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
@@ -1078,12 +1094,17 @@ impl PlaybackSession {
         rebuild_audio_sink: bool,
         reset_audio_expectation: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // A new file/operation: stop the previous decode thread and open fresh.
+        // Async (wait=false) is fine — the old thread shares the same device and
+        // exits promptly on the shutdown signal; recover_device waits explicitly
+        // before rebuilding the device.
+        self.teardown_decode_thread(false);
         self.prepare_runtime_for_operation(rebuild_audio_sink, reset_audio_expectation)?;
         self.state = next_state;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
         self.deferred_seek = None;
-        self.spawn_stream_worker(source, start_position, open_gen, seek_gen, op_id);
+        self.spawn_decode_thread(source, start_position, open_gen, seek_gen, op_id);
         Ok(())
     }
 
@@ -1101,8 +1122,9 @@ impl PlaybackSession {
         reset_audio_expectation: bool,
         reset_surfaces: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.cancel_active_worker();
-        flog!("[prepare_runtime] cancelled worker, nonce now={}", self.worker_nonce.load(Ordering::Acquire));
+        // Note: the decode thread is NOT torn down here. begin_operation tears
+        // it down before a reopen; execute_seek keeps it and sends a seek
+        // command. This only resets UI-side runtime state (queues, clocks).
         self.clear_video_queue();
         self.queued_audio_frames.clear();
         if reset_surfaces {
@@ -1160,7 +1182,7 @@ impl PlaybackSession {
         Ok(())
     }
 
-    fn spawn_stream_worker(
+    fn spawn_decode_thread(
         &mut self,
         source: Arc<MediaSource>,
         start_position: Option<Duration>,
@@ -1177,56 +1199,54 @@ impl PlaybackSession {
             .map(|sink| sink.format())
             .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
         let decode_preference = self.decode_preference;
-        let worker_nonce = self.worker_nonce.clone();
-        let expected_nonce = self.reserve_worker_nonce();
+        let control = Arc::new(DecodeControl::new());
+        self.decode_control = Some(control.clone());
+        self.decode_thread_preference = Some(decode_preference);
         let worker_count = self.active_worker_count.clone();
         worker_count.fetch_add(1, Ordering::Release);
 
         flog!(
-            "[spawn_worker] nonce={} workers_now={}",
-            expected_nonce,
+            "[spawn_decode_thread] open={} seek={} op={:?} workers_now={}",
+            open_gen.0,
+            seek_gen.0,
+            op_id,
             worker_count.load(Ordering::Acquire)
         );
 
         thread::spawn(move || {
-            // Ensure the counter is decremented when this thread exits,
-            // regardless of the exit path (success, cancel, or error).
-            struct WorkerGuard(Arc<AtomicU32>, u64);
+            // Decrement the live-thread counter on any exit path.
+            struct WorkerGuard(Arc<AtomicU32>);
             impl Drop for WorkerGuard {
                 fn drop(&mut self) {
                     let remaining = self.0.fetch_sub(1, Ordering::Release).saturating_sub(1);
-                    flog!("[worker_exit] nonce={} workers_remaining={}", self.1, remaining);
+                    flog!("[decode_thread_exit] workers_remaining={}", remaining);
                 }
             }
-            let _guard = WorkerGuard(worker_count, expected_nonce);
+            let _guard = WorkerGuard(worker_count);
 
-            // Non-blocking send with cancellation check.  When the bounded
-            // channel is full the worker yields and re-checks the nonce.
-            // This prevents stale workers from blocking indefinitely on a
-            // full channel, holding GPU decoder sessions open and causing
-            // TDR crashes during rapid seeking.
-            let worker_send = {
-                let full_count = std::sync::atomic::AtomicU32::new(0);
-                move |event: SessionEvent,
-                      nonce: &AtomicU64,
-                      expected: u64,
-                      tx: &SyncSender<SessionEvent>| -> Result<(), String> {
+            // (seek_gen, op_id) the thread currently decodes for; updated on each
+            // seek command so produced frames and events carry the right stamps.
+            let gen_cell = Cell::new((seek_gen, op_id));
+            // The command sequence the thread is currently serving.
+            let serving = Cell::new(0u64);
+
+            // A newer command has arrived (or shutdown requested): the in-flight
+            // decode should abort so the new target can be applied.
+            let cancelled = || control.seq() != serving.get() || control.is_shutdown();
+
+            // Non-blocking send that retries when the bounded channel is full,
+            // aborting if a newer command arrives so a stale decode cannot block
+            // forever on a full channel.
+            let worker_send =
+                |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
                     let mut event = event;
                     loop {
                         match tx.try_send(event) {
-                            Ok(()) => {
-                                let prev = full_count.swap(0, Ordering::Relaxed);
-                                if prev > 0 {
-                                    flog!("[worker_send] nonce={} unblocked after {} full retries", expected, prev);
-                                }
-                                return Ok(());
-                            }
+                            Ok(()) => return Ok(()),
                             Err(TrySendError::Full(returned)) => {
-                                if nonce.load(Ordering::Acquire) != expected {
-                                    flog!("[worker_send] nonce={} CANCELLED while channel full", expected);
+                                if cancelled() {
                                     return Err(WORKER_CANCELLED.to_string());
                                 }
-                                full_count.fetch_add(1, Ordering::Relaxed);
                                 thread::sleep(std::time::Duration::from_millis(1));
                                 event = returned;
                             }
@@ -1235,150 +1255,185 @@ impl PlaybackSession {
                             }
                         }
                     }
+                };
+
+            // Open the file and decoders once. Errors map to open/playback
+            // failure exactly as the per-operation worker did.
+            let open_result = unsafe {
+                DecodeSession::open(
+                    &source,
+                    &device,
+                    audio_format,
+                    start_position,
+                    decode_preference,
+                    &cancelled,
+                    &mut |mode, hw_fallback_count, rotation_quarter_turns| {
+                        let (seek_gen, op_id) = gen_cell.get();
+                        worker_send(
+                            SessionEvent::DecodeModeSelected {
+                                open_gen,
+                                seek_gen,
+                                op_id,
+                                mode,
+                                hw_fallback_count,
+                                rotation_quarter_turns,
+                            },
+                            &sender,
+                        )
+                    },
+                    &mut |duration| {
+                        let (seek_gen, op_id) = gen_cell.get();
+                        worker_send(
+                            SessionEvent::MediaDurationKnown {
+                                open_gen,
+                                seek_gen,
+                                op_id,
+                                duration,
+                            },
+                            &sender,
+                        )
+                    },
+                )
+            };
+            let mut session = match open_result {
+                Ok(Some(session)) => session,
+                Ok(None) => return,
+                Err(error) => {
+                    if !control.is_shutdown() {
+                        let (seek_gen, op_id) = gen_cell.get();
+                        let event = if error.contains("device removed")
+                            || device.is_device_removed()
+                        {
+                            SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
+                        } else if start_position.is_some() {
+                            SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
+                        } else {
+                            SessionEvent::OpenFailed { open_gen, op_id, error }
+                        };
+                        let _ = worker_send(event, &sender);
+                    }
+                    return;
                 }
             };
 
-            let decode_result = ffmpeg::stream_media(
-                &*source,
-                &device,
-                audio_format,
-                start_position,
-                decode_preference,
-                open_gen,
-                seek_gen,
-                op_id,
-                |mode, hw_fallback_count, rotation_quarter_turns| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
-                        return Err(WORKER_CANCELLED.to_string());
-                    }
-                    worker_send(
-                        SessionEvent::DecodeModeSelected {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                            mode,
-                            hw_fallback_count,
-                            rotation_quarter_turns,
-                        },
-                        &worker_nonce,
-                        expected_nonce,
-                        &sender,
-                    )
-                },
-                |duration| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
-                        return Err(WORKER_CANCELLED.to_string());
-                    }
-                    worker_send(
-                        SessionEvent::MediaDurationKnown {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                            duration,
-                        },
-                        &worker_nonce,
-                        expected_nonce,
-                        &sender,
-                    )
-                },
-                || worker_nonce.load(Ordering::Acquire) != expected_nonce,
-                |frame| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
-                        return Err(WORKER_CANCELLED.to_string());
-                    }
-                    worker_send(
-                        SessionEvent::VideoFrameReady(frame),
-                        &worker_nonce,
-                        expected_nonce,
-                        &sender,
-                    )
-                },
-                |frame| {
-                    if worker_nonce.load(Ordering::Acquire) != expected_nonce {
-                        return Err(WORKER_CANCELLED.to_string());
-                    }
-                    worker_send(
-                        SessionEvent::AudioFrameReady(frame),
-                        &worker_nonce,
-                        expected_nonce,
-                        &audio_sender,
-                    )
-                },
-            );
+            let mut on_decode_mode = |mode, hw_fallback_count, rotation_quarter_turns| {
+                let (seek_gen, op_id) = gen_cell.get();
+                worker_send(
+                    SessionEvent::DecodeModeSelected {
+                        open_gen,
+                        seek_gen,
+                        op_id,
+                        mode,
+                        hw_fallback_count,
+                        rotation_quarter_turns,
+                    },
+                    &sender,
+                )
+            };
+            let mut on_video = |frame| worker_send(SessionEvent::VideoFrameReady(frame), &sender);
+            let mut on_audio =
+                |frame| worker_send(SessionEvent::AudioFrameReady(frame), &audio_sender);
 
-            match decode_result {
-                Ok(StreamStatus::Completed(summary)) => {
-                    if worker_nonce.load(Ordering::Acquire) == expected_nonce {
-                        let _ = worker_send(
-                            SessionEvent::VideoStreamEnded {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                            },
-                            &worker_nonce,
-                            expected_nonce,
-                            &sender,
-                        );
+            // Persistent decode loop: decode the current position to EOF, then
+            // block for the next seek command (or shutdown). A seek arriving
+            // mid-decode trips `cancelled`, aborting run_to_eof so the new
+            // target is applied via seek_and_flush without reopening the file.
+            loop {
+                let (cur_seek_gen, cur_op_id) = gen_cell.get();
+                let result = unsafe {
+                    session.run_to_eof(
+                        &device,
+                        open_gen,
+                        cur_seek_gen,
+                        cur_op_id,
+                        &cancelled,
+                        &mut on_decode_mode,
+                        &mut on_video,
+                        &mut on_audio,
+                    )
+                };
+                if control.is_shutdown() {
+                    break;
+                }
+                match result {
+                    Ok(StreamStatus::Completed(_)) => {
+                        // Only announce end-of-stream if no newer command has
+                        // superseded this run.
+                        if control.seq() == serving.get() {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            let _ = worker_send(
+                                SessionEvent::VideoStreamEnded { open_gen, seek_gen, op_id },
+                                &sender,
+                            );
+                            if session.had_audio_stream() {
+                                let _ = worker_send(
+                                    SessionEvent::AudioStreamEnded { open_gen, seek_gen, op_id },
+                                    &audio_sender,
+                                );
+                            }
+                        }
                     }
-                    if summary.had_audio_stream
-                        && worker_nonce.load(Ordering::Acquire) == expected_nonce
-                    {
-                        let _ = worker_send(
-                            SessionEvent::AudioStreamEnded {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                            },
-                            &worker_nonce,
-                            expected_nonce,
-                            &audio_sender,
-                        );
+                    Ok(StreamStatus::Cancelled) => {}
+                    Err(ref error) if error == WORKER_CANCELLED => {}
+                    Err(error) => {
+                        let (seek_gen, op_id) = gen_cell.get();
+                        let event = if error.contains("device removed")
+                            || device.is_device_removed()
+                        {
+                            SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
+                        } else {
+                            SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
+                        };
+                        let _ = worker_send(event, &sender);
                     }
                 }
-                Ok(StreamStatus::Cancelled) => {}
-                Err(error) if error == WORKER_CANCELLED => {}
-                Err(error) => {
-                    // Device-removed errors from the worker thread should
-                    // trigger the normal device recovery path rather than
-                    // entering the terminal Error state.
-                    let event = if error.contains("device removed")
-                        || device.is_device_removed()
-                    {
-                        SessionEvent::DeviceLost {
-                            open_gen,
-                            seek_gen,
-                            op_id,
+
+                let (command, new_seq) = control.wait_next();
+                match command {
+                    DecodeCommand::Shutdown => break,
+                    DecodeCommand::Seek { target, seek_gen, op_id } => {
+                        serving.set(new_seq);
+                        gen_cell.set((seek_gen, op_id));
+                        if let Err(error) = unsafe { session.seek(target) } {
+                            let event = if error.contains("device removed")
+                                || device.is_device_removed()
+                            {
+                                SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
+                            } else {
+                                SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
+                            };
+                            let _ = worker_send(event, &sender);
                         }
-                    } else if start_position.is_some() {
-                        SessionEvent::PlaybackFailed {
-                            open_gen,
-                            seek_gen,
-                            op_id,
-                            error,
-                        }
-                    } else {
-                        SessionEvent::OpenFailed {
-                            open_gen,
-                            op_id,
-                            error,
-                        }
-                    };
-                    if worker_nonce.load(Ordering::Acquire) == expected_nonce {
-                        let _ = worker_send(event, &worker_nonce, expected_nonce, &sender);
                     }
                 }
             }
         });
     }
 
-    fn reserve_worker_nonce(&self) -> u64 {
-        self.worker_nonce
-            .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1)
+    /// Whether a persistent decode thread is running that can serve a seek of
+    /// the current decode preference as an in-place command (rather than a
+    /// reopen). False after a preference change (HW↔SW) until respawned.
+    fn decode_thread_serves_current(&self) -> bool {
+        self.decode_control.is_some()
+            && self.decode_thread_preference == Some(self.decode_preference)
     }
 
-    fn cancel_active_worker(&self) {
-        let _ = self.worker_nonce.fetch_add(1, Ordering::AcqRel);
+    /// Signal the persistent decode thread to stop. When `wait` is set, block
+    /// briefly until it has exited (releasing its device clone and codecs)
+    /// before the caller rebuilds the device or drops the session.
+    fn teardown_decode_thread(&mut self, wait: bool) {
+        if let Some(control) = self.decode_control.take() {
+            control.send_shutdown();
+        }
+        self.decode_thread_preference = None;
+        if wait {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while self.active_worker_count.load(Ordering::Acquire) > 0
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
     }
 
     fn handle_resize(
@@ -1608,7 +1663,7 @@ impl PlaybackSession {
                             let target = self.in_point.unwrap_or(Duration::ZERO);
                             self.seek(SeekTarget::new(target), now)?;
                         } else {
-                            self.cancel_active_worker();
+                            self.teardown_decode_thread(false);
                             // Clear op_id so residual events in the channel
                             // don't pass is_current_frame and restart playback.
                             self.active_operation_id = None;
@@ -2082,6 +2137,10 @@ impl PlaybackSession {
 
         self.metrics.note_device_recovery_started(now);
         flog!("device recovery: {reason}");
+        // The decode thread holds a clone of the device being destroyed — wait
+        // for it to exit before rebuilding so its codec/device teardown cannot
+        // race the new device.
+        self.teardown_decode_thread(true);
         if let Err(error) = self.presenter.rebuild_device(&self.window) {
             flog!("device recovery failed: {error}");
             self.fail_playback(format!("device recovery failed: {error}"));
@@ -2155,7 +2214,7 @@ impl PlaybackSession {
     }
 
     fn fail_open(&mut self, error: String) {
-        self.cancel_active_worker();
+        self.teardown_decode_thread(false);
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
@@ -2165,7 +2224,7 @@ impl PlaybackSession {
     }
 
     fn fail_playback(&mut self, error: String) {
-        self.cancel_active_worker();
+        self.teardown_decode_thread(false);
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
