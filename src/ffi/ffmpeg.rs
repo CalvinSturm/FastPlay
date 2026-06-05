@@ -114,14 +114,77 @@ where
     A: FnMut(PendingAudioFrame) -> Result<(), String>,
     C: Fn() -> bool,
 {
-    let source_path = source
-        .path()
-        .to_str()
-        .ok_or_else(|| "media path must be valid UTF-8 for FFmpeg open".to_string())?;
-    let source_cstr =
-        CString::new(source_path).map_err(|_| "media path contained NUL".to_string())?;
-
+    // SAFETY: the whole FFmpeg pipeline is unsafe FFI. The DecodeSession owns
+    // every C resource (format context, codecs, packet, frame) and frees them
+    // on drop.
     unsafe {
+        let mut session = match DecodeSession::open(
+            source,
+            device,
+            audio_output_format,
+            start_position,
+            decode_preference,
+            &should_cancel,
+            &mut on_decode_mode,
+            &mut on_duration,
+        )? {
+            Some(session) => session,
+            None => return Ok(StreamStatus::Cancelled),
+        };
+
+        session.run_to_eof(
+            device,
+            open_gen,
+            seek_gen,
+            op_id,
+            &should_cancel,
+            &mut on_decode_mode,
+            &mut on_video,
+            &mut on_audio,
+        )
+    }
+}
+
+/// One open media file with its video (and optional audio) decoders, ready to
+/// decode. Extracted from the former monolithic `stream_media` so a future
+/// persistent-decoder design can seek within an open session instead of
+/// reopening the file per operation. Phase 1: behavior is identical — exactly
+/// one session is opened and run to EOF per `stream_media` call.
+struct DecodeSession {
+    input: InputContext,
+    video: VideoDecoder,
+    audio: Option<AudioDecoder>,
+    audio_batch: Option<AudioBatcher>,
+    packet: Packet,
+    frame: Frame,
+    summary: StreamSummary,
+    /// Position the decoder is currently seeked to (None = start of stream).
+    /// Used to restart decoding after a mid-stream hardware→software fallback.
+    position: Option<Duration>,
+}
+
+impl DecodeSession {
+    /// Open the file, find streams, and allocate the video/audio decoders.
+    /// Returns `Ok(None)` if cancellation was signalled during the (expensive)
+    /// open so no decode work begins. Reports the selected decode mode and the
+    /// media duration through the callbacks, then applies `start_position`.
+    unsafe fn open(
+        source: &MediaSource,
+        device: &D3D11Device,
+        audio_output_format: AudioStreamFormat,
+        start_position: Option<Duration>,
+        decode_preference: VideoDecodePreference,
+        should_cancel: &impl Fn() -> bool,
+        on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
+        on_duration: &mut impl FnMut(Duration) -> Result<(), String>,
+    ) -> Result<Option<Self>, String> {
+        let source_path = source
+            .path()
+            .to_str()
+            .ok_or_else(|| "media path must be valid UTF-8 for FFmpeg open".to_string())?;
+        let source_cstr =
+            CString::new(source_path).map_err(|_| "media path contained NUL".to_string())?;
+
         let mut format_context: *mut AVFormatContext = null_mut();
         ffmpeg_check(
             avformat_open_input(
@@ -144,21 +207,21 @@ where
         // threads that haven't reached the main decode loop yet, exhausting
         // the GPU's session limit (typically 8-16) and causing device loss.
         if should_cancel() {
-            return Ok(StreamStatus::Cancelled);
+            return Ok(None);
         }
 
-        let mut video = open_video_decoder(input.0, device, decode_preference)?;
+        let video = open_video_decoder(input.0, device, decode_preference)?;
         // Re-check after decoder creation so a cancel that arrived during
         // open_video_decoder drops the session immediately.
         if should_cancel() {
-            return Ok(StreamStatus::Cancelled);
+            return Ok(None);
         }
-        let mut audio = open_audio_decoder(input.0, audio_output_format)?;
-        let mut audio_batch = audio
+        let audio = open_audio_decoder(input.0, audio_output_format)?;
+        let audio_batch = audio
             .as_ref()
             .map(|audio| AudioBatcher::new(audio.output_format));
         on_decode_mode(video.mode, video.hw_fallback_count, video.rotation_quarter_turns)?;
-        let mut summary = StreamSummary {
+        let summary = StreamSummary {
             had_audio_stream: audio.is_some(),
             produced_video_frames: 0,
             produced_audio_frames: 0,
@@ -190,6 +253,32 @@ where
         }
         let frame = Frame(frame);
 
+        Ok(Some(Self {
+            input,
+            video,
+            audio,
+            audio_batch,
+            packet,
+            frame,
+            summary,
+            position: start_position,
+        }))
+    }
+
+    /// Decode from the current position to end of stream, delivering frames
+    /// through the callbacks. Returns `Cancelled` if cancellation was signalled
+    /// mid-stream, otherwise `Completed` with the run summary.
+    unsafe fn run_to_eof(
+        &mut self,
+        device: &D3D11Device,
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        should_cancel: &impl Fn() -> bool,
+        on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
+        on_video: &mut impl FnMut(PendingVideoFrame) -> Result<(), String>,
+        on_audio: &mut impl FnMut(PendingAudioFrame) -> Result<(), String>,
+    ) -> Result<StreamStatus, String> {
         let mut hw_mid_fallback_done = false;
 
         loop {
@@ -197,46 +286,46 @@ where
                 return Ok(StreamStatus::Cancelled);
             }
 
-            let read_status = av_read_frame(input.0, packet.0);
+            let read_status = av_read_frame(self.input.0, self.packet.0);
             if read_status == fastplay_ffmpeg_error_eof() {
                 break;
             }
             ffmpeg_check(read_status, "av_read_frame")?;
 
-            if (*packet.0).stream_index == video.stream_index as i32 {
+            if (*self.packet.0).stream_index == self.video.stream_index as i32 {
                 // D3D11VA's avcodec_send_packet may call into the video
                 // context — hold the lock to prevent racing with the UI
                 // thread's VideoProcessorBlt.
-                let send_result = if video.mode == VideoDecodeMode::HardwareD3D11 {
+                let send_result = if self.video.mode == VideoDecodeMode::HardwareD3D11 {
                     if device.is_device_removed() {
-                        av_packet_unref(packet.0);
+                        av_packet_unref(self.packet.0);
                         return Err("D3D11 device removed during hardware decode".into());
                     }
                     let _lock = device.lock_context();
-                    avcodec_send_packet(video.codec.0, packet.0)
+                    avcodec_send_packet(self.video.codec.0, self.packet.0)
                 } else {
-                    avcodec_send_packet(video.codec.0, packet.0)
+                    avcodec_send_packet(self.video.codec.0, self.packet.0)
                 };
                 if send_result < 0
-                    && video.mode == VideoDecodeMode::HardwareD3D11
+                    && self.video.mode == VideoDecodeMode::HardwareD3D11
                     && !hw_mid_fallback_done
                 {
                     // HW decode failed on first real packet — try software fallback.
-                    av_packet_unref(packet.0);
-                    match open_software_video_decoder(input.0) {
+                    av_packet_unref(self.packet.0);
+                    match open_software_video_decoder(self.input.0) {
                         Ok(mut sw_decoder) => {
                             flog!(
                                 "hw decode failed mid-stream ({}), falling back to software",
                                 send_result
                             );
-                            sw_decoder.hw_fallback_count = video.hw_fallback_count + 1;
-                            video = sw_decoder;
+                            sw_decoder.hw_fallback_count = self.video.hw_fallback_count + 1;
+                            self.video = sw_decoder;
                             hw_mid_fallback_done = true;
-                            summary.decode_mode = video.mode;
-                            summary.hw_fallback_count = video.hw_fallback_count;
-                            on_decode_mode(video.mode, video.hw_fallback_count, video.rotation_quarter_turns)?;
-                            let restart = start_position.unwrap_or(Duration::ZERO);
-                            seek_and_flush(input.0, &video, audio.as_ref(), restart)?;
+                            self.summary.decode_mode = self.video.mode;
+                            self.summary.hw_fallback_count = self.video.hw_fallback_count;
+                            on_decode_mode(self.video.mode, self.video.hw_fallback_count, self.video.rotation_quarter_turns)?;
+                            let restart = self.position.unwrap_or(Duration::ZERO);
+                            seek_and_flush(self.input.0, &self.video, self.audio.as_ref(), restart)?;
                             continue;
                         }
                         Err(sw_error) => {
@@ -247,44 +336,44 @@ where
                     }
                 }
                 ffmpeg_check(send_result, "avcodec_send_packet(video)")?;
-                av_packet_unref(packet.0);
+                av_packet_unref(self.packet.0);
                 receive_video_frames(
-                    &mut video,
-                    frame.0,
+                    &mut self.video,
+                    self.frame.0,
                     device,
                     open_gen,
                     seek_gen,
                     op_id,
-                    &mut summary.produced_video_frames,
-                    &mut on_video,
+                    &mut self.summary.produced_video_frames,
+                    on_video,
                     &|| should_cancel(),
                 )?;
                 continue;
             }
 
-            if let Some(audio) = audio.as_mut() {
-                if (*packet.0).stream_index == audio.stream_index as i32 {
+            if let Some(audio) = self.audio.as_mut() {
+                if (*self.packet.0).stream_index == audio.stream_index as i32 {
                     ffmpeg_check(
-                        avcodec_send_packet(audio.codec.0, packet.0),
+                        avcodec_send_packet(audio.codec.0, self.packet.0),
                         "avcodec_send_packet(audio)",
                     )?;
-                    av_packet_unref(packet.0);
+                    av_packet_unref(self.packet.0);
                     receive_audio_frames(
                         audio,
-                    frame.0,
-                    open_gen,
-                    seek_gen,
-                    op_id,
-                    audio_batch.as_mut(),
-                    &mut summary.produced_audio_frames,
-                    &mut on_audio,
-                    &|| should_cancel(),
-                )?;
-                continue;
-            }
+                        self.frame.0,
+                        open_gen,
+                        seek_gen,
+                        op_id,
+                        self.audio_batch.as_mut(),
+                        &mut self.summary.produced_audio_frames,
+                        on_audio,
+                        &|| should_cancel(),
+                    )?;
+                    continue;
+                }
             }
 
-            av_packet_unref(packet.0);
+            av_packet_unref(self.packet.0);
         }
 
         if should_cancel() {
@@ -292,54 +381,54 @@ where
         }
 
         {
-            let _lock = if video.mode == VideoDecodeMode::HardwareD3D11 {
+            let _lock = if self.video.mode == VideoDecodeMode::HardwareD3D11 {
                 Some(device.lock_context())
             } else {
                 None
             };
             ffmpeg_check(
-                avcodec_send_packet(video.codec.0, null()),
+                avcodec_send_packet(self.video.codec.0, null()),
                 "avcodec_send_packet(video flush)",
             )?;
         }
         receive_video_frames(
-            &mut video,
-            frame.0,
+            &mut self.video,
+            self.frame.0,
             device,
             open_gen,
             seek_gen,
             op_id,
-            &mut summary.produced_video_frames,
-            &mut on_video,
+            &mut self.summary.produced_video_frames,
+            on_video,
             &|| should_cancel(),
         )?;
 
-        if let Some(audio) = audio.as_mut() {
+        if let Some(audio) = self.audio.as_mut() {
             ffmpeg_check(
                 avcodec_send_packet(audio.codec.0, null()),
                 "avcodec_send_packet(audio flush)",
             )?;
             receive_audio_frames(
                 audio,
-                frame.0,
+                self.frame.0,
                 open_gen,
                 seek_gen,
                 op_id,
-                audio_batch.as_mut(),
-                &mut summary.produced_audio_frames,
-                &mut on_audio,
+                self.audio_batch.as_mut(),
+                &mut self.summary.produced_audio_frames,
+                on_audio,
                 &|| should_cancel(),
             )?;
-            if let Some(batch) = audio_batch.as_mut() {
-                batch.flush(open_gen, seek_gen, op_id, &mut summary.produced_audio_frames, &mut on_audio)?;
+            if let Some(batch) = self.audio_batch.as_mut() {
+                batch.flush(open_gen, seek_gen, op_id, &mut self.summary.produced_audio_frames, on_audio)?;
             }
         }
 
-        if summary.produced_video_frames == 0 {
+        if self.summary.produced_video_frames == 0 {
             return Err("no decodable video frame was produced".into());
         }
 
-        Ok(StreamStatus::Completed(summary))
+        Ok(StreamStatus::Completed(self.summary))
     }
 }
 
