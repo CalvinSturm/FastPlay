@@ -8,7 +8,7 @@ use windows::{
             Direct3D::{Fxc::D3DCompile, ID3DBlob, D3D_DRIVER_TYPE_HARDWARE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST},
             Direct3D11::{
                 D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
-                ID3D11BlendState, ID3D11Buffer, ID3D11InputLayout, ID3D11PixelShader, ID3D11Query,
+                ID3D11BlendState, ID3D11Buffer, ID3D11InputLayout, ID3D11PixelShader,
                 ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
                 ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice,
                 D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
@@ -17,7 +17,6 @@ use windows::{
                 D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_ELEMENT_DESC,
                 D3D11_INPUT_PER_VERTEX_DATA, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
-                D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
                 D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
                 D3D11_TEX2D_VPIV, D3D11_VIEWPORT,
                 D3D11_TEX2D_VPOV, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
@@ -252,37 +251,6 @@ impl D3D11Device {
         self.device.as_raw()
     }
 
-    fn wait_for_immediate_context_idle(&self) -> Result<(), Box<dyn Error>> {
-        let mut query = None;
-        let desc = D3D11_QUERY_DESC {
-            Query: D3D11_QUERY_EVENT,
-            MiscFlags: 0,
-        };
-        unsafe {
-            self.device.CreateQuery(&desc, Some(&mut query))?;
-        }
-        let query: ID3D11Query = query.ok_or(D3D11Error("CreateQuery returned no event query"))?;
-
-        unsafe {
-            self.context.End(&query);
-            loop {
-                let mut done = 0u32;
-                match self.context.GetData(
-                    &query,
-                    Some((&mut done as *mut u32).cast()),
-                    size_of::<u32>() as u32,
-                    0,
-                ) {
-                    Ok(()) if done != 0 => break,
-                    Ok(()) => std::thread::yield_now(),
-                    Err(error) => return Err(Box::new(error)),
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub(crate) unsafe fn surface_from_raw_texture(
         &self,
         texture: *mut c_void,
@@ -341,7 +309,15 @@ impl D3D11Device {
             subresource_index,
             None,
         );
-        self.wait_for_immediate_context_idle()?;
+        // No GPU flush here. This copy, the next frame's decode (which reuses
+        // the source pool slot after av_frame_unref), and the UI thread's
+        // later VideoProcessorBlt of `owned_texture` are all submitted to the
+        // same immediate context under context_lock, so the GPU executes them
+        // in submission order — the copy is guaranteed to finish before either
+        // the slot is overwritten or the result is read. Blocking the worker
+        // (and thus the lock, and thus UI presentation) on a per-frame event
+        // query was a band-aid for the decoder-teardown race now fixed in
+        // CodecContext::Drop; it is unnecessary for correctness.
 
         Ok(VideoSurface {
             texture: owned_texture,
