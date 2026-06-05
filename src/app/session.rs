@@ -116,8 +116,6 @@ pub struct PlaybackSession {
     has_shown_content: bool,
     auto_replay: bool,
     pause_after_seek: bool,
-    deferred_seek: Option<SeekTarget>,
-    last_worker_spawned_at: Option<Instant>,
     playback_rate: f64,
     in_point: Option<Duration>,
     out_point: Option<Duration>,
@@ -129,12 +127,6 @@ pub struct PlaybackSession {
     /// recomputed several times per tick; the value is stable across those
     /// reads because no audio is submitted between them.
     cached_buffered_frames: Cell<Option<u32>>,
-    /// True when timeline scrub churn forced this session from hardware to
-    /// software decode as a d3d11 crash workaround. Distinguishes that
-    /// auto-fallback (revertible to hardware once scrubbing settles) from a
-    /// user `--force-sw` request or a genuine hardware-unavailable fallback,
-    /// neither of which should be reverted.
-    scrub_forced_software: bool,
 }
 
 impl PlaybackSession {
@@ -205,8 +197,6 @@ impl PlaybackSession {
             has_shown_content: false,
             auto_replay: false,
             pause_after_seek: false,
-            deferred_seek: None,
-            last_worker_spawned_at: None,
             playback_rate: 1.0,
             in_point: None,
             out_point: None,
@@ -214,7 +204,6 @@ impl PlaybackSession {
             saved_volume,
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
-            scrub_forced_software: false,
         })
     }
 
@@ -311,7 +300,6 @@ impl PlaybackSession {
         self.in_point = None;
         self.out_point = None;
         self.loop_range = false;
-        self.scrub_forced_software = false;
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
@@ -347,65 +335,13 @@ impl PlaybackSession {
         pause_after: bool,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.decode_preference != VideoDecodePreference::ForceSoftware
-            && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
-        {
-            // This file is reproducibly crashing in d3d11.dll under timeline
-            // stress-scrub while the hardware path is active. Switch to
-            // software decode for the scrub churn; tick() reverts to hardware
-            // once scrubbing settles so steady playback isn't stuck on the
-            // slower (stuttering) software path.
-            self.decode_preference = VideoDecodePreference::ForceSoftware;
-            self.scrub_forced_software = true;
-            flog!("[scrub_seek] forcing software decode for scrub churn");
-            if self.overlay.show_decode_info {
-                self.update_window_title();
-            }
-        }
+        // Scrubbing stays on the hardware path: the persistent decoder seeks in
+        // place (av_seek_frame + flush) with no per-seek decoder spawn/teardown,
+        // so the d3d11 scrub-crash that once forced a software fallback can no
+        // longer occur, and latest-command-wins coalescing keeps the preview
+        // responsive under rapid churn.
         self.pause_after_seek = pause_after;
         self.seek(target, now)
-    }
-
-    /// Minimum quiet period after the last seek-worker spawn before reverting a
-    /// scrub-forced software session back to hardware decode. Long enough to be
-    /// confident the scrub drag has ended, so we never re-enter the hardware
-    /// path during the rapid-churn window that crashes d3d11.
-    const HARDWARE_REVERT_SETTLE: Duration = Duration::from_millis(1500);
-
-    /// If scrub churn dropped this session to software decode and scrubbing has
-    /// since settled, re-prime the hardware path at the current position so
-    /// steady playback isn't stuck on the slower (stuttering) software decoder.
-    /// Software decode is retained only for the brief churn window; the crash
-    /// guard targets rapid scrubbing, not a single settled seek or steady play.
-    fn maybe_revert_to_hardware(
-        &mut self,
-        now: Instant,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.scrub_forced_software {
-            return Ok(());
-        }
-        // Only revert during steady, hardware-eligible playback: not mid-seek,
-        // no pending or deferred scrub, worker count down to the single steady
-        // decode worker, and after a quiet settle window.
-        if self.state != PlaybackState::Playing
-            || self.pending_seek_target.is_some()
-            || self.deferred_seek.is_some()
-            || self.active_worker_count.load(Ordering::Acquire) >= 2
-            || self
-                .last_worker_spawned_at
-                .is_none_or(|t| now.duration_since(t) < Self::HARDWARE_REVERT_SETTLE)
-        {
-            return Ok(());
-        }
-
-        let position = self.snapshot(now).position;
-        flog!(
-            "[revert_hw] scrub settled, re-priming hardware decode at {:.3}s",
-            position.as_secs_f64()
-        );
-        self.scrub_forced_software = false;
-        self.decode_preference = VideoDecodePreference::Auto;
-        self.seek(SeekTarget::new(position), now)
     }
 
     pub fn apply_command(
@@ -633,24 +569,6 @@ impl PlaybackSession {
             if let Some(size) = self.window.take_resize_request() {
                 self.handle_resize(size, now)?;
             }
-
-            // Execute any deferred seek once the throttle interval has
-            // elapsed, old worker events have been drained above, and the
-            // number of live worker threads is below the concurrency cap.
-            if self.deferred_seek.is_some()
-                && self.last_worker_spawned_at.is_none_or(|t| {
-                    now.duration_since(t) >= Self::SEEK_WORKER_MIN_INTERVAL
-                })
-                && self.active_worker_count.load(Ordering::Acquire) < 2
-            {
-                if let Some(target) = self.deferred_seek.take() {
-                    if let Some(source) = self.current_source.clone() {
-                        self.execute_seek(source, target, now)?;
-                    }
-                }
-            }
-
-            self.maybe_revert_to_hardware(now)?;
 
             self.submit_due_audio(now)?;
             if self.advance_video_playback(now)? {
@@ -960,13 +878,6 @@ impl PlaybackSession {
         Ok(())
     }
 
-    /// Minimum interval between spawning decoder worker threads.  Rapid
-    /// scrubbing can request hundreds of seeks per second; each one opens the
-    /// file and allocates a hardware decoder on the GPU.  Most GPUs only
-    /// support 8-16 concurrent decode sessions, so spawning without throttling
-    /// can exhaust GPU resources and crash the driver.
-    const SEEK_WORKER_MIN_INTERVAL: Duration = Duration::from_millis(30);
-
     fn seek(&mut self, target: SeekTarget, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         if self.current_source.is_none() {
             return Ok(());
@@ -984,44 +895,9 @@ impl PlaybackSession {
         };
         let target = SeekTarget::new(clamped_position);
 
-        // Defer if a worker was spawned very recently or if too many worker
-        // threads are still alive.  Each worker holds a hardware decoder on
-        // the GPU; allowing more than 2 concurrent workers risks exhausting
-        // the GPU's session limit (typically 8-16), especially when multiple
-        // FastPlay instances are running.
-        let workers_alive = self.active_worker_count.load(Ordering::Acquire);
-        let throttled = self.last_worker_spawned_at.is_some_and(|t| now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL);
-        let should_defer = throttled || workers_alive >= 2;
-        if should_defer {
-            if self.decode_preference != VideoDecodePreference::ForceSoftware
-                && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
-            {
-                // Repeated scrub seeks are still provoking d3d11.dll crashes
-                // on some files in the hardware path. Use software decode while
-                // seek churn is detected; tick() reverts to hardware once it
-                // settles.
-                self.decode_preference = VideoDecodePreference::ForceSoftware;
-                self.scrub_forced_software = true;
-                flog!(
-                    "[seek] forcing software decode after hardware seek churn"
-                );
-                if self.overlay.show_decode_info {
-                    self.update_window_title();
-                }
-            }
-            flog!(
-                "[seek] DEFERRED pos={:.3}s workers={} throttled={}",
-                clamped_position.as_secs_f64(),
-                workers_alive,
-                throttled
-            );
-            self.deferred_seek = Some(target);
-            // Update the visible seek state so the timeline preview stays
-            // responsive even while the worker spawn is deferred.
-            self.pending_seek_target = Some(target);
-            return Ok(());
-        }
-
+        // No throttle/defer: the persistent decoder serves the seek in place and
+        // coalesces rapid scrub seeks to the latest target, so there is no
+        // per-seek decoder spawn to rate-limit.
         let source = self.current_source.clone().unwrap();
         self.execute_seek(source, target, now)
     }
@@ -1055,13 +931,10 @@ impl PlaybackSession {
         // Keep the previously selected surface visible until the new frame
         // arrives — `validate_and_select_surface` will swap it atomically
         // when the first frame of the new seek generation is presented.
-        // The hardware-churn motivation for dropping it has moved to the
-        // software-decode fallback above.
         self.prepare_runtime_for_operation_inner(false, false, false)?;
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        self.deferred_seek = None;
         if self.decode_thread_serves_current() {
             // Reuse the open file: tell the running thread to seek in place.
             // Bumping seek_gen above already gates out its old in-flight frames.
@@ -1074,7 +947,6 @@ impl PlaybackSession {
             self.teardown_decode_thread(false);
             self.spawn_decode_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
         }
-        self.last_worker_spawned_at = Some(now);
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
         self.overlay.subtitle_clock_base = Some(target.position());
@@ -1103,7 +975,6 @@ impl PlaybackSession {
         self.state = next_state;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        self.deferred_seek = None;
         self.spawn_decode_thread(source, start_position, open_gen, seek_gen, op_id);
         Ok(())
     }
