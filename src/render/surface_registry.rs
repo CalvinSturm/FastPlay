@@ -27,12 +27,18 @@ pub struct SurfaceRegistry {
     /// Value of `next_handle` at the start of the current epoch.
     /// Handles issued in the current epoch satisfy `handle > epoch_base`.
     epoch_base: u64,
+    /// Number of slots currently holding a surface. Tracked incrementally so
+    /// the registry can self-compact (advance the epoch) in O(1) once it
+    /// empties, instead of letting `entries` grow unbounded across long
+    /// playback / scrubbing.
+    alive: usize,
 }
 
 impl SurfaceRegistry {
     pub fn clear_for_new_epoch(&mut self) {
         self.epoch_base = self.next_handle;
         self.entries.clear();
+        self.alive = 0;
     }
 
     pub fn insert(
@@ -48,6 +54,7 @@ impl SurfaceRegistry {
             self.entries.resize_with(index + 1, || None);
         }
         self.entries[index] = Some(SurfaceEntry { open_gen, seek_gen, surface });
+        self.alive += 1;
         handle
     }
 
@@ -64,11 +71,23 @@ impl SurfaceRegistry {
 
     pub fn remove(&mut self, handle: VideoSurfaceHandle) -> Option<SurfaceEntry> {
         let index = self.index_of(handle)?;
-        self.entries.get_mut(index)?.take()
+        let taken = self.entries.get_mut(index)?.take();
+        if taken.is_some() {
+            self.alive -= 1;
+            // No live surfaces remain — and therefore no outstanding handle
+            // (queued frame or current_surface) references this epoch. Advance
+            // the epoch so the backing Vec is reclaimed. `next_handle` keeps
+            // climbing monotonically, so any stale handle is still safely
+            // rejected by `index_of`.
+            if self.alive == 0 {
+                self.clear_for_new_epoch();
+            }
+        }
+        taken
     }
 
-    /// Count how many surface slots currently hold a texture (diagnostic only).
+    /// Count how many slots currently hold a surface (diagnostic only).
     pub fn count_alive(&self) -> usize {
-        self.entries.iter().filter(|e| e.is_some()).count()
+        self.alive
     }
 }
