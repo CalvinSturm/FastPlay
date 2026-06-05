@@ -479,7 +479,7 @@ unsafe fn open_hardware_video_decoder(
     if codec_context.is_null() {
         return Err("avcodec_alloc_context3(video) returned null".into());
     }
-    let codec = CodecContext(codec_context);
+    let codec = CodecContext(codec_context, Some(device.clone()));
 
     let codec_parameters = fastplay_ffmpeg_stream_codecpar(stream);
     if codec_parameters.is_null() {
@@ -533,7 +533,7 @@ unsafe fn open_software_video_decoder(
     if codec_context.is_null() {
         return Err("avcodec_alloc_context3(video) returned null".into());
     }
-    let codec = CodecContext(codec_context);
+    let codec = CodecContext(codec_context, None);
 
     let codec_parameters = fastplay_ffmpeg_stream_codecpar(stream);
     if codec_parameters.is_null() {
@@ -588,7 +588,7 @@ unsafe fn open_audio_decoder(
     if codec_context.is_null() {
         return Err("avcodec_alloc_context3(audio) returned null".into());
     }
-    let codec = CodecContext(codec_context);
+    let codec = CodecContext(codec_context, None);
 
     let codec_parameters = fastplay_ffmpeg_stream_codecpar(stream);
     if codec_parameters.is_null() {
@@ -1164,10 +1164,21 @@ impl Drop for InputContext {
     }
 }
 
-struct CodecContext(*mut AVCodecContext);
+/// Owns an `AVCodecContext`.  Field `.0` is the raw pointer (kept as the first
+/// field so the many `.codec.0` call sites are unchanged).  Field `.1` holds the
+/// `D3D11Device` for hardware decoders, and is `None` for software/audio codecs.
+struct CodecContext(*mut AVCodecContext, Option<D3D11Device>);
 
 impl Drop for CodecContext {
     fn drop(&mut self) {
+        // For the D3D11VA hardware decoder, avcodec_free_context releases the
+        // decoder and its D3D11 surface pool through the shared
+        // ID3D11VideoContext — which SetMultithreadProtected does NOT cover.
+        // Serialize that teardown under context_lock so a cancelled HW worker
+        // cannot corrupt the immediate context while the live worker / UI
+        // thread is running VideoProcessorBlt.  Software and audio codecs carry
+        // no device, so they free without taking the lock.
+        let _lock = self.1.as_ref().map(|device| device.lock_context());
         unsafe {
             avcodec_free_context(&mut self.0);
         }
