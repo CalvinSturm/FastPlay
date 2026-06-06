@@ -106,13 +106,23 @@ impl TimelineUiState {
                 }
             }
         } else if self.scrubbing && self.was_left_button_down && !left_button_down {
+            // Land deterministically. Intermediate previews pause-after-seek, so
+            // when playback was running we must issue one authoritative final
+            // seek with `pause_after = false` to resume. Gating a TogglePause on
+            // `is_paused()` would miss the resume when the last preview seek has
+            // not yet settled to `Paused` (state is still `Playing`, sink already
+            // paused), leaving playback stuck. A single terminal reset here does
+            // not cause the WASAPI churn that rapid intermediate resets do. When
+            // the scrub began paused, the previews already land paused, so no
+            // resume is needed.
+            if !self.scrub_was_paused {
+                if let Some(target) = self.preview_target {
+                    session.scrub_seek(SeekTarget::new(target), false, now)?;
+                }
+            }
             self.scrub_origin = None;
             self.preview_target = None;
             self.scrubbing = false;
-            // Resume playback if it was playing before the scrub started.
-            if !self.scrub_was_paused && session.is_paused() {
-                session.apply_command(SessionCommand::TogglePause, now)?;
-            }
         }
 
         let replay_indicator_active = session
@@ -151,7 +161,13 @@ impl TimelineUiState {
         target: Duration,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        session.scrub_seek(SeekTarget::new(target), self.scrub_was_paused, now)
+        // Pause-preview every intermediate scrub target, regardless of whether
+        // playback was running when the drag began. This routes the seek through
+        // the `pause_after_seek` path, which only pauses the audio sink instead
+        // of doing a full `sink.reset()` per target — rapid resets churn WASAPI
+        // (0x88890005) and stall the audio clock, slowing playback after the
+        // scrub. The mouse-up handler resumes playback if `!scrub_was_paused`.
+        session.scrub_seek(SeekTarget::new(target), true, now)
     }
 
     fn sync_overlay(
