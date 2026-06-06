@@ -6,7 +6,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc,
     },
-    thread::{self, ThreadId},
+    thread::{self, JoinHandle, ThreadId},
     time::{Duration, Instant},
 };
 
@@ -77,6 +77,14 @@ pub struct PlaybackSession {
     /// this preference reuses the thread; a change (HW↔SW) respawns it.
     decode_thread_preference: Option<VideoDecodePreference>,
     active_worker_count: Arc<AtomicU32>,
+    /// Join handle for the current persistent decode thread. Kept so a
+    /// blocking teardown (`wait = true`) can *join* the worker — guaranteeing
+    /// its entire D3D11 teardown (decoder resources plus the captured device
+    /// clone it releases on exit) has completed before the caller destroys or
+    /// touches the shared device. Waiting on `active_worker_count` alone is
+    /// insufficient: the count is decremented before the device clone is
+    /// released, leaving a window where the worker is still inside d3d11.dll.
+    decode_join: Option<JoinHandle<()>>,
     /// Worker→UI channel for video frames and all control/error events.
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
@@ -162,6 +170,7 @@ impl PlaybackSession {
             decode_control: None,
             decode_thread_preference: None,
             active_worker_count: Arc::new(AtomicU32::new(0)),
+            decode_join: None,
             event_tx,
             event_rx,
             audio_event_tx,
@@ -1084,7 +1093,7 @@ impl PlaybackSession {
             worker_count.load(Ordering::Acquire)
         );
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             // Decrement the live-thread counter on any exit path.
             struct WorkerGuard(Arc<AtomicU32>);
             impl Drop for WorkerGuard {
@@ -1279,6 +1288,11 @@ impl PlaybackSession {
                 }
             }
         });
+        // Track the new worker so a blocking teardown can join it. Every spawn
+        // is preceded by `teardown_decode_thread(false)`, which has already
+        // signalled the previous worker to shut down; replacing the handle here
+        // detaches that already-exiting thread (it finishes on its own).
+        self.decode_join = Some(handle);
     }
 
     /// Whether a persistent decode thread is running that can serve a seek of
@@ -1298,6 +1312,17 @@ impl PlaybackSession {
         }
         self.decode_thread_preference = None;
         if wait {
+            // Join the worker so its full D3D11 teardown — including the device
+            // clone it releases as it unwinds — finishes before the caller
+            // destroys or touches the shared device. The worker aborts any
+            // in-flight send/decode the moment `is_shutdown` is set (see the
+            // `cancelled` closure), so this never blocks on a full channel.
+            if let Some(handle) = self.decode_join.take() {
+                let _ = handle.join();
+            }
+            // Belt-and-suspenders: wait out any detached straggler workers from
+            // a rapid reopen that still share the device, bounded so a wedged
+            // worker can never hang teardown indefinitely.
             let deadline = Instant::now() + Duration::from_millis(500);
             while self.active_worker_count.load(Ordering::Acquire) > 0
                 && Instant::now() < deadline
