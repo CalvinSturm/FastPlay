@@ -31,11 +31,7 @@ use std::time::{Duration, Instant};
 use app::commands::SessionCommand;
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
-use media::{
-    seek::SeekTarget,
-    source::MediaSource,
-    video::VideoDecodePreference,
-};
+use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
 use platform::input::InputEvent;
 use platform::window::NativeWindow;
 
@@ -111,6 +107,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::ToggleSubtitles => {
                     session.apply_command(SessionCommand::ToggleSubtitles, now)?;
                 }
+                InputEvent::SaveScreenshot => {
+                    session.apply_command(SessionCommand::SaveScreenshot, now)?;
+                }
                 InputEvent::SeekRelativeSeconds(offset_seconds) => {
                     let snapshot = session.snapshot(now);
                     let next_position = if offset_seconds >= 0 {
@@ -120,10 +119,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         snapshot
                             .position
-                            .saturating_sub(std::time::Duration::from_secs((-offset_seconds) as u64))
+                            .saturating_sub(std::time::Duration::from_secs(
+                                (-offset_seconds) as u64,
+                            ))
                     };
-                    session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), now)?;
-                    timeline_ui.seek_overlay_until = Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
+                    session
+                        .apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), now)?;
+                    timeline_ui.seek_overlay_until =
+                        Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
+                }
+                InputEvent::StepFrameForward => {
+                    session.apply_command(SessionCommand::StepFrameForward, now)?;
+                    timeline_ui.seek_overlay_until =
+                        Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
+                }
+                InputEvent::StepFrameBackward => {
+                    session.apply_command(SessionCommand::StepFrameBackward, now)?;
+                    timeline_ui.seek_overlay_until =
+                        Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
                 }
                 InputEvent::AdjustVolumeSteps(steps) => {
                     session.apply_command(SessionCommand::AdjustVolumeSteps(steps), now)?;
@@ -137,8 +150,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::ToggleBorderlessFullscreen => {
                     session.apply_command(SessionCommand::ToggleBorderlessFullscreen, now)?;
                 }
-                InputEvent::ZoomAtCursor { delta, cursor_x, cursor_y } => {
-                    session.apply_command(SessionCommand::ZoomAtCursor { delta, cursor_x, cursor_y }, now)?;
+                InputEvent::ZoomAtCursor {
+                    delta,
+                    cursor_x,
+                    cursor_y,
+                } => {
+                    session.apply_command(
+                        SessionCommand::ZoomAtCursor {
+                            delta,
+                            cursor_x,
+                            cursor_y,
+                        },
+                        now,
+                    )?;
                 }
                 InputEvent::ResetView => {
                     session.apply_command(SessionCommand::ResetView, now)?;
@@ -185,7 +209,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 InputEvent::PanDelta { dx, dy } => {
                     session.apply_command(
-                        SessionCommand::PanBy { dx: dx as f32, dy: dy as f32 },
+                        SessionCommand::PanBy {
+                            dx: dx as f32,
+                            dy: dy as f32,
+                        },
                         now,
                     )?;
                 }
@@ -218,7 +245,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn window_title_for(source: &MediaSource) -> String {
-    let name = source.path()
+    let name = source
+        .path()
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("FastPlay");

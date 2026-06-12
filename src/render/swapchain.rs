@@ -1,6 +1,6 @@
 use crate::{
     ffi::{
-        d3d11::{D3D11Device, SubtitleOverlay, VideoSurface},
+        d3d11::{BgraFrameCapture, D3D11Device, SubtitleOverlay, VideoSurface},
         dxgi::{DxgiSwapChain, PresentResult},
     },
     platform::window::NativeWindow,
@@ -33,8 +33,33 @@ impl SwapChainPresenter {
         volume_overlay: Option<&SubtitleOverlay>,
         help_overlay: Option<&SubtitleOverlay>,
     ) -> Result<PresentResult, Box<dyn std::error::Error>> {
-        self.swap_chain
-            .render(device, clear_color, subtitle_overlay, timeline_overlay, volume_overlay, help_overlay)
+        self.swap_chain.render(
+            device,
+            clear_color,
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+        )
+    }
+
+    pub fn render_with_capture(
+        &mut self,
+        device: &D3D11Device,
+        clear_color: [f32; 4],
+        subtitle_overlay: Option<&SubtitleOverlay>,
+        timeline_overlay: Option<&SubtitleOverlay>,
+        volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
+    ) -> Result<(PresentResult, BgraFrameCapture), Box<dyn std::error::Error>> {
+        self.swap_chain.render_with_capture(
+            device,
+            clear_color,
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+        )
     }
 
     pub fn resize(
@@ -57,8 +82,36 @@ impl SwapChainPresenter {
         help_overlay: Option<&SubtitleOverlay>,
         view: &crate::render::ViewTransform,
     ) -> Result<PresentResult, Box<dyn std::error::Error>> {
-        self.swap_chain
-            .render_surface(device, surface, subtitle_overlay, timeline_overlay, volume_overlay, help_overlay, view)
+        self.swap_chain.render_surface(
+            device,
+            surface,
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+            view,
+        )
+    }
+
+    pub fn render_surface_with_capture(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+        subtitle_overlay: Option<&SubtitleOverlay>,
+        timeline_overlay: Option<&SubtitleOverlay>,
+        volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
+        view: &crate::render::ViewTransform,
+    ) -> Result<(PresentResult, BgraFrameCapture), Box<dyn std::error::Error>> {
+        self.swap_chain.render_surface_with_capture(
+            device,
+            surface,
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+            view,
+        )
     }
 
     pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {
