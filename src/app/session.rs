@@ -661,10 +661,13 @@ impl PlaybackSession {
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 }
             }
-            loop {
-                if self.queued_video_frames.len() >= self.queued_video_capacity {
-                    break;
-                }
+            // Drain at least one channel-capacity worth of video/control events
+            // even when the decoded-video queue is already full. `push_video_frame`
+            // keeps the queue bounded by dropping old frames. If we stop draining
+            // here, the worker can block on video sends and never reach audio
+            // packets, draining WASAPI dry and causing recurring A/V stutter.
+            let max_video_events = self.queued_video_capacity + 4;
+            for _ in 0..max_video_events {
                 match self.event_rx.try_recv() {
                     Ok(event) => self.handle_event(event, now)?,
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
