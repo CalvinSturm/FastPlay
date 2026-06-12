@@ -37,7 +37,7 @@ use windows::{
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_LBUTTON},
+            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL},
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -108,6 +108,7 @@ struct WindowState {
     in_modal_loop: Cell<bool>,
     caption_tracking: Cell<bool>,
     caption_drag_origin: Cell<POINT>,
+    left_button_down_owned: Cell<bool>,
     ctrl_pan_active: Cell<bool>,
     ctrl_pan_last_client: Cell<POINT>,
 }
@@ -142,6 +143,7 @@ impl NativeWindowInner {
             in_modal_loop: Cell::new(false),
             caption_tracking: Cell::new(false),
             caption_drag_origin: Cell::new(POINT::default()),
+            left_button_down_owned: Cell::new(false),
             ctrl_pan_active: Cell::new(false),
             ctrl_pan_last_client: Cell::new(POINT::default()),
         });
@@ -306,7 +308,7 @@ impl NativeWindowInner {
     }
 
     pub fn is_left_button_down(&self) -> bool {
-        unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+        self.state.left_button_down_owned.get()
     }
 
     pub fn is_ctrl_held(&self) -> bool {
@@ -1468,6 +1470,11 @@ unsafe extern "system" fn window_proc(
             if let Some(state) = window_state(hwnd) {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if state.left_button_down_owned.get() && (wparam.0 as u32 & 0x0001) == 0 {
+                    state.left_button_down_owned.set(false);
+                    state.ctrl_pan_active.set(false);
+                    let _ = ReleaseCapture();
+                }
                 if state.ctrl_pan_active.get() {
                     // MK_LBUTTON (0x0001) — cancel if button no longer held.
                     if (wparam.0 as u32 & 0x0001) == 0 {
@@ -1514,6 +1521,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             if let Some(state) = window_state(hwnd) {
+                state.left_button_down_owned.set(true);
+                SetCapture(hwnd);
                 // MK_CONTROL (0x0008) is set in wParam when Ctrl is held.
                 let ctrl_held = (wparam.0 as u32 & 0x0008) != 0;
                 if ctrl_held && !state.caption_tracking.get() {
@@ -1557,6 +1566,10 @@ unsafe extern "system" fn window_proc(
                     state.caption_tracking.set(false);
                     let _ = ReleaseCapture();
                 }
+                if state.left_button_down_owned.get() {
+                    state.left_button_down_owned.set(false);
+                    let _ = ReleaseCapture();
+                }
                 state.ctrl_pan_active.set(false);
             }
             LRESULT(0)
@@ -1564,6 +1577,7 @@ unsafe extern "system" fn window_proc(
         WM_CAPTURECHANGED => {
             if let Some(state) = window_state(hwnd) {
                 state.caption_tracking.set(false);
+                state.left_button_down_owned.set(false);
                 state.ctrl_pan_active.set(false);
             }
             LRESULT(0)

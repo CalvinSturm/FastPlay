@@ -383,7 +383,10 @@ impl PlaybackSession {
                 self.screenshot_pending = true;
                 self.present_needed = true;
             }
-            SessionCommand::Seek(target) => self.seek(target, now)?,
+            SessionCommand::Seek(target) => {
+                self.pause_after_seek = false;
+                self.seek(target, now)?;
+            }
             SessionCommand::StepFrameForward => self.step_frame(1, now)?,
             SessionCommand::StepFrameBackward => self.step_frame(-1, now)?,
             SessionCommand::AdjustVolumeSteps(steps) => self.adjust_volume_steps(steps),
