@@ -17,6 +17,9 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Space` | Pause / resume / replay at end |
 | `Left` | Seek backward 5s, hold for 15s steps |
 | `Right` | Seek forward 5s, hold for 15s steps |
+| `Ctrl+F` | Move one frame forward |
+| `Ctrl+B` | Move one frame backward |
+| `Ctrl+S` | Save screenshot |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
 | `Ctrl+I` | Clear in-point |

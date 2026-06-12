@@ -1,13 +1,15 @@
 use std::{
     cell::Cell,
     collections::VecDeque,
+    fs,
+    path::PathBuf,
     sync::{
         atomic::{AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc,
     },
     thread::{self, JoinHandle, ThreadId},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -20,6 +22,7 @@ use crate::{
     },
     audio::sink::AudioSink,
     ffi::{
+        d3d11::BgraFrameCapture,
         dxgi::{ModalTickTarget, NativeWindowInner, ResizeRequest},
         ffmpeg::{self, DecodeSession, StreamStatus},
     },
@@ -44,6 +47,8 @@ use crate::{
 };
 
 const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
+const MAX_OBSERVED_FRAME_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_FRAME_STEP: Duration = Duration::from_nanos(33_333_333);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
 const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
 
@@ -115,6 +120,9 @@ pub struct PlaybackSession {
     active_decode_mode: Option<VideoDecodeMode>,
     last_error: Option<String>,
     present_needed: bool,
+    screenshot_pending: bool,
+    observed_frame_interval: Option<Duration>,
+    last_presented_media_position: Option<Duration>,
     view_zoom: f32,
     view_pan_x: f32,
     view_pan_y: f32,
@@ -197,6 +205,9 @@ impl PlaybackSession {
             active_decode_mode: None,
             last_error: None,
             present_needed: true,
+            screenshot_pending: false,
+            observed_frame_interval: None,
+            last_presented_media_position: None,
             view_zoom: 1.0,
             view_pan_x: 0.0,
             view_pan_y: 0.0,
@@ -276,7 +287,11 @@ impl PlaybackSession {
         &mut self,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.overlay.volume_overlay_until.is_some_and(|until| now > until) {
+        if self
+            .overlay
+            .volume_overlay_until
+            .is_some_and(|until| now > until)
+        {
             if self.presenter.set_volume_overlay(None, 0, 0)? {
                 self.present_needed = true;
             }
@@ -313,6 +328,8 @@ impl PlaybackSession {
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
         self.active_decode_mode = None;
+        self.observed_frame_interval = None;
+        self.last_presented_media_position = None;
         self.view_rotation_quarter_turns = 0;
         self.stream_rotation_quarter_turns = 0;
         if let Some(track) = self.overlay.subtitle_track.as_ref() {
@@ -362,14 +379,23 @@ impl PlaybackSession {
             SessionCommand::Tick => {}
             SessionCommand::TogglePause => self.toggle_pause(now)?,
             SessionCommand::ToggleSubtitles => self.toggle_subtitles()?,
+            SessionCommand::SaveScreenshot => {
+                self.screenshot_pending = true;
+                self.present_needed = true;
+            }
             SessionCommand::Seek(target) => self.seek(target, now)?,
+            SessionCommand::StepFrameForward => self.step_frame(1, now)?,
+            SessionCommand::StepFrameBackward => self.step_frame(-1, now)?,
             SessionCommand::AdjustVolumeSteps(steps) => self.adjust_volume_steps(steps),
             SessionCommand::RotateClockwise => self.rotate_view(1),
             SessionCommand::RotateCounterClockwise => self.rotate_view(3),
             SessionCommand::ToggleBorderlessFullscreen => {
                 self.metrics.note_fullscreen_toggle_started(now);
                 self.window.toggle_borderless_fullscreen();
-                if let Some(elapsed) = self.metrics.note_fullscreen_toggle_completed(Instant::now()) {
+                if let Some(elapsed) = self
+                    .metrics
+                    .note_fullscreen_toggle_completed(Instant::now())
+                {
                     flog!("fullscreen_toggle_ms={}", elapsed.as_millis());
                 }
             }
@@ -493,6 +519,73 @@ impl PlaybackSession {
         flog!("volume={volume_percent}");
     }
 
+    fn step_frame(
+        &mut self,
+        direction: i8,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.current_source.is_none() {
+            return Ok(());
+        }
+        if !matches!(self.state, PlaybackState::Paused | PlaybackState::Ended) {
+            self.toggle_pause(now)?;
+        }
+
+        let current = self
+            .pending_seek_target
+            .map(SeekTarget::position)
+            .or(self.last_presented_media_position)
+            .unwrap_or_else(|| self.snapshot(now).position);
+        let step = self.frame_step_duration();
+        let target = if direction >= 0 {
+            current.saturating_add(step)
+        } else {
+            current.saturating_sub(step)
+        };
+        let target = match self.media_duration {
+            Some(duration) if target > duration => duration,
+            _ => target,
+        };
+
+        self.pause_after_seek = true;
+        self.seek(SeekTarget::new(target), now)
+    }
+
+    fn frame_step_duration(&self) -> Duration {
+        if let Some(interval) = self.observed_frame_interval {
+            return interval;
+        }
+
+        let mut previous = None;
+        for frame in &self.queued_video_frames {
+            let position = self.media_time_for_pts(frame.pts());
+            if let Some(previous) = previous {
+                let delta = position.saturating_sub(previous);
+                if !delta.is_zero() && delta <= MAX_OBSERVED_FRAME_INTERVAL {
+                    return delta;
+                }
+            }
+            previous = Some(position);
+        }
+
+        DEFAULT_FRAME_STEP
+    }
+
+    fn save_screenshot(
+        &self,
+        capture: BgraFrameCapture,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let directory = screenshot_directory()?;
+        fs::create_dir_all(&directory)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let path = directory.join(format!("fastplay-screenshot-{stamp}.bmp"));
+        fs::write(&path, encode_bgra_bmp(&capture)?)?;
+        Ok(path)
+    }
+
     pub fn tick(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             self.ui_thread_id,
@@ -587,14 +680,30 @@ impl PlaybackSession {
             self.refresh_volume_overlay(now)?;
         }
 
-        if self.present_needed {
+        if self.present_needed || self.screenshot_pending {
             let view = crate::render::ViewTransform {
                 zoom: self.view_zoom,
                 pan_x: self.view_pan_x,
                 pan_y: self.view_pan_y,
                 rotation_quarter_turns: self.view_rotation_quarter_turns,
             };
-            match self.presenter.render(&view) {
+            let render_result = if self.screenshot_pending {
+                self.screenshot_pending = false;
+                self.presenter
+                    .render_with_capture(&view)
+                    .map(|(result, capture)| {
+                        if !matches!(result, crate::ffi::dxgi::PresentResult::DeviceLost) {
+                            match self.save_screenshot(capture) {
+                                Ok(path) => flog!("screenshot_saved path={}", path.display()),
+                                Err(error) => flog!("screenshot_failed error={error}"),
+                            }
+                        }
+                        result
+                    })
+            } else {
+                self.presenter.render(&view)
+            };
+            match render_result {
                 Ok(crate::ffi::dxgi::PresentResult::Ok) => {
                     self.present_needed = false;
                     self.metrics.note_present(now);
@@ -857,9 +966,7 @@ impl PlaybackSession {
                 }
                 let error_msg = error.clone();
                 self.fail_playback(error);
-                flog!(
-                    "playback failed: {error_msg}"
-                );
+                flog!("playback failed: {error_msg}");
             }
             SessionEvent::DeviceLost {
                 open_gen,
@@ -869,7 +976,12 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
-                flog!("[DEVICE_LOST] seek={} op={:?} workers={}", seek_gen.0, op_id, self.active_worker_count.load(Ordering::Acquire));
+                flog!(
+                    "[DEVICE_LOST] seek={} op={:?} workers={}",
+                    seek_gen.0,
+                    op_id,
+                    self.active_worker_count.load(Ordering::Acquire)
+                );
                 self.recover_device(now, "worker reported device-lost".to_string())?;
             }
             SessionEvent::AudioEndpointChanged {
@@ -893,7 +1005,10 @@ impl PlaybackSession {
         }
         // Don't seek during states where it makes no sense or would break
         // the open/recovery sequence.
-        if matches!(self.state, PlaybackState::Idle | PlaybackState::Opening | PlaybackState::Error) {
+        if matches!(
+            self.state,
+            PlaybackState::Idle | PlaybackState::Opening | PlaybackState::Error
+        ) {
             flog!("[seek] rejected: state={:?}", self.state);
             return Ok(());
         }
@@ -1181,15 +1296,27 @@ impl PlaybackSession {
                 Err(error) => {
                     if !control.is_shutdown() {
                         let (seek_gen, op_id) = gen_cell.get();
-                        let event = if error.contains("device removed")
-                            || device.is_device_removed()
-                        {
-                            SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
-                        } else if start_position.is_some() {
-                            SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
-                        } else {
-                            SessionEvent::OpenFailed { open_gen, op_id, error }
-                        };
+                        let event =
+                            if error.contains("device removed") || device.is_device_removed() {
+                                SessionEvent::DeviceLost {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                }
+                            } else if start_position.is_some() {
+                                SessionEvent::PlaybackFailed {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    error,
+                                }
+                            } else {
+                                SessionEvent::OpenFailed {
+                                    open_gen,
+                                    op_id,
+                                    error,
+                                }
+                            };
                         let _ = worker_send(event, &sender);
                     }
                     return;
@@ -1242,12 +1369,20 @@ impl PlaybackSession {
                         if control.seq() == serving.get() {
                             let (seek_gen, op_id) = gen_cell.get();
                             let _ = worker_send(
-                                SessionEvent::VideoStreamEnded { open_gen, seek_gen, op_id },
+                                SessionEvent::VideoStreamEnded {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                },
                                 &sender,
                             );
                             if session.had_audio_stream() {
                                 let _ = worker_send(
-                                    SessionEvent::AudioStreamEnded { open_gen, seek_gen, op_id },
+                                    SessionEvent::AudioStreamEnded {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                    },
                                     &audio_sender,
                                 );
                             }
@@ -1257,13 +1392,21 @@ impl PlaybackSession {
                     Err(ref error) if error == WORKER_CANCELLED => {}
                     Err(error) => {
                         let (seek_gen, op_id) = gen_cell.get();
-                        let event = if error.contains("device removed")
-                            || device.is_device_removed()
-                        {
-                            SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
-                        } else {
-                            SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
-                        };
+                        let event =
+                            if error.contains("device removed") || device.is_device_removed() {
+                                SessionEvent::DeviceLost {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                }
+                            } else {
+                                SessionEvent::PlaybackFailed {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    error,
+                                }
+                            };
                         let _ = worker_send(event, &sender);
                     }
                 }
@@ -1271,17 +1414,29 @@ impl PlaybackSession {
                 let (command, new_seq) = control.wait_next();
                 match command {
                     DecodeCommand::Shutdown => break,
-                    DecodeCommand::Seek { target, seek_gen, op_id } => {
+                    DecodeCommand::Seek {
+                        target,
+                        seek_gen,
+                        op_id,
+                    } => {
                         serving.set(new_seq);
                         gen_cell.set((seek_gen, op_id));
                         if let Err(error) = unsafe { session.seek(target) } {
-                            let event = if error.contains("device removed")
-                                || device.is_device_removed()
-                            {
-                                SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
-                            } else {
-                                SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
-                            };
+                            let event =
+                                if error.contains("device removed") || device.is_device_removed() {
+                                    SessionEvent::DeviceLost {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                    }
+                                } else {
+                                    SessionEvent::PlaybackFailed {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                        error,
+                                    }
+                                };
                             let _ = worker_send(event, &sender);
                         }
                     }
@@ -1324,8 +1479,7 @@ impl PlaybackSession {
             // a rapid reopen that still share the device, bounded so a wedged
             // worker can never hang teardown indefinitely.
             let deadline = Instant::now() + Duration::from_millis(500);
-            while self.active_worker_count.load(Ordering::Acquire) > 0
-                && Instant::now() < deadline
+            while self.active_worker_count.load(Ordering::Acquire) > 0 && Instant::now() < deadline
             {
                 thread::sleep(Duration::from_millis(1));
             }
@@ -1364,7 +1518,8 @@ impl PlaybackSession {
     }
 
     fn submit_due_audio(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        if self.state == PlaybackState::Paused || self.pause_after_seek || self.playback_rate != 1.0 {
+        if self.state == PlaybackState::Paused || self.pause_after_seek || self.playback_rate != 1.0
+        {
             return Ok(());
         }
 
@@ -1610,6 +1765,15 @@ impl PlaybackSession {
             Ok(_) => {}
         }
 
+        let frame_position = self.media_time_for_pts(frame.pts());
+        if let Some(previous) = self.last_presented_media_position {
+            let interval = frame_position.saturating_sub(previous);
+            if !interval.is_zero() && interval <= MAX_OBSERVED_FRAME_INTERVAL {
+                self.observed_frame_interval = Some(interval);
+            }
+        }
+        self.last_presented_media_position = Some(frame_position);
+
         self.present_needed = true;
         self.metrics.note_video_frame_presented();
         if let Some(elapsed) = self.metrics.note_resume_first_frame(now) {
@@ -1641,7 +1805,11 @@ impl PlaybackSession {
     }
 
     fn push_video_frame(&mut self, frame: DecodedVideoFrame) {
-        let insert_at = if self.queued_video_frames.back().map_or(true, |last| frame.pts() >= last.pts()) {
+        let insert_at = if self
+            .queued_video_frames
+            .back()
+            .map_or(true, |last| frame.pts() >= last.pts())
+        {
             self.queued_video_frames.len()
         } else {
             self.queued_video_frames
@@ -1696,7 +1864,8 @@ impl PlaybackSession {
                 self.metrics.note_resume_requested(now);
                 if self.audio_clock_anchor_pts.is_none() {
                     let resume_pts = self.paused_clock_position.unwrap_or(Duration::ZERO);
-                    self.video_clock = Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
+                    self.video_clock =
+                        Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
                 } else if let Some(sink) = self.audio_sink.as_mut() {
                     sink.resume()?;
                 }
@@ -1717,9 +1886,11 @@ impl PlaybackSession {
     }
 
     fn replay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        self.seek(SeekTarget::new(self.in_point.unwrap_or(Duration::ZERO)), now)
+        self.seek(
+            SeekTarget::new(self.in_point.unwrap_or(Duration::ZERO)),
+            now,
+        )
     }
-
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.overlay.subtitle_track.is_none() {
@@ -1819,7 +1990,8 @@ impl PlaybackSession {
         if self.view_rotation_quarter_turns % 2 != 0 {
             std::mem::swap(&mut w, &mut h);
         }
-        self.window.set_window_client_size((w / 2).max(1), (h / 2).max(1));
+        self.window
+            .set_window_client_size((w / 2).max(1), (h / 2).max(1));
     }
 
     fn step_playback_rate(&mut self, step: i8) {
@@ -1856,7 +2028,11 @@ impl PlaybackSession {
             let rate_str = if self.playback_rate.fract() == 0.0 {
                 format!("{}x", self.playback_rate as u32)
             } else {
-                format!("{:.2}", self.playback_rate).trim_end_matches('0').trim_end_matches('.').to_owned() + "x"
+                format!("{:.2}", self.playback_rate)
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_owned()
+                    + "x"
             };
             suffixes.push(rate_str);
         }
@@ -1896,7 +2072,8 @@ impl PlaybackSession {
 
         let cue = track.cue_at(subtitle_position, self.overlay.active_subtitle_cue);
         let next_index = cue.map(|(index, _)| index);
-        if self.overlay.active_subtitle_cue == next_index && self.overlay.active_subtitle_viewport == Some(viewport)
+        if self.overlay.active_subtitle_cue == next_index
+            && self.overlay.active_subtitle_viewport == Some(viewport)
         {
             return Ok(());
         }
@@ -2158,6 +2335,53 @@ impl PlaybackSession {
             && seek_gen == self.generations.seek()
             && Some(op_id) == self.active_operation_id
     }
+}
+
+fn screenshot_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(profile).join("Pictures").join("FastPlay"));
+    }
+
+    Ok(std::env::current_dir()?.join("FastPlay Screenshots"))
+}
+
+fn encode_bgra_bmp(capture: &BgraFrameCapture) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let width = capture.width;
+    let height = capture.height;
+    let pixel_bytes = width
+        .checked_mul(height)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or("screenshot dimensions overflowed BMP size")?;
+    if capture.pixels.len() != pixel_bytes as usize {
+        return Err("screenshot pixel buffer size did not match dimensions".into());
+    }
+
+    let header_bytes = 14u32 + 40u32;
+    let file_size = header_bytes
+        .checked_add(pixel_bytes)
+        .ok_or("screenshot BMP file size overflowed")?;
+    let top_down_height = -(height as i32);
+
+    let mut bytes = Vec::with_capacity(file_size as usize);
+    bytes.extend_from_slice(b"BM");
+    bytes.extend_from_slice(&file_size.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&header_bytes.to_le_bytes());
+
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&(width as i32).to_le_bytes());
+    bytes.extend_from_slice(&top_down_height.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&pixel_bytes.to_le_bytes());
+    bytes.extend_from_slice(&0i32.to_le_bytes());
+    bytes.extend_from_slice(&0i32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&capture.pixels);
+    Ok(bytes)
 }
 
 impl ModalTickTarget for PlaybackSession {
