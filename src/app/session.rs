@@ -683,13 +683,22 @@ impl PlaybackSession {
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 }
             }
-            // Drain at least one channel-capacity worth of video/control events
-            // even when the decoded-video queue is already full. `push_video_frame`
-            // keeps the queue bounded by dropping old frames. If we stop draining
-            // here, the worker can block on video sends and never reach audio
-            // packets, draining WASAPI dry and causing recurring A/V stutter.
-            let max_video_events = self.queued_video_capacity + 4;
-            for _ in 0..max_video_events {
+            // Gate the video drain on the decoded-video queue, exactly like the
+            // audio loop above. Draining unconditionally and letting
+            // `push_video_frame` drop the overflow removes all backpressure on
+            // the decoder: with nothing to block its sends it free-runs to EOF,
+            // overflow-dropping the whole stream while the audio-clock-gated
+            // presenter can only show frames at or below the 1x audio clock —
+            // every one of which has already been dropped, so the picture
+            // freezes on the first few frames. Stopping here when the queue is
+            // full lets the bounded video channel backpressure the worker, so
+            // the decoder is paced to playback. Audio lives on its own channel
+            // and queue (drained above) and keeps flowing regardless, so a full
+            // video queue cannot starve it.
+            loop {
+                if self.queued_video_frames.len() >= self.queued_video_capacity {
+                    break;
+                }
                 match self.event_rx.try_recv() {
                     Ok(event) => self.handle_event(event, now)?,
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
