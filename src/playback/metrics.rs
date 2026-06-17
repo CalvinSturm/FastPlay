@@ -142,11 +142,7 @@ impl PlaybackMetrics {
         Some(now.saturating_duration_since(started))
     }
 
-    pub fn note_decode_mode_selected(
-        &mut self,
-        mode: VideoDecodeMode,
-        hw_fallback_count: u64,
-    ) {
+    pub fn note_decode_mode_selected(&mut self, mode: VideoDecodeMode, hw_fallback_count: u64) {
         self.decode_mode = Some(mode);
         self.hw_fallback_count = self.hw_fallback_count.saturating_add(hw_fallback_count);
     }
@@ -305,7 +301,8 @@ impl MetricsCollector {
     }
 
     pub fn note_decode_mode_selected(&mut self, mode: VideoDecodeMode, hw_fallback_count: u64) {
-        self.inner.note_decode_mode_selected(mode, hw_fallback_count);
+        self.inner
+            .note_decode_mode_selected(mode, hw_fallback_count);
     }
 
     pub fn note_video_frame_presented(&mut self) {

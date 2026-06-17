@@ -68,14 +68,16 @@ impl TimelineUiState {
         let (viewport_width, viewport_height) = session.window().client_size()?;
         let cursor = session.window().cursor_client_position()?;
         let left_button_down = session.window().is_left_button_down();
-        let hovered = cursor
-            .is_some_and(|(x, y)| timeline::activation_hit_test(viewport_width, viewport_height, x, y));
+        let hovered = cursor.is_some_and(|(x, y)| {
+            timeline::activation_hit_test(viewport_width, viewport_height, x, y)
+        });
 
         if is_borderless {
             self.scrubbing = false;
             self.scrub_origin = None;
             self.preview_target = None;
-        } else if !self.was_left_button_down && left_button_down && !session.window().is_ctrl_held() {
+        } else if !self.was_left_button_down && left_button_down && !session.window().is_ctrl_held()
+        {
             if let Some((x, y)) = cursor {
                 if timeline::scrub_hit_test(viewport_width, viewport_height, x, y) {
                     self.scrubbing = true;
@@ -128,9 +130,7 @@ impl TimelineUiState {
         let replay_indicator_active = session
             .replay_indicator_until()
             .is_some_and(|until| now < until);
-        let seek_overlay_active = self
-            .seek_overlay_until
-            .is_some_and(|until| now < until);
+        let seek_overlay_active = self.seek_overlay_until.is_some_and(|until| now < until);
         let visible = !is_borderless
             && duration > Duration::ZERO
             && (hovered || self.scrubbing || replay_indicator_active || seek_overlay_active);

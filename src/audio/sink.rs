@@ -17,8 +17,7 @@ impl AudioSink {
         // Pre-allocate to the expected batch size (sample_rate / 10 frames) so
         // the first write_frame call with volume != 1.0 doesn't trigger a heap
         // allocation.
-        let target_bytes =
-            (format.sample_rate as usize / 10) * format.bytes_per_frame() as usize;
+        let target_bytes = (format.sample_rate as usize / 10) * format.bytes_per_frame() as usize;
         Ok(Self {
             inner,
             format,
@@ -55,6 +54,22 @@ impl AudioSink {
         frame: &DecodedAudioFrame,
         frame_offset: u32,
     ) -> Result<u32, Box<dyn std::error::Error>> {
+        // The decode worker resamples every frame to the sink/device format it
+        // was spawned with, and a sink rebuild (device/endpoint change) respawns
+        // the worker — so a frame's format should always match `self.format`.
+        // Validate it before computing byte offsets and handing raw bytes to
+        // WASAPI: a mismatch (e.g. a stale-generation frame whose layout differs
+        // in channel count or sample rate) would otherwise be silently
+        // reinterpreted, corrupting channels or playback speed. Fail loudly so
+        // the session surfaces a clear error instead of emitting garbage.
+        if frame.format != self.format {
+            return Err(format!(
+                "decoded audio format {:?} does not match sink format {:?}; refusing to submit",
+                frame.format, self.format
+            )
+            .into());
+        }
+
         let bytes_per_frame = frame.bytes_per_frame();
         let start = frame_offset as usize * bytes_per_frame;
         let remaining_frames = frame.frame_count().saturating_sub(frame_offset);
@@ -63,9 +78,11 @@ impl AudioSink {
         }
 
         if (self.volume - 1.0).abs() < f32::EPSILON {
-            return self
-                .inner
-                .write_interleaved(&frame.data[start..], remaining_frames, self.format);
+            return self.inner.write_interleaved(
+                &frame.data[start..],
+                remaining_frames,
+                self.format,
+            );
         }
 
         let data = &frame.data[start..];

@@ -53,6 +53,23 @@ int64_t fastplay_ffmpeg_start_time_micros(AVFormatContext *ctx) {
     return ctx->start_time;
 }
 
+AVFormatContext *fastplay_ffmpeg_alloc_context(void) {
+    return avformat_alloc_context();
+}
+
+void fastplay_ffmpeg_set_interrupt(
+    AVFormatContext *ctx,
+    int (*callback)(void *),
+    void *opaque
+) {
+    if (!ctx) {
+        return;
+    }
+
+    ctx->interrupt_callback.callback = callback;
+    ctx->interrupt_callback.opaque = opaque;
+}
+
 int fastplay_ffmpeg_seek_to_micros(AVFormatContext *ctx, int64_t timestamp_micros) {
     if (!ctx) {
         return AVERROR(EINVAL);
