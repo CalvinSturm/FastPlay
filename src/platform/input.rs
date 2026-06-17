@@ -37,4 +37,5 @@ pub enum InputEvent {
     },
     ShowHelp,
     HideHelp,
+    OpenFileDialog,
 }

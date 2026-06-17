@@ -37,7 +37,7 @@ use windows::{
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL},
+            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_SHIFT},
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -46,11 +46,12 @@ use windows::{
                 MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
                 SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
                 TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-                GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON, MSG,
-                PM_REMOVE, QS_ALLINPUT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-                SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-                WM_DESTROY, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
-                WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
+                MINMAXINFO, MSG, PM_REMOVE, QS_ALLINPUT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE,
+                WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP,
+                WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
                 WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE,
                 WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
             },
@@ -81,6 +82,11 @@ const SM_CYDRAG: i32 = 69;
 const MAX_MESSAGES_PER_PUMP: usize = 64;
 const MODAL_TICK_TIMER_ID: usize = 1;
 const MODAL_TICK_INTERVAL_MS: u32 = 8;
+
+/// Minimum client area width in pixels.
+const MIN_CLIENT_WIDTH: u32 = 640;
+/// Minimum client area height in pixels.
+const MIN_CLIENT_HEIGHT: u32 = 360;
 
 #[derive(Debug)]
 pub struct DxgiError(String);
@@ -1269,28 +1275,41 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::RotateClockwise);
                     }
-                    // I → set in-point, Ctrl+I → clear in-point
+                    // I → set in-point, Shift+I → clear in-point
                     0x49 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ClearInPoint);
+                        // Ctrl+I — reserved / no-op (was clear in-point, now Shift+I)
                     }
                     0x49 => {
-                        state.input_events.borrow_mut().push(InputEvent::SetInPoint);
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        if shift_held {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::ClearInPoint);
+                        } else {
+                            state.input_events.borrow_mut().push(InputEvent::SetInPoint);
+                        }
                     }
-                    // O → set out-point, Ctrl+O → clear out-point
+                    // Ctrl+O → open file dialog, Shift+O → clear out-point, O → set out-point
                     0x4F if ctrl_held => {
                         state
                             .input_events
                             .borrow_mut()
-                            .push(InputEvent::ClearOutPoint);
+                            .push(InputEvent::OpenFileDialog);
                     }
                     0x4F => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::SetOutPoint);
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        if shift_held {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::ClearOutPoint);
+                        } else {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::SetOutPoint);
+                        }
                     }
                     0x52 => {
                         state
@@ -1703,6 +1722,44 @@ unsafe extern "system" fn window_proc(
             }
             unsafe {
                 PostQuitMessage(0);
+            }
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            // Enforce a minimum window size so the client area never reaches
+            // degenerate dimensions (e.g. 0×0) that would break swap-chain
+            // resize or aspect-ratio calculations.
+            let mmi = lparam.0 as *mut MINMAXINFO;
+            if !mmi.is_null() {
+                // Convert minimum client size to window size (adds chrome).
+                let (min_w, min_h) =
+                    adjust_window_size(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT).unwrap_or((640, 360));
+                unsafe {
+                    (*mmi).ptMinTrackSize = POINT { x: min_w, y: min_h };
+                }
+            }
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            // The window moved to a monitor with a different DPI.  Use the
+            // suggested rect from the system to resize and reposition so the
+            // window keeps its apparent size on the new display.
+            let suggested = lparam.0 as *const RECT;
+            if !suggested.is_null() {
+                let rc = unsafe { *suggested };
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOP,
+                        rc.left,
+                        rc.top,
+                        rc.right - rc.left,
+                        rc.bottom - rc.top,
+                        SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                    );
+                }
+                // The resulting WM_SIZE will post a ResizeRequest for the
+                // swap chain through the existing path.
             }
             LRESULT(0)
         }
