@@ -1,7 +1,27 @@
 use windows::Win32::{
     Media::{timeBeginPeriod, timeEndPeriod},
     System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS},
+    UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
+    },
 };
+
+/// Set process DPI awareness early at startup, before any windows are created.
+///
+/// Attempts Per-Monitor V2 (Windows 10 1703+), which gives the best behaviour
+/// for multi-monitor setups with different DPI values. Falls back to
+/// System-aware on older builds.
+pub fn set_dpi_awareness() {
+    // SAFETY: these are one-shot process-global calls with no preconditions
+    // beyond "call before creating windows".
+    unsafe {
+        if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
+            // Per-Monitor V2 unavailable — fall back to system-aware.
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+        }
+    }
+}
 
 pub struct MultimediaTimerResolution {
     period_ms: u32,

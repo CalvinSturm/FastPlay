@@ -33,6 +33,7 @@ use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
 use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
 use platform::input::InputEvent;
+use platform::open_dialog::show_open_file_dialog;
 use platform::window::NativeWindow;
 
 /// How long the UI loop blocks on the message queue when the player is
@@ -77,6 +78,10 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Set DPI awareness before creating any windows so the system delivers
+    // physical pixel sizes and WM_DPICHANGED on monitor transitions.
+    ffi::runtime::set_dpi_awareness();
+
     // Raise the Windows multimedia timer resolution to 1 ms so that
     // thread::sleep(1ms) wakes up on time.  Without this the default
     // resolution is ~15 ms, which causes the main loop to miss video frame
@@ -233,6 +238,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let title = window_title_for(&source);
                     session.open(source, now)?;
                     session.window().set_title(&title);
+                }
+                InputEvent::OpenFileDialog => {
+                    let hwnd = session.window().raw_window().hwnd();
+                    if let Some(path) = show_open_file_dialog(hwnd) {
+                        let source = MediaSource::new(path);
+                        let title = window_title_for(&source);
+                        session.open(source, now)?;
+                        session.window().set_title(&title);
+                    }
                 }
             }
         }

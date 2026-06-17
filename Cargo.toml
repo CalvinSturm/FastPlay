@@ -30,8 +30,11 @@ windows = { version = "0.58", features = [
     "implement",
     "Win32_System_SystemServices",
     "Win32_System_Memory",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
