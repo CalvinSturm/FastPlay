@@ -42,15 +42,15 @@ use windows::{
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW,
-                GetWindowPlacement, GetWindowRect, LoadCursorW, LoadImageW, PeekMessageW,
-                PostQuitMessage, RegisterClassExW, SetWindowLongPtrW, SetWindowPlacement,
-                SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW,
-                CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HICON,
-                HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON, MSG, PM_REMOVE, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT,
-                WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
-                WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_KEYDOWN,
-                WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                GetWindowPlacement, GetWindowRect, LoadCursorW, LoadImageW,
+                MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
+                SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
+                TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+                GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON, MSG,
+                PM_REMOVE, QS_ALLINPUT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+                SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
+                WM_DESTROY, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+                WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
                 WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE,
                 WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
             },
@@ -246,6 +246,20 @@ impl NativeWindowInner {
 
     pub fn is_open(&self) -> bool {
         self.state.is_open.get()
+    }
+
+    /// Block the UI thread until a window message arrives (keyboard, mouse,
+    /// resize, paint, drag/drop, posted/sent messages) or `timeout_ms` elapses,
+    /// whichever comes first. Used to idle an inactive player without spinning
+    /// the CPU. The timeout bounds how long an asynchronous worker event waits
+    /// to be observed, so a finite value keeps device-loss / endpoint-change
+    /// recovery and timed overlays responsive even while otherwise quiescent.
+    pub fn wait_for_messages(&self, timeout_ms: u32) {
+        // SAFETY: no wait handles are supplied; we wait purely on the thread's
+        // message queue. The call has no preconditions beyond a valid thread.
+        unsafe {
+            MsgWaitForMultipleObjects(None, false, timeout_ms, QS_ALLINPUT);
+        }
     }
 
     pub fn take_resize_request(&self) -> Option<ResizeRequest> {

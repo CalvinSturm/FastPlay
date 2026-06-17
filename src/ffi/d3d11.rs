@@ -160,6 +160,24 @@ struct SubtitleBitmap {
     pixels: Vec<u8>,
 }
 
+/// Unmaps a mapped subresource when dropped, so a successful `Map` is always
+/// paired with an `Unmap` even when reading the mapped data returns early.
+struct MapGuard<'a> {
+    context: &'a ID3D11DeviceContext,
+    resource: &'a ID3D11Texture2D,
+    subresource: u32,
+}
+
+impl Drop for MapGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: paired with a successful Map of this subresource; the caller
+        // holds the context lock for the lifetime of this guard.
+        unsafe {
+            self.context.Unmap(self.resource, self.subresource);
+        }
+    }
+}
+
 impl D3D11Device {
     pub fn create() -> Result<Self, Box<dyn Error>> {
         let mut device = None;
@@ -283,21 +301,35 @@ impl D3D11Device {
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let row_bytes = desc.Width as usize * 4;
+        let mut pixels = vec![0u8; row_bytes * desc.Height as usize];
         unsafe {
             self.context.CopyResource(&staging, texture);
             self.context
                 .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-        }
+            // From here a successful Map must be released on every path. The
+            // guard's Unmap runs before `_lock` is released (reverse drop order).
+            let _unmap = MapGuard {
+                context: &self.context,
+                resource: &staging,
+                subresource: 0,
+            };
 
-        let row_bytes = desc.Width as usize * 4;
-        let mut pixels = vec![0u8; row_bytes * desc.Height as usize];
-        unsafe {
+            // Never assume the mapping is tightly packed as width*4: the driver
+            // may align each row to a wider RowPitch. We copy row-by-row using
+            // RowPitch below, but a RowPitch *smaller* than one packed row would
+            // make the final row read past the mapped region — reject it.
+            if (mapped.RowPitch as usize) < row_bytes {
+                return Err(Box::new(D3D11Error(
+                    "mapped RowPitch smaller than one packed row of pixels",
+                )));
+            }
+
             for row in 0..desc.Height as usize {
                 let src = (mapped.pData as *const u8).add(row * mapped.RowPitch as usize);
                 let dst = pixels.as_mut_ptr().add(row * row_bytes);
                 std::ptr::copy_nonoverlapping(src, dst, row_bytes);
             }
-            self.context.Unmap(&staging, 0);
         }
 
         Ok(BgraFrameCapture {
@@ -615,6 +647,14 @@ impl D3D11Device {
                 )
             };
             ManuallyDrop::drop(&mut streams[0].pInputSurface);
+            // Surface a blit failure through the error path rather than letting
+            // the caller present a stale/blank backbuffer: render_surface in
+            // dxgi.rs propagates this Err *before* calling Present, and the
+            // session turns it into a device-recovery attempt. Log at the
+            // failure site so the cause is attributable in the trace.
+            if let Err(error) = &blt_result {
+                flog!("VideoProcessorBlt failed: {error}");
+            }
             blt_result?;
         }
 

@@ -26,8 +26,12 @@ impl SubtitleTrack {
             return Ok(None);
         }
 
-        let contents = std::fs::read_to_string(&sidecar_path)
-            .map_err(|error| format!("failed to read subtitle sidecar {}: {error}", sidecar_path.display()))?;
+        let contents = std::fs::read_to_string(&sidecar_path).map_err(|error| {
+            format!(
+                "failed to read subtitle sidecar {}: {error}",
+                sidecar_path.display()
+            )
+        })?;
         let cues = parse_srt(&contents)?;
         Ok(Some(Self {
             path: sidecar_path,
@@ -159,11 +163,14 @@ fn parse_timestamp(value: &str) -> Result<Duration, String> {
         .parse::<u64>()
         .map_err(|error| format!("invalid subtitle millisecond value in {value}: {error}"))?;
     if parts.next().is_some() {
-        return Err(format!("subtitle timestamp had too many components: {value}"));
+        return Err(format!(
+            "subtitle timestamp had too many components: {value}"
+        ));
     }
 
     Ok(Duration::from_millis(
-        hours.saturating_mul(3_600_000)
+        hours
+            .saturating_mul(3_600_000)
             .saturating_add(minutes.saturating_mul(60_000))
             .saturating_add(seconds.saturating_mul(1_000))
             .saturating_add(millis.min(999)),

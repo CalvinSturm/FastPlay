@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
+use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 use crate::{
     ffi::ffmpeg::{PendingAudioFrame, PendingVideoFrame},
     media::video::VideoDecodeMode,
 };
-use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 
 /// All asynchronous completions flow through this enum so the coordinator stays
 /// the only state owner.

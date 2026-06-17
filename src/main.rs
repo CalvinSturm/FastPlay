@@ -35,6 +35,12 @@ use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference}
 use platform::input::InputEvent;
 use platform::window::NativeWindow;
 
+/// How long the UI loop blocks on the message queue when the player is
+/// quiescent. Short enough that asynchronous worker events and timed overlays
+/// stay responsive (~10 wakeups/sec is negligible CPU), long enough that an
+/// idle player does not busy-spin.
+const IDLE_MESSAGE_WAIT_MS: u32 = 100;
+
 fn main() {
     // ── Vectored Exception Handler ─────────────────────────────────────
     // Access violations from d3d11.dll kill the process instantly —
@@ -233,7 +239,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         timeline_ui.update(&mut session, now)?;
         session.tick(now)?;
         if session.take_idle_pace_request() {
-            std::thread::sleep(Duration::from_millis(1));
+            // The tick produced no frame to present. While playback is actively
+            // advancing, pace tightly so the next frame's deadline is not missed.
+            // When the player is quiescent (idle/paused/ended/error), block on
+            // the message queue instead of spinning — this is what keeps an idle
+            // or paused FastPlay from pinning a CPU core. The bounded timeout
+            // still lets asynchronous worker events and timed overlays be picked
+            // up promptly, and any input/resize/drag wakes the wait immediately.
+            if session.is_idle_for_input() {
+                session.window().wait_for_messages(IDLE_MESSAGE_WAIT_MS);
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 

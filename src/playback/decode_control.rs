@@ -67,12 +67,7 @@ impl DecodeControl {
 
     /// UI thread: queue a seek, superseding any pending command, and wake the
     /// decode thread. Returns the new command sequence.
-    pub fn send_seek(
-        &self,
-        target: Duration,
-        seek_gen: SeekGeneration,
-        op_id: OperationId,
-    ) -> u64 {
+    pub fn send_seek(&self, target: Duration, seek_gen: SeekGeneration, op_id: OperationId) -> u64 {
         let mut pending = self.lock_pending();
         *pending = Some(DecodeCommand::Seek {
             target,

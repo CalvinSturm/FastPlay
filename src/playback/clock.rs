@@ -32,7 +32,9 @@ impl PlaybackClock {
     }
 
     pub fn position_at(&self, now: Instant) -> Duration {
-        let elapsed = now.saturating_duration_since(self.anchor_instant).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(self.anchor_instant)
+            .as_secs_f64();
         self.anchor_pts + Duration::from_secs_f64(elapsed * self.rate)
     }
 }

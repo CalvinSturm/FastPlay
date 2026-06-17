@@ -50,6 +50,11 @@ const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
 const MAX_OBSERVED_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_FRAME_STEP: Duration = Duration::from_nanos(33_333_333);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
+/// Upper bound on how long a blocking teardown waits for the decode worker to
+/// release its resources after cancellation. The FFmpeg interrupt callback
+/// aborts in-flight I/O on shutdown, so a healthy worker exits in milliseconds;
+/// this only caps the pathological case so the UI thread can never hang.
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
 
 struct QueuedAudioFrame {
@@ -609,6 +614,23 @@ impl PlaybackSession {
         std::mem::take(&mut self.idle_pace_requested)
     }
 
+    /// Whether the player is quiescent — idle, paused, ended, or errored — so
+    /// the UI loop may block waiting for input instead of spin-pacing. In every
+    /// other state playback is actively advancing (frames are scheduled against
+    /// a clock, or an open/seek is in flight) and the loop must keep ticking to
+    /// hit frame deadlines. Worker events that can still arrive in these states
+    /// (device loss, audio endpoint change) are picked up on the next wakeup,
+    /// which the bounded message-wait timeout guarantees happens promptly.
+    pub fn is_idle_for_input(&self) -> bool {
+        matches!(
+            self.state,
+            PlaybackState::Idle
+                | PlaybackState::Paused
+                | PlaybackState::Ended
+                | PlaybackState::Error
+        )
+    }
+
     /// Orderly teardown before the session is dropped. Cancels and waits for any
     /// decode worker (so no other thread holds a D3D11 device clone or touches
     /// the immediate context), then releases GPU resources and idles the device.
@@ -1068,10 +1090,12 @@ impl PlaybackSession {
         if self.decode_thread_serves_current() {
             // Reuse the open file: tell the running thread to seek in place.
             // Bumping seek_gen above already gates out its old in-flight frames.
-            self.decode_control
-                .as_ref()
-                .expect("decode_thread_serves_current implies a control")
-                .send_seek(absolute_target, seek_gen, op_id);
+            // `decode_thread_serves_current` implies a live control; if it is
+            // somehow absent, skip rather than panic — the next operation will
+            // respawn a worker.
+            if let Some(control) = self.decode_control.as_ref() {
+                control.send_seek(absolute_target, seek_gen, op_id);
+            }
         } else {
             // No thread, or the decode preference changed (HW↔SW): reopen.
             self.teardown_decode_thread(false);
@@ -1241,6 +1265,7 @@ impl PlaybackSession {
             let worker_send =
                 |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
                     let mut event = event;
+                    let mut full_retries: u32 = 0;
                     loop {
                         match tx.try_send(event) {
                             Ok(()) => return Ok(()),
@@ -1248,7 +1273,20 @@ impl PlaybackSession {
                                 if cancelled() {
                                     return Err(WORKER_CANCELLED.to_string());
                                 }
-                                thread::sleep(std::time::Duration::from_millis(1));
+                                // Poll at 1ms while the consumer is actively
+                                // draining — this is the brief, transient
+                                // backpressure of normal playback, where a freed
+                                // slot must be refilled promptly to avoid audio
+                                // starvation. Once the queue has stayed full well
+                                // past any frame interval, the UI is paused or
+                                // stalled and is not draining at all; back off to
+                                // a longer sleep so a paused player does not spin
+                                // the decode thread. Shutdown and superseded-seek
+                                // are still observed every iteration, so cancel
+                                // latency stays within one sleep interval.
+                                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
+                                full_retries = full_retries.saturating_add(1);
+                                thread::sleep(std::time::Duration::from_millis(sleep_ms));
                                 event = returned;
                             }
                             Err(TrySendError::Disconnected(_)) => {
@@ -1257,6 +1295,16 @@ impl PlaybackSession {
                         }
                     }
                 };
+
+            // Cancellation signal for FFmpeg's interrupt callback: aborts a
+            // blocking open/read/seek when the worker is asked to shut down, so
+            // a worker wedged in FFmpeg I/O (dead network share, vanished drive)
+            // still exits promptly and never hangs teardown. Owned + 'static so
+            // it can live inside the format context for the session's lifetime.
+            let io_cancel: Box<dyn Fn() -> bool> = {
+                let control = control.clone();
+                Box::new(move || control.is_shutdown())
+            };
 
             // Open the file and decoders once. Errors map to open/playback
             // failure exactly as the per-operation worker did.
@@ -1267,6 +1315,7 @@ impl PlaybackSession {
                     audio_format,
                     start_position,
                     decode_preference,
+                    io_cancel,
                     &cancelled,
                     &mut |mode, hw_fallback_count, rotation_quarter_turns| {
                         let (seek_gen, op_id) = gen_cell.get();
@@ -1473,21 +1522,37 @@ impl PlaybackSession {
         }
         self.decode_thread_preference = None;
         if wait {
-            // Join the worker so its full D3D11 teardown — including the device
-            // clone it releases as it unwinds — finishes before the caller
-            // destroys or touches the shared device. The worker aborts any
-            // in-flight send/decode the moment `is_shutdown` is set (see the
-            // `cancelled` closure), so this never blocks on a full channel.
-            if let Some(handle) = self.decode_join.take() {
-                let _ = handle.join();
-            }
-            // Belt-and-suspenders: wait out any detached straggler workers from
-            // a rapid reopen that still share the device, bounded so a wedged
-            // worker can never hang teardown indefinitely.
-            let deadline = Instant::now() + Duration::from_millis(500);
+            let handle = self.decode_join.take();
+            // Wait — bounded — for every live worker (the current one plus any
+            // detached straggler from a rapid reopen) to release its resources.
+            // `active_worker_count` only reaches zero once each worker's
+            // `WorkerGuard` drops, which runs after its D3D11 codec/session
+            // teardown. The interrupt callback aborts any in-flight FFmpeg I/O
+            // on `is_shutdown`, and every other worker wait point checks the
+            // same flag, so a healthy worker reaches zero within milliseconds.
+            let deadline = Instant::now() + WORKER_JOIN_TIMEOUT;
             while self.active_worker_count.load(Ordering::Acquire) > 0 && Instant::now() < deadline
             {
                 thread::sleep(Duration::from_millis(1));
+            }
+
+            if let Some(handle) = handle {
+                if self.active_worker_count.load(Ordering::Acquire) == 0 {
+                    // The worker has released its device clone; join is now
+                    // effectively instant and guarantees the thread (and the
+                    // captured device clone it drops last) is fully gone before
+                    // the caller rebuilds or destroys the shared device.
+                    let _ = handle.join();
+                } else {
+                    // A worker did not exit within the timeout (e.g. wedged
+                    // beyond the interrupt callback's reach). Detach it rather
+                    // than freezing the UI thread on an unbounded join; log so
+                    // the stall is diagnosable.
+                    flog!(
+                        "[teardown] decode worker still alive {}ms after cancel; detaching to avoid UI hang",
+                        WORKER_JOIN_TIMEOUT.as_millis()
+                    );
+                }
             }
         }
     }
