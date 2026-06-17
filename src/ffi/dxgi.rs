@@ -16,15 +16,11 @@ use windows::{
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
-                Common::{
-                    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM,
-                    DXGI_SAMPLE_DESC,
-                },
+                Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
                 CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1,
-                DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_DEVICE_REMOVED,
-                DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-                DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
+                DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+                DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
             Gdi::{
                 GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO,
@@ -35,37 +31,39 @@ use windows::{
             Com::{IDataObject, FORMATETC},
             LibraryLoader::GetModuleHandleW,
             Ole::{
-                IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, RevokeDragDrop,
-                DROPEFFECT, DROPEFFECT_COPY, ReleaseStgMedium,
+                IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
+                RevokeDragDrop, DROPEFFECT, DROPEFFECT_COPY,
             },
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_LBUTTON},
+            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_SHIFT},
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-                GetWindowPlacement, LoadCursorW, LoadImageW, PeekMessageW, PostQuitMessage,
-                RegisterClassExW, SetWindowLongPtrW,
-                SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
+                DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW,
+                GetWindowPlacement, GetWindowRect, LoadCursorW, LoadImageW,
+                MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
+                SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
                 TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
                 GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
-                MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-                SWP_NOZORDER,
-                SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-                WM_DESTROY, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
-                WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK,
-                WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE,
-                WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
-                WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+                MINMAXINFO, MSG, PM_REMOVE, QS_ALLINPUT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE,
+                WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP,
+                WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE,
+                WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
             },
         },
     },
 };
 
 use crate::{
-    ffi::d3d11::{D3D11Device, RenderTargetView, SubtitleOverlay, SubtitleRenderer, VideoProcessorCache, VideoSurface},
+    ffi::d3d11::{
+        BgraFrameCapture, D3D11Device, RenderTargetView, SubtitleOverlay, SubtitleRenderer,
+        VideoProcessorCache, VideoSurface,
+    },
     platform::input::InputEvent,
 };
 
@@ -84,6 +82,11 @@ const SM_CYDRAG: i32 = 69;
 const MAX_MESSAGES_PER_PUMP: usize = 64;
 const MODAL_TICK_TIMER_ID: usize = 1;
 const MODAL_TICK_INTERVAL_MS: u32 = 8;
+
+/// Minimum client area width in pixels.
+const MIN_CLIENT_WIDTH: u32 = 640;
+/// Minimum client area height in pixels.
+const MIN_CLIENT_HEIGHT: u32 = 360;
 
 #[derive(Debug)]
 pub struct DxgiError(String);
@@ -111,6 +114,7 @@ struct WindowState {
     in_modal_loop: Cell<bool>,
     caption_tracking: Cell<bool>,
     caption_drag_origin: Cell<POINT>,
+    left_button_down_owned: Cell<bool>,
     ctrl_pan_active: Cell<bool>,
     ctrl_pan_last_client: Cell<POINT>,
 }
@@ -145,6 +149,7 @@ impl NativeWindowInner {
             in_modal_loop: Cell::new(false),
             caption_tracking: Cell::new(false),
             caption_drag_origin: Cell::new(POINT::default()),
+            left_button_down_owned: Cell::new(false),
             ctrl_pan_active: Cell::new(false),
             ctrl_pan_last_client: Cell::new(POINT::default()),
         });
@@ -249,6 +254,20 @@ impl NativeWindowInner {
         self.state.is_open.get()
     }
 
+    /// Block the UI thread until a window message arrives (keyboard, mouse,
+    /// resize, paint, drag/drop, posted/sent messages) or `timeout_ms` elapses,
+    /// whichever comes first. Used to idle an inactive player without spinning
+    /// the CPU. The timeout bounds how long an asynchronous worker event waits
+    /// to be observed, so a finite value keeps device-loss / endpoint-change
+    /// recovery and timed overlays responsive even while otherwise quiescent.
+    pub fn wait_for_messages(&self, timeout_ms: u32) {
+        // SAFETY: no wait handles are supplied; we wait purely on the thread's
+        // message queue. The call has no preconditions beyond a valid thread.
+        unsafe {
+            MsgWaitForMultipleObjects(None, false, timeout_ms, QS_ALLINPUT);
+        }
+    }
+
     pub fn take_resize_request(&self) -> Option<ResizeRequest> {
         let request = self.state.resize_request.get();
         self.state.resize_request.set(None);
@@ -309,13 +328,12 @@ impl NativeWindowInner {
     }
 
     pub fn is_left_button_down(&self) -> bool {
-        unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+        self.state.left_button_down_owned.get()
     }
 
     pub fn is_ctrl_held(&self) -> bool {
         unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 }
     }
-
 
     pub fn resize_for_content(&self, content_width: u32, content_height: u32, center: bool) {
         if self.is_borderless.get() || content_width == 0 || content_height == 0 {
@@ -408,7 +426,9 @@ impl NativeWindowInner {
 
             // Fill the full work-area height; derive width from aspect ratio.
             let scale = max_client_h as f64 / content_height as f64;
-            let w = ((content_width as f64 * scale) as u32).max(1).min(max_client_w);
+            let w = ((content_width as f64 * scale) as u32)
+                .max(1)
+                .min(max_client_w);
             let h = if w < (content_width as f64 * scale) as u32 {
                 // Width was clamped — recalculate height from width constraint.
                 ((content_height as f64 * (w as f64 / content_width as f64)) as u32)
@@ -680,7 +700,15 @@ impl DxgiSwapChain {
             .ok_or_else(|| DxgiError("swap-chain backbuffer is not bound".into()))?;
 
         device.clear_render_target(render_target, clear_color);
-        for overlay in [subtitle_overlay, timeline_overlay, volume_overlay, help_overlay].into_iter().flatten() {
+        for overlay in [
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+        ]
+        .into_iter()
+        .flatten()
+        {
             let renderer = self
                 .subtitle_renderer
                 .get_or_insert(device.create_subtitle_renderer()?);
@@ -694,6 +722,61 @@ impl DxgiSwapChain {
         }
 
         self.present()
+    }
+
+    pub fn render_with_capture(
+        &mut self,
+        device: &D3D11Device,
+        clear_color: [f32; 4],
+        subtitle_overlay: Option<&SubtitleOverlay>,
+        timeline_overlay: Option<&SubtitleOverlay>,
+        volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
+    ) -> Result<(PresentResult, BgraFrameCapture), Box<dyn Error>> {
+        if device.is_device_removed() {
+            return Ok((
+                PresentResult::DeviceLost,
+                BgraFrameCapture {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0, 0, 0, 255],
+                },
+            ));
+        }
+
+        let render_target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| DxgiError("swap-chain backbuffer is not bound".into()))?;
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("swap-chain backbuffer texture is not bound".into()))?;
+
+        device.clear_render_target(render_target, clear_color);
+        for overlay in [
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let renderer = self
+                .subtitle_renderer
+                .get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(
+                renderer,
+                overlay,
+                render_target,
+                self.width,
+                self.height,
+            )?;
+        }
+
+        let capture = device.capture_bgra_texture(backbuffer)?;
+        Ok((self.present()?, capture))
     }
 
     pub fn render_surface(
@@ -725,8 +808,23 @@ impl DxgiSwapChain {
             (self.width, self.height)
         };
 
-        device.render_video_surface(surface, backbuffer, output_width, output_height, view, &mut self.vp_cache)?;
-        for overlay in [subtitle_overlay, timeline_overlay, volume_overlay, help_overlay].into_iter().flatten() {
+        device.render_video_surface(
+            surface,
+            backbuffer,
+            output_width,
+            output_height,
+            view,
+            &mut self.vp_cache,
+        )?;
+        for overlay in [
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+        ]
+        .into_iter()
+        .flatten()
+        {
             let render_target = self
                 .render_target
                 .as_ref()
@@ -744,6 +842,75 @@ impl DxgiSwapChain {
         }
 
         self.present()
+    }
+
+    pub fn render_surface_with_capture(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+        subtitle_overlay: Option<&SubtitleOverlay>,
+        timeline_overlay: Option<&SubtitleOverlay>,
+        volume_overlay: Option<&SubtitleOverlay>,
+        help_overlay: Option<&SubtitleOverlay>,
+        view: &crate::render::ViewTransform,
+    ) -> Result<(PresentResult, BgraFrameCapture), Box<dyn Error>> {
+        if device.is_device_removed() {
+            return Ok((
+                PresentResult::DeviceLost,
+                BgraFrameCapture {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0, 0, 0, 255],
+                },
+            ));
+        }
+
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("swap-chain backbuffer texture is not bound".into()))?;
+
+        let (output_width, output_height) = if self.width == 0 || self.height == 0 {
+            current_backbuffer_size(backbuffer)?
+        } else {
+            (self.width, self.height)
+        };
+
+        device.render_video_surface(
+            surface,
+            backbuffer,
+            output_width,
+            output_height,
+            view,
+            &mut self.vp_cache,
+        )?;
+        for overlay in [
+            subtitle_overlay,
+            timeline_overlay,
+            volume_overlay,
+            help_overlay,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let render_target = self
+                .render_target
+                .as_ref()
+                .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
+            let renderer = self
+                .subtitle_renderer
+                .get_or_insert(device.create_subtitle_renderer()?);
+            device.render_subtitle_overlay(
+                renderer,
+                overlay,
+                render_target,
+                output_width,
+                output_height,
+            )?;
+        }
+
+        let capture = device.capture_bgra_texture(backbuffer)?;
+        Ok((self.present()?, capture))
     }
 
     pub fn resize(
@@ -884,7 +1051,12 @@ fn register_window_class(instance: HINSTANCE, class_name: PCWSTR) -> Result<(), 
 }
 
 fn load_fastplay_icon(width: i32, height: i32) -> HICON {
-    let module = unsafe { GetModuleHandleW(None).ok().map(|h| HINSTANCE(h.0)).unwrap_or_default() };
+    let module = unsafe {
+        GetModuleHandleW(None)
+            .ok()
+            .map(|h| HINSTANCE(h.0))
+            .unwrap_or_default()
+    };
     let handle = unsafe {
         LoadImageW(
             module,
@@ -899,7 +1071,12 @@ fn load_fastplay_icon(width: i32, height: i32) -> HICON {
     match handle {
         Ok(handle) => HICON(handle.0),
         Err(error) => {
-            flog!("icon load error width={} height={} error={}", width, height, error);
+            flog!(
+                "icon load error width={} height={} error={}",
+                width,
+                height,
+                error
+            );
             HICON::default()
         }
     }
@@ -971,7 +1148,10 @@ impl IDropTarget_Impl for FastPlayDropTarget_Impl {
         if let Some(data_obj) = pdataobj {
             if let Some(path) = unsafe { extract_drop_path(data_obj) } {
                 if let Some(state) = unsafe { window_state(self.hwnd) } {
-                    state.input_events.borrow_mut().push(InputEvent::FileDropped(path));
+                    state
+                        .input_events
+                        .borrow_mut()
+                        .push(InputEvent::FileDropped(path));
                 }
             }
         }
@@ -997,7 +1177,11 @@ unsafe fn extract_drop_path(data_obj: &IDataObject) -> Option<PathBuf> {
         DragQueryFileW(hdrop, 0, Some(&mut buf));
         buf.retain(|&c| c != 0);
         let p = PathBuf::from(std::ffi::OsString::from_wide(&buf));
-        if p.exists() { Some(p) } else { None }
+        if p.exists() {
+            Some(p)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1065,28 +1249,73 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::ToggleBorderlessFullscreen);
                     }
+                    // Ctrl+S → save screenshot
+                    0x53 if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::SaveScreenshot);
+                    }
+                    // Ctrl+F / Ctrl+B → step one frame forward/backward
+                    0x46 if ctrl_held => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::StepFrameForward);
+                    }
+                    0x42 if ctrl_held => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::StepFrameBackward);
+                    }
                     0x52 if ctrl_held => {
                         state
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::RotateClockwise);
                     }
-                    // I → set in-point, Ctrl+I → clear in-point
+                    // I → set in-point, Shift+I → clear in-point
                     0x49 if ctrl_held => {
-                        state.input_events.borrow_mut().push(InputEvent::ClearInPoint);
+                        // Ctrl+I — reserved / no-op (was clear in-point, now Shift+I)
                     }
                     0x49 => {
-                        state.input_events.borrow_mut().push(InputEvent::SetInPoint);
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        if shift_held {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::ClearInPoint);
+                        } else {
+                            state.input_events.borrow_mut().push(InputEvent::SetInPoint);
+                        }
                     }
-                    // O → set out-point, Ctrl+O → clear out-point
+                    // Ctrl+O → open file dialog, Shift+O → clear out-point, O → set out-point
                     0x4F if ctrl_held => {
-                        state.input_events.borrow_mut().push(InputEvent::ClearOutPoint);
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::OpenFileDialog);
                     }
                     0x4F => {
-                        state.input_events.borrow_mut().push(InputEvent::SetOutPoint);
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        if shift_held {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::ClearOutPoint);
+                        } else {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::SetOutPoint);
+                        }
                     }
                     0x52 => {
-                        state.input_events.borrow_mut().push(InputEvent::ToggleLoopRange);
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ToggleLoopRange);
                     }
                     0x45 if ctrl_held => {
                         state
@@ -1100,7 +1329,10 @@ unsafe extern "system" fn window_proc(
                     }
                     // Ctrl+Q → half the video's native resolution
                     0x51 if ctrl_held => {
-                        state.input_events.borrow_mut().push(InputEvent::HalfSizeWindow);
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::HalfSizeWindow);
                     }
                     // Ctrl+0 → reset view
                     0x30 if ctrl_held => {
@@ -1128,10 +1360,7 @@ unsafe extern "system" fn window_proc(
                     }
                     // ESC → exit borderless fullscreen
                     0x1B => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::EscapeKey);
+                        state.input_events.borrow_mut().push(InputEvent::EscapeKey);
                     }
                     // Backspace → cancel scrub
                     0x08 => {
@@ -1142,13 +1371,22 @@ unsafe extern "system" fn window_proc(
                     }
                     // [ → slower, ] → faster, \ → reset to 1x
                     0xDB => {
-                        state.input_events.borrow_mut().push(InputEvent::StepPlaybackRate(-1));
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::StepPlaybackRate(-1));
                     }
                     0xDD => {
-                        state.input_events.borrow_mut().push(InputEvent::StepPlaybackRate(1));
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::StepPlaybackRate(1));
                     }
                     0xDC => {
-                        state.input_events.borrow_mut().push(InputEvent::ResetPlaybackRate);
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ResetPlaybackRate);
                     }
                     key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
                         // Bit 30 of lparam: previous key state (1 = was down).
@@ -1265,6 +1503,11 @@ unsafe extern "system" fn window_proc(
             if let Some(state) = window_state(hwnd) {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if state.left_button_down_owned.get() && (wparam.0 as u32 & 0x0001) == 0 {
+                    state.left_button_down_owned.set(false);
+                    state.ctrl_pan_active.set(false);
+                    let _ = ReleaseCapture();
+                }
                 if state.ctrl_pan_active.get() {
                     // MK_LBUTTON (0x0001) — cancel if button no longer held.
                     if (wparam.0 as u32 & 0x0001) == 0 {
@@ -1275,7 +1518,10 @@ unsafe extern "system" fn window_proc(
                         let dy = y - last.y;
                         state.ctrl_pan_last_client.set(POINT { x, y });
                         if dx != 0 || dy != 0 {
-                            state.input_events.borrow_mut().push(InputEvent::PanDelta { dx, dy });
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::PanDelta { dx, dy });
                         }
                     }
                 }
@@ -1308,6 +1554,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             if let Some(state) = window_state(hwnd) {
+                state.left_button_down_owned.set(true);
+                SetCapture(hwnd);
                 // MK_CONTROL (0x0008) is set in wParam when Ctrl is held.
                 let ctrl_held = (wparam.0 as u32 & 0x0008) != 0;
                 if ctrl_held && !state.caption_tracking.get() {
@@ -1351,6 +1599,10 @@ unsafe extern "system" fn window_proc(
                     state.caption_tracking.set(false);
                     let _ = ReleaseCapture();
                 }
+                if state.left_button_down_owned.get() {
+                    state.left_button_down_owned.set(false);
+                    let _ = ReleaseCapture();
+                }
                 state.ctrl_pan_active.set(false);
             }
             LRESULT(0)
@@ -1358,13 +1610,12 @@ unsafe extern "system" fn window_proc(
         WM_CAPTURECHANGED => {
             if let Some(state) = window_state(hwnd) {
                 state.caption_tracking.set(false);
+                state.left_button_down_owned.set(false);
                 state.ctrl_pan_active.set(false);
             }
             LRESULT(0)
         }
-        WM_MOVING => {
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
+        WM_MOVING => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         WM_NCRBUTTONUP => {
             // Right-clicking the title bar shows the system context menu.
             // DefWindowProcW internally calls TrackPopupMenu which blocks.
@@ -1471,6 +1722,44 @@ unsafe extern "system" fn window_proc(
             }
             unsafe {
                 PostQuitMessage(0);
+            }
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            // Enforce a minimum window size so the client area never reaches
+            // degenerate dimensions (e.g. 0×0) that would break swap-chain
+            // resize or aspect-ratio calculations.
+            let mmi = lparam.0 as *mut MINMAXINFO;
+            if !mmi.is_null() {
+                // Convert minimum client size to window size (adds chrome).
+                let (min_w, min_h) =
+                    adjust_window_size(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT).unwrap_or((640, 360));
+                unsafe {
+                    (*mmi).ptMinTrackSize = POINT { x: min_w, y: min_h };
+                }
+            }
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            // The window moved to a monitor with a different DPI.  Use the
+            // suggested rect from the system to resize and reposition so the
+            // window keeps its apparent size on the new display.
+            let suggested = lparam.0 as *const RECT;
+            if !suggested.is_null() {
+                let rc = unsafe { *suggested };
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOP,
+                        rc.left,
+                        rc.top,
+                        rc.right - rc.left,
+                        rc.bottom - rc.top,
+                        SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                    );
+                }
+                // The resulting WM_SIZE will post a ResizeRequest for the
+                // swap chain through the existing path.
             }
             LRESULT(0)
         }

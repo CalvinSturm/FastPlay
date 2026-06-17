@@ -4,12 +4,19 @@ use std::path::PathBuf;
 pub enum InputEvent {
     TogglePause,
     ToggleSubtitles,
+    SaveScreenshot,
     SeekRelativeSeconds(i64),
+    StepFrameForward,
+    StepFrameBackward,
     AdjustVolumeSteps(i16),
     RotateClockwise,
     RotateCounterClockwise,
     ToggleBorderlessFullscreen,
-    ZoomAtCursor { delta: i16, cursor_x: i32, cursor_y: i32 },
+    ZoomAtCursor {
+        delta: i16,
+        cursor_x: i32,
+        cursor_y: i32,
+    },
     ResetView,
     SetInPoint,
     ClearInPoint,
@@ -24,7 +31,11 @@ pub enum InputEvent {
     StepPlaybackRate(i8),
     ResetPlaybackRate,
     FileDropped(PathBuf),
-    PanDelta { dx: i32, dy: i32 },
+    PanDelta {
+        dx: i32,
+        dy: i32,
+    },
     ShowHelp,
     HideHelp,
+    OpenFileDialog,
 }

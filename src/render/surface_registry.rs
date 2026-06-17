@@ -53,7 +53,11 @@ impl SurfaceRegistry {
         if index >= self.entries.len() {
             self.entries.resize_with(index + 1, || None);
         }
-        self.entries[index] = Some(SurfaceEntry { open_gen, seek_gen, surface });
+        self.entries[index] = Some(SurfaceEntry {
+            open_gen,
+            seek_gen,
+            surface,
+        });
         self.alive += 1;
         handle
     }

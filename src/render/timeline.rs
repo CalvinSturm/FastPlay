@@ -151,8 +151,18 @@ mod tests {
     #[test]
     fn activation_zone_covers_bottom_strip_only() {
         assert!(activation_hit_test(W, H, 0, H as i32 - 1));
-        assert!(activation_hit_test(W, H, W as i32 - 1, H as i32 - TIMELINE_ACTIVATION_ZONE_PX));
-        assert!(!activation_hit_test(W, H, 0, H as i32 - TIMELINE_ACTIVATION_ZONE_PX - 1));
+        assert!(activation_hit_test(
+            W,
+            H,
+            W as i32 - 1,
+            H as i32 - TIMELINE_ACTIVATION_ZONE_PX
+        ));
+        assert!(!activation_hit_test(
+            W,
+            H,
+            0,
+            H as i32 - TIMELINE_ACTIVATION_ZONE_PX - 1
+        ));
         assert!(!activation_hit_test(W, H, -1, H as i32 - 1));
         assert!(!activation_hit_test(W, H, W as i32, H as i32 - 1));
     }
@@ -209,9 +219,39 @@ mod tests {
 
     #[test]
     fn overlay_model_rejects_invalid_inputs() {
-        assert!(build_overlay_model(0, H, Duration::ZERO, None, dur_secs(10.0), false, None, None).is_none());
-        assert!(build_overlay_model(W, 0, Duration::ZERO, None, dur_secs(10.0), false, None, None).is_none());
-        assert!(build_overlay_model(W, H, Duration::ZERO, None, Duration::ZERO, false, None, None).is_none());
+        assert!(build_overlay_model(
+            0,
+            H,
+            Duration::ZERO,
+            None,
+            dur_secs(10.0),
+            false,
+            None,
+            None
+        )
+        .is_none());
+        assert!(build_overlay_model(
+            W,
+            0,
+            Duration::ZERO,
+            None,
+            dur_secs(10.0),
+            false,
+            None,
+            None
+        )
+        .is_none());
+        assert!(build_overlay_model(
+            W,
+            H,
+            Duration::ZERO,
+            None,
+            Duration::ZERO,
+            false,
+            None,
+            None
+        )
+        .is_none());
     }
 
     #[test]

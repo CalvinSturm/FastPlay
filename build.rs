@@ -20,7 +20,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let ffmpeg = discover_ffmpeg()?;
 
-    println!("cargo:rustc-link-search=native={}", ffmpeg.lib_dir.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        ffmpeg.lib_dir.display()
+    );
     println!("cargo:rustc-link-lib=dylib=avcodec");
     println!("cargo:rustc-link-lib=dylib=avformat");
     println!("cargo:rustc-link-lib=dylib=swscale");
@@ -44,7 +47,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rc_path = PathBuf::from(env::var("OUT_DIR")?).join("fastplay.rc");
     fs::write(
         &rc_path,
-        format!("1 ICON \"{}\"\n", icon_path.to_string_lossy().replace('\\', "/")),
+        format!(
+            "1 ICON \"{}\"\n",
+            icon_path.to_string_lossy().replace('\\', "/")
+        ),
     )?;
     let _ = embed_resource::compile(&rc_path, embed_resource::NONE);
 
@@ -96,7 +102,11 @@ fn candidate_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     if let Some(vcpkg_root) = env::var_os("VCPKG_ROOT") {
-        roots.push(PathBuf::from(vcpkg_root).join("installed").join("x64-windows"));
+        roots.push(
+            PathBuf::from(vcpkg_root)
+                .join("installed")
+                .join("x64-windows"),
+        );
     }
 
     if let Some(user_profile) = env::var_os("USERPROFILE") {
@@ -130,11 +140,19 @@ fn layout_from_root(root: &Path) -> Option<FfmpegPaths> {
 
 fn validate_include_and_lib(include_dir: &Path, lib_dir: &Path) -> Result<(), Box<dyn Error>> {
     if !has_ffmpeg_headers(include_dir) {
-        return Err(format!("FFmpeg headers were not found under {}", include_dir.display()).into());
+        return Err(format!(
+            "FFmpeg headers were not found under {}",
+            include_dir.display()
+        )
+        .into());
     }
 
     if !has_ffmpeg_libs(lib_dir) {
-        return Err(format!("FFmpeg import libraries were not found under {}", lib_dir.display()).into());
+        return Err(format!(
+            "FFmpeg import libraries were not found under {}",
+            lib_dir.display()
+        )
+        .into());
     }
 
     Ok(())
@@ -143,7 +161,10 @@ fn validate_include_and_lib(include_dir: &Path, lib_dir: &Path) -> Result<(), Bo
 fn has_ffmpeg_headers(include_dir: &Path) -> bool {
     include_dir.join("libavcodec").join("avcodec.h").exists()
         && include_dir.join("libavformat").join("avformat.h").exists()
-        && include_dir.join("libavutil").join("hwcontext_d3d11va.h").exists()
+        && include_dir
+            .join("libavutil")
+            .join("hwcontext_d3d11va.h")
+            .exists()
 }
 
 fn has_ffmpeg_libs(lib_dir: &Path) -> bool {

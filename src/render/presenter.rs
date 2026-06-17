@@ -1,6 +1,6 @@
 use crate::{
     ffi::{
-        d3d11::{D3D11Device, SubtitleOverlay, VideoSurface},
+        d3d11::{BgraFrameCapture, D3D11Device, SubtitleOverlay, VideoSurface},
         dxgi::PresentResult,
     },
     platform::window::NativeWindow,
@@ -92,13 +92,52 @@ impl Presenter {
         )
     }
 
+    pub fn render_with_capture(
+        &mut self,
+        view: &crate::render::ViewTransform,
+    ) -> Result<(PresentResult, BgraFrameCapture), Box<dyn std::error::Error>> {
+        let Some(sc) = self.swap_chain.as_mut() else {
+            return Err("swap chain unavailable".into());
+        };
+        if let Some(handle) = self.current_surface {
+            if let Some(entry) = self.surfaces.get(handle) {
+                if !self.has_ever_shown_content {
+                    self.has_ever_shown_content = true;
+                    self.idle_overlay = None;
+                }
+                return sc.render_surface_with_capture(
+                    &self.device,
+                    &entry.surface,
+                    self.subtitle_overlay.as_ref(),
+                    self.timeline_overlay.as_ref(),
+                    self.volume_overlay.as_ref(),
+                    self.help_overlay.as_ref(),
+                    view,
+                );
+            }
+        }
+
+        sc.render_with_capture(
+            &self.device,
+            [0.08, 0.10, 0.14, 1.0],
+            self.idle_overlay.as_ref(),
+            self.timeline_overlay.as_ref(),
+            self.volume_overlay.as_ref(),
+            self.help_overlay.as_ref(),
+        )
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
         let Some(sc) = self.swap_chain.as_mut() else {
             return Err("swap chain unavailable".into());
         };
         sc.resize(&self.device, width, height)?;
         if !self.has_ever_shown_content {
-            self.idle_overlay = self.device.create_idle_overlay(width, height).ok().flatten();
+            self.idle_overlay = self
+                .device
+                .create_idle_overlay(width, height)
+                .ok()
+                .flatten();
         }
         Ok(())
     }
@@ -190,9 +229,10 @@ impl Presenter {
         viewport_height: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.subtitle_overlay = match text {
-            Some(text) => self
-                .device
-                .create_subtitle_overlay(text, viewport_width, viewport_height)?,
+            Some(text) => {
+                self.device
+                    .create_subtitle_overlay(text, viewport_width, viewport_height)?
+            }
             None => None,
         };
         Ok(())
@@ -232,9 +272,12 @@ impl Presenter {
 
         let existing = self.volume_overlay.take();
         self.volume_overlay = match text {
-            Some(text) => self
-                .device
-                .create_volume_overlay(text, viewport_width, viewport_height, existing)?,
+            Some(text) => self.device.create_volume_overlay(
+                text,
+                viewport_width,
+                viewport_height,
+                existing,
+            )?,
             None => None,
         };
         self.volume_text = next_text;
@@ -247,7 +290,9 @@ impl Presenter {
         viewport_height: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.help_overlay.is_none() {
-            self.help_overlay = self.device.create_help_overlay(viewport_width, viewport_height)?;
+            self.help_overlay = self
+                .device
+                .create_help_overlay(viewport_width, viewport_height)?;
         }
         Ok(())
     }
@@ -269,7 +314,11 @@ impl Presenter {
         viewport_width: u32,
         viewport_height: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.idle_overlay = self.device.create_idle_overlay(viewport_width, viewport_height).ok().flatten();
+        self.idle_overlay = self
+            .device
+            .create_idle_overlay(viewport_width, viewport_height)
+            .ok()
+            .flatten();
         self.has_ever_shown_content = false;
         Ok(())
     }

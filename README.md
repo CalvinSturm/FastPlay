@@ -4,7 +4,7 @@ FastPlay is a Windows video player built for the parts of playback people actual
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/download/v0.2.0/fastplay-0.2.0-x86_64.msi) • [All releases](../../releases) • [Report an issue](../../issues)
+[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/download/v0.2.1/fastplay-0.2.1-x86_64.msi) • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
@@ -17,11 +17,15 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Space` | Pause / resume / replay at end |
 | `Left` | Seek backward 5s, hold for 15s steps |
 | `Right` | Seek forward 5s, hold for 15s steps |
+| `Ctrl+F` | Move one frame forward |
+| `Ctrl+B` | Move one frame backward |
+| `Ctrl+O` | Open media file |
+| `Ctrl+S` | Save screenshot |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
-| `Ctrl+I` | Clear in-point |
+| `Shift+I` | Clear in-point |
 | `O` | Set out-point at current position |
-| `Ctrl+O` | Clear out-point |
+| `Shift+O` | Clear out-point |
 | `R` | Toggle loop range (if in/out set) · toggle auto-replay (if no range) |
 | `MouseWheel` | Adjust volume |
 | `Esc` | Exit borderless fullscreen |
@@ -52,12 +56,12 @@ Press `I` to mark where playback starts and `O` to mark where it ends. The range
 | — | ✓ | start → out-point | start |
 | ✓ | ✓ | in-point → out-point | in-point |
 
-Press `R` while a range is active to loop it continuously. Use `Ctrl+I` / `Ctrl+O` to clear individual points. In/out points reset when a new file is opened.
+Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shift+O` to clear individual points. In/out points reset when a new file is opened.
 
 ## Features
 
 ### Playback
-- drag-and-drop file open
+- `Ctrl+O` file open dialog and drag-and-drop file open
 - quick open and first-frame path
 - responsive keyboard seek with accelerated hold behavior
 - timeline scrubbing overlay with playback position
@@ -86,6 +90,13 @@ Press `R` while a range is active to loop it continuously. Use `Ctrl+I` / `Ctrl+
 ### Subtitles
 - external `.srt` subtitle overlay
 - runtime subtitle toggle
+- accepts both comma and period millisecond separators in SRT timestamps
+- UTF-8 with BOM support and Windows-1252 fallback encoding
+- strips common formatting tags (`<b>`, `<i>`, `<u>`, `<font>`)
+
+### Platform
+- per-monitor DPI awareness (Per-Monitor V2 with system-aware fallback)
+- minimum window size enforcement (640×360)
 
 ## Goals
 
