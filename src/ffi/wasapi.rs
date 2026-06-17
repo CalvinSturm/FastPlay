@@ -1,20 +1,15 @@
 use std::{error::Error, fmt};
 
-use windows::{
-    Win32::{
-        Media::Audio::{
-            eConsole, eRender, AUDCLNT_SHAREMODE_SHARED, IAudioClient3, IAudioRenderClient,
-            IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
-            WAVEFORMATEXTENSIBLE,
-        },
-        Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
-        Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT,
-        System::{
-            Com::{
-                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-                COINIT_APARTMENTTHREADED,
-            },
-        },
+use windows::Win32::{
+    Media::Audio::{
+        eConsole, eRender, IAudioClient3, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    },
+    Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
+    Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT,
+    System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+        COINIT_APARTMENTTHREADED,
     },
 };
 
@@ -70,8 +65,7 @@ impl WasapiAudioSink {
         let com = ComApartment::initialize()?;
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
-        let device: IMMDevice =
-            unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole)? };
+        let device: IMMDevice = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole)? };
         let audio_client: IAudioClient3 = unsafe { device.Activate(CLSCTX_ALL, None)? };
         let mix_format = MixFormat::query(&audio_client)?;
         let actual_format = mix_format.audio_stream_format()?;
@@ -175,7 +169,24 @@ impl WasapiAudioSink {
         // - source and destination slices are non-overlapping and sized in bytes
         unsafe {
             let destination = self.render_client.GetBuffer(frames_to_write)?;
+
+            // Once GetBuffer succeeds the render buffer is checked out and must
+            // be returned with exactly one ReleaseBuffer, or the audio client is
+            // left locked. The guard releases 0 frames if anything below fails
+            // or panics; the success path disarms it and releases the real
+            // count. (Today the copy cannot fail, but the guard keeps the
+            // acquire/release balanced if a fallible conversion is ever added
+            // between GetBuffer and ReleaseBuffer.)
+            let mut release = ReleaseBufferGuard {
+                render_client: &self.render_client,
+                armed: true,
+            };
+
             std::ptr::copy_nonoverlapping(data.as_ptr(), destination.cast::<u8>(), bytes_to_copy);
+
+            // Disarm before the real release so a ReleaseBuffer failure cannot
+            // trigger a second (incorrect) release from the guard.
+            release.armed = false;
             self.render_client.ReleaseBuffer(frames_to_write, 0)?;
         }
 
@@ -187,13 +198,36 @@ impl WasapiAudioSink {
     }
 }
 
+/// Releases a checked-out WASAPI render buffer if dropped while still armed.
+/// Guarantees a `GetBuffer` is never left without a matching `ReleaseBuffer`
+/// when the copy/conversion between them fails or unwinds.
+struct ReleaseBufferGuard<'a> {
+    render_client: &'a IAudioRenderClient,
+    armed: bool,
+}
+
+impl Drop for ReleaseBufferGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Release 0 frames: the buffer is returned to WASAPI emitting no
+            // audio. Best-effort and never panics in Drop.
+            // SAFETY: paired with a successful GetBuffer on the same client.
+            unsafe {
+                let _ = self.render_client.ReleaseBuffer(0, 0);
+            }
+        }
+    }
+}
+
 struct MixFormat(*mut WAVEFORMATEX);
 
 impl MixFormat {
     fn query(audio_client: &IAudioClient3) -> Result<Self, Box<dyn Error>> {
         let format = unsafe { audio_client.GetMixFormat()? };
         if format.is_null() {
-            return Err(Box::new(WasapiError("IAudioClient3::GetMixFormat returned null".into())));
+            return Err(Box::new(WasapiError(
+                "IAudioClient3::GetMixFormat returned null".into(),
+            )));
         }
         Ok(Self(format))
     }
@@ -210,9 +244,13 @@ impl MixFormat {
         let bits_per_sample = format.wBitsPerSample;
         let bytes_per_sample = bits_per_sample / 8;
         if bytes_per_sample == 0 {
-            return Err(Box::new(WasapiError("mix format reported zero bytes per sample".into())));
+            return Err(Box::new(WasapiError(
+                "mix format reported zero bytes per sample".into(),
+            )));
         }
-        if format_tag != WAVE_FORMAT_IEEE_FLOAT as u16 && format_tag != WAVE_FORMAT_EXTENSIBLE as u16 {
+        if format_tag != WAVE_FORMAT_IEEE_FLOAT as u16
+            && format_tag != WAVE_FORMAT_EXTENSIBLE as u16
+        {
             return Err(Box::new(WasapiError(format!(
                 "default shared mix format tag {} is not a float format",
                 format_tag

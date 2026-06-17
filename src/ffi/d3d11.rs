@@ -1,47 +1,56 @@
-use std::{error::Error, ffi::c_void, fmt, mem::{size_of, ManuallyDrop}, ptr::null_mut, sync::{Arc, Mutex}};
+use std::{
+    error::Error,
+    ffi::c_void,
+    fmt,
+    mem::{size_of, ManuallyDrop},
+    ptr::null_mut,
+    sync::{Arc, Mutex},
+};
 
 use windows::{
     core::{Interface, PCSTR},
     Win32::{
         Foundation::{BOOL, COLORREF, RECT},
         Graphics::{
-            Direct3D::{Fxc::D3DCompile, ID3DBlob, D3D_DRIVER_TYPE_HARDWARE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST},
+            Direct3D::{
+                Fxc::D3DCompile, ID3DBlob, D3D_DRIVER_TYPE_HARDWARE,
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+            },
             Direct3D11::{
-                D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
-                ID3D11BlendState, ID3D11Buffer, ID3D11InputLayout, ID3D11PixelShader,
+                D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11Device,
+                ID3D11DeviceContext, ID3D11InputLayout, ID3D11Multithread, ID3D11PixelShader,
                 ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
                 ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice,
-                D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
-                D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE,
-                D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA, D3D11_BUFFER_DESC,
-                D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_ELEMENT_DESC,
-                D3D11_INPUT_PER_VERTEX_DATA, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
-                D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
-                D3D11_TEX2D_VPIV, D3D11_VIEWPORT,
-                D3D11_TEX2D_VPOV, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
-                D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                D3D11_VIDEO_PROCESSOR_ROTATION_90, D3D11_VIDEO_PROCESSOR_ROTATION_180,
-                D3D11_VIDEO_PROCESSOR_ROTATION_270, D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+                ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+                ID3D11VideoProcessorOutputView, D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE,
+                D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
+                D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA, D3D11_BUFFER_DESC,
+                D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CPU_ACCESS_READ,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE,
+                D3D11_MAP_READ, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+                D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
+                D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
+                D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
                 D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
                 D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-                D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+                D3D11_VIDEO_PROCESSOR_ROTATION_180, D3D11_VIDEO_PROCESSOR_ROTATION_270,
+                D3D11_VIDEO_PROCESSOR_ROTATION_90, D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+                D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VIEWPORT,
                 D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
-                ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-                ID3D11VideoProcessorOutputView,
             },
             Dxgi::Common::{
-                DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32_FLOAT,
-                DXGI_FORMAT_R32G32B32_FLOAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+                DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32B32_FLOAT,
+                DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
             },
             Gdi::{
-                CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW,
-                SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-                CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER,
-                DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
-                FF_DONTCARE, FW_MEDIUM, FW_SEMIBOLD, HGDIOBJ,
-                OUT_DEFAULT_PRECIS, TRANSPARENT, DEFAULT_CHARSET, DEFAULT_PITCH,
+                CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
+                DrawTextW, SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER,
+                BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+                DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
+                DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_DONTCARE, FW_MEDIUM, FW_SEMIBOLD,
+                HGDIOBJ, OUT_DEFAULT_PRECIS, TRANSPARENT,
             },
         },
     },
@@ -132,6 +141,12 @@ pub(crate) struct VideoProcessorCache {
     backbuffer_identity: *mut c_void,
 }
 
+pub(crate) struct BgraFrameCapture {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SubtitleVertex {
@@ -143,6 +158,24 @@ struct SubtitleBitmap {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+}
+
+/// Unmaps a mapped subresource when dropped, so a successful `Map` is always
+/// paired with an `Unmap` even when reading the mapped data returns early.
+struct MapGuard<'a> {
+    context: &'a ID3D11DeviceContext,
+    resource: &'a ID3D11Texture2D,
+    subresource: u32,
+}
+
+impl Drop for MapGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: paired with a successful Map of this subresource; the caller
+        // holds the context lock for the lifetime of this guard.
+        unsafe {
+            self.context.Unmap(self.resource, self.subresource);
+        }
+    }
 }
 
 impl D3D11Device {
@@ -229,6 +262,83 @@ impl D3D11Device {
         }
     }
 
+    pub(crate) fn capture_bgra_texture(
+        &self,
+        texture: &ID3D11Texture2D,
+    ) -> Result<BgraFrameCapture, Box<dyn Error>> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            texture.GetDesc(&mut desc);
+        }
+        if desc.Width == 0 || desc.Height == 0 {
+            return Err(Box::new(D3D11Error(
+                "cannot capture an empty D3D11 texture",
+            )));
+        }
+
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Width: desc.Width,
+            Height: desc.Height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: desc.Format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+
+        let mut staging = None;
+        unsafe {
+            self.device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))?;
+        }
+        let staging = staging.ok_or(D3D11Error("CreateTexture2D returned no staging texture"))?;
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let row_bytes = desc.Width as usize * 4;
+        let mut pixels = vec![0u8; row_bytes * desc.Height as usize];
+        unsafe {
+            self.context.CopyResource(&staging, texture);
+            self.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            // From here a successful Map must be released on every path. The
+            // guard's Unmap runs before `_lock` is released (reverse drop order).
+            let _unmap = MapGuard {
+                context: &self.context,
+                resource: &staging,
+                subresource: 0,
+            };
+
+            // Never assume the mapping is tightly packed as width*4: the driver
+            // may align each row to a wider RowPitch. We copy row-by-row using
+            // RowPitch below, but a RowPitch *smaller* than one packed row would
+            // make the final row read past the mapped region — reject it.
+            if (mapped.RowPitch as usize) < row_bytes {
+                return Err(Box::new(D3D11Error(
+                    "mapped RowPitch smaller than one packed row of pixels",
+                )));
+            }
+
+            for row in 0..desc.Height as usize {
+                let src = (mapped.pData as *const u8).add(row * mapped.RowPitch as usize);
+                let dst = pixels.as_mut_ptr().add(row * row_bytes);
+                std::ptr::copy_nonoverlapping(src, dst, row_bytes);
+            }
+        }
+
+        Ok(BgraFrameCapture {
+            width: desc.Width,
+            height: desc.Height,
+            pixels,
+        })
+    }
+
     /// Returns `true` if the D3D11 device has been removed (GPU TDR or driver
     /// reset).  Must be checked **before** issuing any rendering commands so
     /// that stale COM objects in the video processor cache are never touched.
@@ -269,7 +379,9 @@ impl D3D11Device {
         // any D3D11 objects.  Without this the worker thread crashes inside
         // d3d11.dll when calling CopySubresourceRegion on a dead device.
         if self.is_device_removed() {
-            return Err(Box::new(D3D11Error("D3D11 device removed (TDR) during surface copy")));
+            return Err(Box::new(D3D11Error(
+                "D3D11 device removed (TDR) during surface copy",
+            )));
         }
 
         let source = ID3D11Texture2D::from_raw_borrowed(&texture)
@@ -297,8 +409,8 @@ impl D3D11Device {
         let mut owned_texture = None;
         self.device
             .CreateTexture2D(&copy_desc, None, Some(&mut owned_texture))?;
-        let owned_texture = owned_texture
-            .ok_or(D3D11Error("CreateTexture2D returned no copy texture"))?;
+        let owned_texture =
+            owned_texture.ok_or(D3D11Error("CreateTexture2D returned no copy texture"))?;
 
         // SAFETY: both textures belong to the same D3D11 device. The source
         // subresource index selects one slice from the decoder's texture
@@ -386,8 +498,7 @@ impl D3D11Device {
                     let enumerator = self
                         .video_device
                         .CreateVideoProcessorEnumerator(&content_desc)?;
-                    let processor =
-                        self.video_device.CreateVideoProcessor(&enumerator, 0)?;
+                    let processor = self.video_device.CreateVideoProcessor(&enumerator, 0)?;
 
                     let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                         ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
@@ -426,12 +537,8 @@ impl D3D11Device {
             } else {
                 (surface.width, surface.height)
             };
-            let base_rect = aspect_fit_rect(
-                display_width,
-                display_height,
-                output_width,
-                output_height,
-            );
+            let base_rect =
+                aspect_fit_rect(display_width, display_height, output_width, output_height);
             let (source_rect, dest_rect) = compute_zoomed_rects(
                 &base_rect,
                 view,
@@ -462,8 +569,8 @@ impl D3D11Device {
                 &input_desc,
                 Some(&mut new_view),
             )?;
-            let input_view = new_view
-                .ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
+            let input_view =
+                new_view.ok_or(D3D11Error("CreateVideoProcessorInputView returned no view"))?;
 
             let stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),
@@ -532,10 +639,22 @@ impl D3D11Device {
                 // field is ManuallyDrop so its COM reference is never released
                 // on drop — we explicitly drop it afterwards so the kernel-mode
                 // input view is freed every frame.
-                self.video_context
-                    .VideoProcessorBlt(&cache.processor, &cache.output_view, 0, &streams)
+                self.video_context.VideoProcessorBlt(
+                    &cache.processor,
+                    &cache.output_view,
+                    0,
+                    &streams,
+                )
             };
             ManuallyDrop::drop(&mut streams[0].pInputSurface);
+            // Surface a blit failure through the error path rather than letting
+            // the caller present a stale/blank backbuffer: render_surface in
+            // dxgi.rs propagates this Err *before* calling Present, and the
+            // session turns it into a device-recovery attempt. Log at the
+            // failure site so the cause is attributable in the trace.
+            if let Err(error) = &blt_result {
+                flog!("VideoProcessorBlt failed: {error}");
+            }
             blt_result?;
         }
 
@@ -622,16 +741,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         let pixel_bytecode = shader_blob_bytes(&pixel_blob);
 
         unsafe {
-            self.device.CreateVertexShader(
-                vertex_bytecode,
-                None,
-                Some(&mut vertex_shader),
-            )?;
-            self.device.CreatePixelShader(
-                pixel_bytecode,
-                None,
-                Some(&mut pixel_shader),
-            )?;
+            self.device
+                .CreateVertexShader(vertex_bytecode, None, Some(&mut vertex_shader))?;
+            self.device
+                .CreatePixelShader(pixel_bytecode, None, Some(&mut pixel_shader))?;
             self.device.CreateInputLayout(
                 &input_elements,
                 vertex_bytecode,
@@ -644,11 +757,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         }
 
         Ok(SubtitleRenderer {
-            vertex_shader: vertex_shader.ok_or(D3D11Error("CreateVertexShader returned no shader"))?,
+            vertex_shader: vertex_shader
+                .ok_or(D3D11Error("CreateVertexShader returned no shader"))?,
             pixel_shader: pixel_shader.ok_or(D3D11Error("CreatePixelShader returned no shader"))?,
             input_layout: input_layout.ok_or(D3D11Error("CreateInputLayout returned no layout"))?,
             sampler: sampler.ok_or(D3D11Error("CreateSamplerState returned no sampler"))?,
-            blend_state: blend_state.ok_or(D3D11Error("CreateBlendState returned no blend state"))?,
+            blend_state: blend_state
+                .ok_or(D3D11Error("CreateBlendState returned no blend state"))?,
         })
     }
 
@@ -667,7 +782,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -680,7 +798,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         };
         let mut texture = None;
         let mut shader_resource_view = None;
-        let vertices = subtitle_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
+        let vertices =
+            subtitle_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
         let vertex_buffer_desc = D3D11_BUFFER_DESC {
             ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
             Usage: D3D11_USAGE_IMMUTABLE,
@@ -706,8 +825,11 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 None,
                 Some(&mut shader_resource_view),
             )?;
-            self.device
-                .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
+            self.device.CreateBuffer(
+                &vertex_buffer_desc,
+                Some(&vertex_buffer_data),
+                Some(&mut vertex_buffer),
+            )?;
         }
 
         let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no subtitle texture"))?;
@@ -716,8 +838,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             shader_resource_view: shader_resource_view.ok_or(D3D11Error(
                 "CreateShaderResourceView returned no subtitle view",
             ))?,
-            vertex_buffer: vertex_buffer
-                .ok_or(D3D11Error("CreateBuffer returned no subtitle vertex buffer"))?,
+            vertex_buffer: vertex_buffer.ok_or(D3D11Error(
+                "CreateBuffer returned no subtitle vertex buffer",
+            ))?,
             width: bitmap.width,
             height: bitmap.height,
         }))
@@ -740,16 +863,19 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 unsafe {
                     self.context.UpdateSubresource(
                         &overlay.texture,
-                        0, None,
+                        0,
+                        None,
                         bitmap.pixels.as_ptr().cast(),
                         bitmap.width.saturating_mul(4),
                         0,
                     );
                     self.context.UpdateSubresource(
                         &overlay.vertex_buffer,
-                        0, None,
+                        0,
+                        None,
                         vertices.as_ptr().cast(),
-                        0, 0,
+                        0,
+                        0,
                     );
                 }
                 return Ok(Some(overlay));
@@ -762,7 +888,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -813,8 +942,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             shader_resource_view: shader_resource_view.ok_or(D3D11Error(
                 "CreateShaderResourceView returned no timeline view",
             ))?,
-            vertex_buffer: vertex_buffer
-                .ok_or(D3D11Error("CreateBuffer returned no timeline vertex buffer"))?,
+            vertex_buffer: vertex_buffer.ok_or(D3D11Error(
+                "CreateBuffer returned no timeline vertex buffer",
+            ))?,
             width: bitmap.width,
             height: bitmap.height,
         }))
@@ -831,7 +961,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             return Ok(None);
         };
 
-        let vertices = volume_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
+        let vertices =
+            volume_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
 
         // Reuse existing GPU resources if dimensions haven't changed.
         if let Some(overlay) = existing {
@@ -839,16 +970,19 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 unsafe {
                     self.context.UpdateSubresource(
                         &overlay.texture,
-                        0, None,
+                        0,
+                        None,
                         bitmap.pixels.as_ptr().cast(),
                         bitmap.width.saturating_mul(4),
                         0,
                     );
                     self.context.UpdateSubresource(
                         &overlay.vertex_buffer,
-                        0, None,
+                        0,
+                        None,
                         vertices.as_ptr().cast(),
-                        0, 0,
+                        0,
+                        0,
                     );
                 }
                 return Ok(Some(overlay));
@@ -861,7 +995,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -899,8 +1036,11 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 None,
                 Some(&mut shader_resource_view),
             )?;
-            self.device
-                .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
+            self.device.CreateBuffer(
+                &vertex_buffer_desc,
+                Some(&vertex_buffer_data),
+                Some(&mut vertex_buffer),
+            )?;
         }
 
         let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no volume texture"))?;
@@ -931,7 +1071,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -942,12 +1085,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             SysMemPitch: bitmap.width.saturating_mul(4),
             SysMemSlicePitch: 0,
         };
-        let vertices = idle_quad_vertices(
-            bitmap.width,
-            bitmap.height,
-            viewport_width,
-            viewport_height,
-        );
+        let vertices =
+            idle_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
         let vertex_buffer_desc = D3D11_BUFFER_DESC {
             ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
             Usage: D3D11_USAGE_IMMUTABLE,
@@ -975,16 +1114,18 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 None,
                 Some(&mut shader_resource_view),
             )?;
-            self.device
-                .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
+            self.device.CreateBuffer(
+                &vertex_buffer_desc,
+                Some(&vertex_buffer_data),
+                Some(&mut vertex_buffer),
+            )?;
         }
 
         let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no idle texture"))?;
         Ok(Some(SubtitleOverlay {
             texture,
-            shader_resource_view: shader_resource_view.ok_or(D3D11Error(
-                "CreateShaderResourceView returned no idle view",
-            ))?,
+            shader_resource_view: shader_resource_view
+                .ok_or(D3D11Error("CreateShaderResourceView returned no idle view"))?,
             vertex_buffer: vertex_buffer
                 .ok_or(D3D11Error("CreateBuffer returned no idle vertex buffer"))?,
             width: bitmap.width,
@@ -1007,7 +1148,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_IMMUTABLE,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -1018,7 +1162,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             SysMemPitch: bitmap.width.saturating_mul(4),
             SysMemSlicePitch: 0,
         };
-        let vertices = idle_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
+        let vertices =
+            idle_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
         let vertex_buffer_desc = D3D11_BUFFER_DESC {
             ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
             Usage: D3D11_USAGE_IMMUTABLE,
@@ -1046,16 +1191,18 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 None,
                 Some(&mut shader_resource_view),
             )?;
-            self.device
-                .CreateBuffer(&vertex_buffer_desc, Some(&vertex_buffer_data), Some(&mut vertex_buffer))?;
+            self.device.CreateBuffer(
+                &vertex_buffer_desc,
+                Some(&vertex_buffer_data),
+                Some(&mut vertex_buffer),
+            )?;
         }
 
         let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no help texture"))?;
         Ok(Some(SubtitleOverlay {
             texture,
-            shader_resource_view: shader_resource_view.ok_or(D3D11Error(
-                "CreateShaderResourceView returned no help view",
-            ))?,
+            shader_resource_view: shader_resource_view
+                .ok_or(D3D11Error("CreateShaderResourceView returned no help view"))?,
             vertex_buffer: vertex_buffer
                 .ok_or(D3D11Error("CreateBuffer returned no help vertex buffer"))?,
             width: bitmap.width,
@@ -1088,8 +1235,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             self.context.RSSetViewports(Some(&[viewport]));
             self.context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            self.context
-                .IASetInputLayout(Some(&renderer.input_layout));
+            self.context.IASetInputLayout(Some(&renderer.input_layout));
             let vertex_buffers = [Some(overlay.vertex_buffer.clone())];
             let strides = [stride];
             let offsets = [offset];
@@ -1102,13 +1248,11 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             );
             self.context
                 .VSSetShader(Some(&renderer.vertex_shader), None);
+            self.context.PSSetShader(Some(&renderer.pixel_shader), None);
             self.context
-                .PSSetShader(Some(&renderer.pixel_shader), None);
-            self.context.PSSetSamplers(0, Some(&[Some(renderer.sampler.clone())]));
-            self.context.PSSetShaderResources(
-                0,
-                Some(&[Some(overlay.shader_resource_view.clone())]),
-            );
+                .PSSetSamplers(0, Some(&[Some(renderer.sampler.clone())]));
+            self.context
+                .PSSetShaderResources(0, Some(&[Some(overlay.shader_resource_view.clone())]));
             self.context.OMSetBlendState(
                 Some(&renderer.blend_state),
                 Some(&[0.0, 0.0, 0.0, 0.0]),
@@ -1116,7 +1260,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             );
             self.context.Draw(6, 0);
             self.context.PSSetShaderResources(0, Some(&[None]));
-            self.context.OMSetBlendState(None, Some(&[0.0, 0.0, 0.0, 0.0]), u32::MAX);
+            self.context
+                .OMSetBlendState(None, Some(&[0.0, 0.0, 0.0, 0.0]), u32::MAX);
         }
 
         Ok(())
@@ -1133,8 +1278,6 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
     //
     // If the present path changes in the future, re-validate this assumption.
 
-
-
     pub(crate) fn upload_nv12_surface_contiguous(
         &self,
         width: u32,
@@ -1143,13 +1286,17 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         stride: usize,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
-            return Err(Box::new(D3D11Error("software upload requires non-zero dimensions")));
+            return Err(Box::new(D3D11Error(
+                "software upload requires non-zero dimensions",
+            )));
         }
         // Guard: bail out if the device was removed (GPU TDR) before issuing
         // any GPU commands.  The worker thread calls this from background
         // threads and would otherwise crash inside d3d11.dll.
         if self.is_device_removed() {
-            return Err(Box::new(D3D11Error("D3D11 device removed (TDR) during software upload")));
+            return Err(Box::new(D3D11Error(
+                "D3D11 device removed (TDR) during software upload",
+            )));
         }
 
         let desc = D3D11_TEXTURE2D_DESC {
@@ -1158,7 +1305,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_NV12,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_DECODER.0) as u32,
             CPUAccessFlags: 0,
@@ -1214,12 +1364,30 @@ fn subtitle_quad_vertices(
     let bottom = 1.0 - bottom_px / viewport_height as f32 * 2.0;
 
     [
-        SubtitleVertex { position: [left, top, 0.0], texcoord: [0.0, 0.0] },
-        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [right, bottom, 0.0], texcoord: [1.0, 1.0] },
+        SubtitleVertex {
+            position: [left, top, 0.0],
+            texcoord: [0.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [right, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [left, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [left, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [right, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [right, bottom, 0.0],
+            texcoord: [1.0, 1.0],
+        },
     ]
 }
 
@@ -1234,12 +1402,30 @@ fn timeline_quad_vertices(
     let bottom = 1.0 - bottom_px / viewport_height as f32 * 2.0;
 
     [
-        SubtitleVertex { position: [-1.0, top, 0.0], texcoord: [0.0, 0.0] },
-        SubtitleVertex { position: [1.0, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [-1.0, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [-1.0, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [1.0, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [1.0, bottom, 0.0], texcoord: [1.0, 1.0] },
+        SubtitleVertex {
+            position: [-1.0, top, 0.0],
+            texcoord: [0.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [1.0, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [-1.0, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [-1.0, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [1.0, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [1.0, bottom, 0.0],
+            texcoord: [1.0, 1.0],
+        },
     ]
 }
 
@@ -1261,12 +1447,30 @@ fn volume_quad_vertices(
     let bottom = 1.0 - bottom_px / viewport_height as f32 * 2.0;
 
     [
-        SubtitleVertex { position: [left, top, 0.0], texcoord: [0.0, 0.0] },
-        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [right, bottom, 0.0], texcoord: [1.0, 1.0] },
+        SubtitleVertex {
+            position: [left, top, 0.0],
+            texcoord: [0.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [right, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [left, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [left, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [right, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [right, bottom, 0.0],
+            texcoord: [1.0, 1.0],
+        },
     ]
 }
 
@@ -1288,12 +1492,30 @@ fn idle_quad_vertices(
     let bottom = 1.0 - bottom_px / viewport_height as f32 * 2.0;
 
     [
-        SubtitleVertex { position: [left, top, 0.0], texcoord: [0.0, 0.0] },
-        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [left, bottom, 0.0], texcoord: [0.0, 1.0] },
-        SubtitleVertex { position: [right, top, 0.0], texcoord: [1.0, 0.0] },
-        SubtitleVertex { position: [right, bottom, 0.0], texcoord: [1.0, 1.0] },
+        SubtitleVertex {
+            position: [left, top, 0.0],
+            texcoord: [0.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [right, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [left, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [left, bottom, 0.0],
+            texcoord: [0.0, 1.0],
+        },
+        SubtitleVertex {
+            position: [right, top, 0.0],
+            texcoord: [1.0, 0.0],
+        },
+        SubtitleVertex {
+            position: [right, bottom, 0.0],
+            texcoord: [1.0, 1.0],
+        },
     ]
 }
 
@@ -1382,8 +1604,18 @@ fn compute_zoomed_rects(
     if cr <= cl || cb <= ct {
         // Entirely off-screen — present nothing.
         return (
-            RECT { left: 0, top: 0, right: 1, bottom: 1 },
-            RECT { left: 0, top: 0, right: 0, bottom: 0 },
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1,
+                bottom: 1,
+            },
+            RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
         );
     }
 
@@ -1454,7 +1686,9 @@ fn compile_shader(
 }
 
 fn shader_blob_bytes(blob: &ID3DBlob) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()) }
+    unsafe {
+        std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize())
+    }
 }
 
 fn render_subtitle_bitmap(
@@ -1532,7 +1766,9 @@ fn render_subtitle_bitmap(
             let _ = SelectObject(dc, old_font);
             debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
             debug_assert!(DeleteDC(dc).as_bool());
-            return Err(Box::new(D3D11Error("CreateDIBSection failed for subtitles")));
+            return Err(Box::new(D3D11Error(
+                "CreateDIBSection failed for subtitles",
+            )));
         }
 
         let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
@@ -1551,8 +1787,10 @@ fn render_subtitle_bitmap(
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
         );
 
-        let source: &[u8] =
-            std::slice::from_raw_parts(bits.cast::<u8>(), (bitmap_width * bitmap_height * 4) as usize);
+        let source: &[u8] = std::slice::from_raw_parts(
+            bits.cast::<u8>(),
+            (bitmap_width * bitmap_height * 4) as usize,
+        );
         let mut pixels = vec![0u8; source.len()];
         for (source_px, dest_px) in source.chunks_exact(4).zip(pixels.chunks_exact_mut(4)) {
             dest_px[0] = 0;
@@ -1649,7 +1887,9 @@ fn render_timeline_bitmap(
 
     // Played track — bright pill starting at the in-point (if set) so the region
     // before I reads as dim/excluded rather than as played content.
-    let played_left = model.in_point_marker_x.map_or(track_left, |ix| (ix.max(0) as u32).max(track_left));
+    let played_left = model
+        .in_point_marker_x
+        .map_or(track_left, |ix| (ix.max(0) as u32).max(track_left));
     let played_right = (track_left + model.played_px).min(track_right);
     if played_right > played_left {
         fill_rounded_rect(
@@ -1670,15 +1910,35 @@ fn render_timeline_bitmap(
     let marker_bottom = (track_bottom + 3).min(height);
     if let Some(x) = model.in_point_marker_x {
         let mx = x.clamp(0, width as i32 - 2) as u32;
-        fill_rect(&mut pixels, width, height, mx, marker_top, mx + 2, marker_bottom, [255, 255, 255, 220]);
+        fill_rect(
+            &mut pixels,
+            width,
+            height,
+            mx,
+            marker_top,
+            mx + 2,
+            marker_bottom,
+            [255, 255, 255, 220],
+        );
     }
     if let Some(x) = model.out_point_marker_x {
         let mx = (x - 1).clamp(0, width as i32 - 2) as u32;
-        fill_rect(&mut pixels, width, height, mx, marker_top, mx + 2, marker_bottom, [255, 255, 255, 220]);
+        fill_rect(
+            &mut pixels,
+            width,
+            height,
+            mx,
+            marker_top,
+            mx + 2,
+            marker_bottom,
+            [255, 255, 255, 220],
+        );
     }
 
     // Handle — anti-aliased white circle.
-    let handle_cx = model.handle_center_x.clamp(layout.track_left, layout.track_right) as u32;
+    let handle_cx = model
+        .handle_center_x
+        .clamp(layout.track_left, layout.track_right) as u32;
     fill_circle_aa(
         &mut pixels,
         width,
@@ -1707,7 +1967,11 @@ fn render_timeline_bitmap(
         draw_timeline_label(&mut pixels, width, height, &right_label, false)?;
     }
 
-    Ok(Some(SubtitleBitmap { width, height, pixels }))
+    Ok(Some(SubtitleBitmap {
+        width,
+        height,
+        pixels,
+    }))
 }
 
 fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
@@ -1742,7 +2006,12 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         }
 
         let old_font = SelectObject(dc, HGDIOBJ(font.0));
-        let mut text_rect = RECT { left: 0, top: 0, right: 400, bottom: 0 };
+        let mut text_rect = RECT {
+            left: 0,
+            top: 0,
+            right: 400,
+            bottom: 0,
+        };
         let _ = DrawTextW(
             dc,
             &mut text_wide,
@@ -1771,7 +2040,9 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             let _ = SelectObject(dc, old_font);
             debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
             debug_assert!(DeleteDC(dc).as_bool());
-            return Err(Box::new(D3D11Error("CreateDIBSection failed for idle overlay")));
+            return Err(Box::new(D3D11Error(
+                "CreateDIBSection failed for idle overlay",
+            )));
         }
 
         let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
@@ -1792,8 +2063,10 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
 
-        let source: &[u8] =
-            std::slice::from_raw_parts(bits.cast::<u8>(), (bitmap_width * bitmap_height * 4) as usize);
+        let source: &[u8] = std::slice::from_raw_parts(
+            bits.cast::<u8>(),
+            (bitmap_width * bitmap_height * 4) as usize,
+        );
         let mut pixels = vec![0u8; source.len()];
         pixels.copy_from_slice(source);
         for px in pixels.chunks_exact_mut(4) {
@@ -1824,8 +2097,12 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
     const ROWS: &[(&str, &str)] = &[
         ("Space", "Pause / resume"),
         ("\u{2190} / \u{2192}", "Seek 5 s  (hold: 15 s)"),
+        ("Ctrl+F / B", "Step frame \u{00B1}1"),
+        ("Ctrl+O", "Open media file"),
+        ("Ctrl+S", "Save screenshot"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
+        ("Shift+I / O", "Clear in / out point"),
         ("R", "Loop range \u{00B7} auto-replay"),
         ("[ / ]", "Speed \u{2212} / +"),
         ("\\", "Reset speed"),
@@ -1858,8 +2135,14 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         }
 
         let font = CreateFontW(
-            -13, 0, 0, 0,
-            FW_MEDIUM.0 as i32, 0, 0, 0,
+            -13,
+            0,
+            0,
+            0,
+            FW_MEDIUM.0 as i32,
+            0,
+            0,
+            0,
             DEFAULT_CHARSET.0 as u32,
             OUT_DEFAULT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32,
@@ -1869,7 +2152,9 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         );
         if font.0.is_null() {
             debug_assert!(DeleteDC(dc).as_bool());
-            return Err(Box::new(D3D11Error("CreateFontW returned null for help overlay")));
+            return Err(Box::new(D3D11Error(
+                "CreateFontW returned null for help overlay",
+            )));
         }
 
         let mut bmi = BITMAPINFO::default();
@@ -1887,7 +2172,9 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         if bitmap.0.is_null() || bits.is_null() {
             debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
             debug_assert!(DeleteDC(dc).as_bool());
-            return Err(Box::new(D3D11Error("CreateDIBSection failed for help overlay")));
+            return Err(Box::new(D3D11Error(
+                "CreateDIBSection failed for help overlay",
+            )));
         }
 
         let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
@@ -1906,7 +2193,12 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             right: BW as i32 - PAD_X,
             bottom: PAD_Y + HEADER_H,
         };
-        let _ = DrawTextW(dc, &mut header_wide, &mut header_rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        let _ = DrawTextW(
+            dc,
+            &mut header_wide,
+            &mut header_rect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
 
         // Key-binding rows
         for (i, (key, desc)) in ROWS.iter().enumerate() {
@@ -1914,12 +2206,32 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             let row_bottom = y + LINE_H;
 
             let mut key_wide: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
-            let mut key_rect = RECT { left: PAD_X, top: y, right: COL_DESC_X - 8, bottom: row_bottom };
-            let _ = DrawTextW(dc, &mut key_wide, &mut key_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            let mut key_rect = RECT {
+                left: PAD_X,
+                top: y,
+                right: COL_DESC_X - 8,
+                bottom: row_bottom,
+            };
+            let _ = DrawTextW(
+                dc,
+                &mut key_wide,
+                &mut key_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+            );
 
             let mut desc_wide: Vec<u16> = desc.encode_utf16().chain(Some(0)).collect();
-            let mut desc_rect = RECT { left: COL_DESC_X, top: y, right: BW as i32 - PAD_X, bottom: row_bottom };
-            let _ = DrawTextW(dc, &mut desc_wide, &mut desc_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            let mut desc_rect = RECT {
+                left: COL_DESC_X,
+                top: y,
+                right: BW as i32 - PAD_X,
+                bottom: row_bottom,
+            };
+            let _ = DrawTextW(
+                dc,
+                &mut desc_wide,
+                &mut desc_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+            );
         }
 
         let source: &[u8] = std::slice::from_raw_parts(bits.cast::<u8>(), (BW * bh * 4) as usize);
@@ -1933,11 +2245,15 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             let intensity = px[0].max(px[1]).max(px[2]);
             if intensity > 4 {
                 // Text — make bright white, alpha proportional to intensity.
-                px[0] = 235; px[1] = 235; px[2] = 240;
+                px[0] = 235;
+                px[1] = 235;
+                px[2] = 240;
                 px[3] = intensity.min(230);
             } else {
                 // Background — dark, slightly blue-tinted.
-                px[0] = 22; px[1] = 20; px[2] = 18;
+                px[0] = 22;
+                px[1] = 20;
+                px[2] = 18;
                 px[3] = 218;
             }
         }
@@ -1945,7 +2261,16 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         // Separator line between header and rows (1px, semi-opaque white).
         let sep_y = (PAD_Y + HEADER_H + SEP / 2) as u32;
         if sep_y < bh {
-            fill_rect(&mut pixels, BW, bh, PAD_X as u32, sep_y, BW - PAD_X as u32, sep_y + 1, [255, 255, 255, 60]);
+            fill_rect(
+                &mut pixels,
+                BW,
+                bh,
+                PAD_X as u32,
+                sep_y,
+                BW - PAD_X as u32,
+                sep_y + 1,
+                [255, 255, 255, 60],
+            );
         }
 
         let _ = SelectObject(dc, old_bitmap);
@@ -1954,7 +2279,11 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
         debug_assert!(DeleteDC(dc).as_bool());
 
-        Ok(Some(SubtitleBitmap { width: BW, height: bh, pixels }))
+        Ok(Some(SubtitleBitmap {
+            width: BW,
+            height: bh,
+            pixels,
+        }))
     }
 }
 
@@ -2028,12 +2357,17 @@ fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Er
             let _ = SelectObject(dc, old_font);
             debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
             debug_assert!(DeleteDC(dc).as_bool());
-            return Err(Box::new(D3D11Error("CreateDIBSection failed for volume overlay")));
+            return Err(Box::new(D3D11Error(
+                "CreateDIBSection failed for volume overlay",
+            )));
         }
 
         let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
         std::ptr::write_bytes(bits, 0, (bitmap_width * bitmap_height * 4) as usize);
-        let source = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (bitmap_width * bitmap_height * 4) as usize);
+        let source = std::slice::from_raw_parts_mut(
+            bits.cast::<u8>(),
+            (bitmap_width * bitmap_height * 4) as usize,
+        );
         fill_rect(
             source,
             bitmap_width,
@@ -2058,8 +2392,10 @@ fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Er
             DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
 
-        let source: &[u8] =
-            std::slice::from_raw_parts(bits.cast::<u8>(), (bitmap_width * bitmap_height * 4) as usize);
+        let source: &[u8] = std::slice::from_raw_parts(
+            bits.cast::<u8>(),
+            (bitmap_width * bitmap_height * 4) as usize,
+        );
         let mut pixels = vec![0u8; source.len()];
         pixels.copy_from_slice(source);
         for px in pixels.chunks_exact_mut(4) {
@@ -2154,7 +2490,9 @@ fn draw_timeline_label(
             let _ = SelectObject(dc, old_font);
             debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
             debug_assert!(DeleteDC(dc).as_bool());
-            return Err(Box::new(D3D11Error("CreateDIBSection failed for timeline label")));
+            return Err(Box::new(D3D11Error(
+                "CreateDIBSection failed for timeline label",
+            )));
         }
 
         let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
@@ -2163,9 +2501,10 @@ fn draw_timeline_label(
         let _ = SetTextColor(dc, COLORREF(0x00FF_FFFF));
         let _ = DrawTextW(dc, &mut text_wide, &mut draw_rect, draw_flags);
 
-        let source =
-            std::slice::from_raw_parts(bits.cast::<u8>(), (width * height * 4) as usize);
-        for (source_px, dest_px) in source.chunks_exact(4).zip(destination_pixels.chunks_exact_mut(4))
+        let source = std::slice::from_raw_parts(bits.cast::<u8>(), (width * height * 4) as usize);
+        for (source_px, dest_px) in source
+            .chunks_exact(4)
+            .zip(destination_pixels.chunks_exact_mut(4))
         {
             let intensity = source_px[0].max(source_px[1]).max(source_px[2]);
             if intensity == 0 {
@@ -2238,7 +2577,10 @@ fn fill_circle_aa(
             let coverage = (radius - dist + 0.5).clamp(0.0, 1.0);
             let alpha = (color[3] as f32 * coverage) as u8;
             let offset = ((y * width + x) * 4) as usize;
-            blend_pixel(&mut pixels[offset..offset + 4], [color[0], color[1], color[2], alpha]);
+            blend_pixel(
+                &mut pixels[offset..offset + 4],
+                [color[0], color[1], color[2], alpha],
+            );
         }
     }
 }
@@ -2318,7 +2660,10 @@ fn fill_rounded_rect(
 
             let alpha = (color[3] as f32 * coverage) as u8;
             let offset = ((y * width + x) * 4) as usize;
-            blend_pixel(&mut pixels[offset..offset + 4], [color[0], color[1], color[2], alpha]);
+            blend_pixel(
+                &mut pixels[offset..offset + 4],
+                [color[0], color[1], color[2], alpha],
+            );
         }
     }
 }

@@ -31,6 +31,10 @@ impl NativeWindow {
         self.inner.is_open()
     }
 
+    pub fn wait_for_messages(&self, timeout_ms: u32) {
+        self.inner.wait_for_messages(timeout_ms);
+    }
+
     pub fn take_resize_request(&self) -> Option<ResizeRequest> {
         self.inner.take_resize_request()
     }
@@ -44,15 +48,18 @@ impl NativeWindow {
     }
 
     pub fn resize_for_content(&self, content_width: u32, content_height: u32, center: bool) {
-        self.inner.resize_for_content(content_width, content_height, center);
+        self.inner
+            .resize_for_content(content_width, content_height, center);
     }
 
     pub fn fit_window_to_content(&self, content_width: u32, content_height: u32) {
-        self.inner.fit_window_to_content(content_width, content_height);
+        self.inner
+            .fit_window_to_content(content_width, content_height);
     }
 
     pub fn set_window_client_size(&self, content_width: u32, content_height: u32) {
-        self.inner.set_window_client_size(content_width, content_height);
+        self.inner
+            .set_window_client_size(content_width, content_height);
     }
 
     pub fn toggle_borderless_fullscreen(&self) {

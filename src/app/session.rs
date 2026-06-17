@@ -1,13 +1,15 @@
 use std::{
     cell::Cell,
     collections::VecDeque,
+    fs,
+    path::PathBuf,
     sync::{
         atomic::{AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc,
     },
-    thread::{self, ThreadId},
-    time::{Duration, Instant},
+    thread::{self, JoinHandle, ThreadId},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -20,6 +22,7 @@ use crate::{
     },
     audio::sink::AudioSink,
     ffi::{
+        d3d11::BgraFrameCapture,
         dxgi::{ModalTickTarget, NativeWindowInner, ResizeRequest},
         ffmpeg::{self, DecodeSession, StreamStatus},
     },
@@ -44,7 +47,14 @@ use crate::{
 };
 
 const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
+const MAX_OBSERVED_FRAME_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_FRAME_STEP: Duration = Duration::from_nanos(33_333_333);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
+/// Upper bound on how long a blocking teardown waits for the decode worker to
+/// release its resources after cancellation. The FFmpeg interrupt callback
+/// aborts in-flight I/O on shutdown, so a healthy worker exits in milliseconds;
+/// this only caps the pathological case so the UI thread can never hang.
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
 
 struct QueuedAudioFrame {
@@ -77,6 +87,14 @@ pub struct PlaybackSession {
     /// this preference reuses the thread; a change (HW↔SW) respawns it.
     decode_thread_preference: Option<VideoDecodePreference>,
     active_worker_count: Arc<AtomicU32>,
+    /// Join handle for the current persistent decode thread. Kept so a
+    /// blocking teardown (`wait = true`) can *join* the worker — guaranteeing
+    /// its entire D3D11 teardown (decoder resources plus the captured device
+    /// clone it releases on exit) has completed before the caller destroys or
+    /// touches the shared device. Waiting on `active_worker_count` alone is
+    /// insufficient: the count is decremented before the device clone is
+    /// released, leaving a window where the worker is still inside d3d11.dll.
+    decode_join: Option<JoinHandle<()>>,
     /// Worker→UI channel for video frames and all control/error events.
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
@@ -107,6 +125,9 @@ pub struct PlaybackSession {
     active_decode_mode: Option<VideoDecodeMode>,
     last_error: Option<String>,
     present_needed: bool,
+    screenshot_pending: bool,
+    observed_frame_interval: Option<Duration>,
+    last_presented_media_position: Option<Duration>,
     view_zoom: f32,
     view_pan_x: f32,
     view_pan_y: f32,
@@ -116,8 +137,6 @@ pub struct PlaybackSession {
     has_shown_content: bool,
     auto_replay: bool,
     pause_after_seek: bool,
-    deferred_seek: Option<SeekTarget>,
-    last_worker_spawned_at: Option<Instant>,
     playback_rate: f64,
     in_point: Option<Duration>,
     out_point: Option<Duration>,
@@ -129,12 +148,6 @@ pub struct PlaybackSession {
     /// recomputed several times per tick; the value is stable across those
     /// reads because no audio is submitted between them.
     cached_buffered_frames: Cell<Option<u32>>,
-    /// True when timeline scrub churn forced this session from hardware to
-    /// software decode as a d3d11 crash workaround. Distinguishes that
-    /// auto-fallback (revertible to hardware once scrubbing settles) from a
-    /// user `--force-sw` request or a genuine hardware-unavailable fallback,
-    /// neither of which should be reverted.
-    scrub_forced_software: bool,
 }
 
 impl PlaybackSession {
@@ -170,6 +183,7 @@ impl PlaybackSession {
             decode_control: None,
             decode_thread_preference: None,
             active_worker_count: Arc::new(AtomicU32::new(0)),
+            decode_join: None,
             event_tx,
             event_rx,
             audio_event_tx,
@@ -196,6 +210,9 @@ impl PlaybackSession {
             active_decode_mode: None,
             last_error: None,
             present_needed: true,
+            screenshot_pending: false,
+            observed_frame_interval: None,
+            last_presented_media_position: None,
             view_zoom: 1.0,
             view_pan_x: 0.0,
             view_pan_y: 0.0,
@@ -205,8 +222,6 @@ impl PlaybackSession {
             has_shown_content: false,
             auto_replay: false,
             pause_after_seek: false,
-            deferred_seek: None,
-            last_worker_spawned_at: None,
             playback_rate: 1.0,
             in_point: None,
             out_point: None,
@@ -214,7 +229,6 @@ impl PlaybackSession {
             saved_volume,
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
-            scrub_forced_software: false,
         })
     }
 
@@ -278,7 +292,11 @@ impl PlaybackSession {
         &mut self,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.overlay.volume_overlay_until.is_some_and(|until| now > until) {
+        if self
+            .overlay
+            .volume_overlay_until
+            .is_some_and(|until| now > until)
+        {
             if self.presenter.set_volume_overlay(None, 0, 0)? {
                 self.present_needed = true;
             }
@@ -311,11 +329,12 @@ impl PlaybackSession {
         self.in_point = None;
         self.out_point = None;
         self.loop_range = false;
-        self.scrub_forced_software = false;
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
         self.active_decode_mode = None;
+        self.observed_frame_interval = None;
+        self.last_presented_media_position = None;
         self.view_rotation_quarter_turns = 0;
         self.stream_rotation_quarter_turns = 0;
         if let Some(track) = self.overlay.subtitle_track.as_ref() {
@@ -347,65 +366,13 @@ impl PlaybackSession {
         pause_after: bool,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.decode_preference != VideoDecodePreference::ForceSoftware
-            && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
-        {
-            // This file is reproducibly crashing in d3d11.dll under timeline
-            // stress-scrub while the hardware path is active. Switch to
-            // software decode for the scrub churn; tick() reverts to hardware
-            // once scrubbing settles so steady playback isn't stuck on the
-            // slower (stuttering) software path.
-            self.decode_preference = VideoDecodePreference::ForceSoftware;
-            self.scrub_forced_software = true;
-            flog!("[scrub_seek] forcing software decode for scrub churn");
-            if self.overlay.show_decode_info {
-                self.update_window_title();
-            }
-        }
+        // Scrubbing stays on the hardware path: the persistent decoder seeks in
+        // place (av_seek_frame + flush) with no per-seek decoder spawn/teardown,
+        // so the d3d11 scrub-crash that once forced a software fallback can no
+        // longer occur, and latest-command-wins coalescing keeps the preview
+        // responsive under rapid churn.
         self.pause_after_seek = pause_after;
         self.seek(target, now)
-    }
-
-    /// Minimum quiet period after the last seek-worker spawn before reverting a
-    /// scrub-forced software session back to hardware decode. Long enough to be
-    /// confident the scrub drag has ended, so we never re-enter the hardware
-    /// path during the rapid-churn window that crashes d3d11.
-    const HARDWARE_REVERT_SETTLE: Duration = Duration::from_millis(1500);
-
-    /// If scrub churn dropped this session to software decode and scrubbing has
-    /// since settled, re-prime the hardware path at the current position so
-    /// steady playback isn't stuck on the slower (stuttering) software decoder.
-    /// Software decode is retained only for the brief churn window; the crash
-    /// guard targets rapid scrubbing, not a single settled seek or steady play.
-    fn maybe_revert_to_hardware(
-        &mut self,
-        now: Instant,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.scrub_forced_software {
-            return Ok(());
-        }
-        // Only revert during steady, hardware-eligible playback: not mid-seek,
-        // no pending or deferred scrub, worker count down to the single steady
-        // decode worker, and after a quiet settle window.
-        if self.state != PlaybackState::Playing
-            || self.pending_seek_target.is_some()
-            || self.deferred_seek.is_some()
-            || self.active_worker_count.load(Ordering::Acquire) >= 2
-            || self
-                .last_worker_spawned_at
-                .is_none_or(|t| now.duration_since(t) < Self::HARDWARE_REVERT_SETTLE)
-        {
-            return Ok(());
-        }
-
-        let position = self.snapshot(now).position;
-        flog!(
-            "[revert_hw] scrub settled, re-priming hardware decode at {:.3}s",
-            position.as_secs_f64()
-        );
-        self.scrub_forced_software = false;
-        self.decode_preference = VideoDecodePreference::Auto;
-        self.seek(SeekTarget::new(position), now)
     }
 
     pub fn apply_command(
@@ -417,14 +384,26 @@ impl PlaybackSession {
             SessionCommand::Tick => {}
             SessionCommand::TogglePause => self.toggle_pause(now)?,
             SessionCommand::ToggleSubtitles => self.toggle_subtitles()?,
-            SessionCommand::Seek(target) => self.seek(target, now)?,
+            SessionCommand::SaveScreenshot => {
+                self.screenshot_pending = true;
+                self.present_needed = true;
+            }
+            SessionCommand::Seek(target) => {
+                self.pause_after_seek = false;
+                self.seek(target, now)?;
+            }
+            SessionCommand::StepFrameForward => self.step_frame(1, now)?,
+            SessionCommand::StepFrameBackward => self.step_frame(-1, now)?,
             SessionCommand::AdjustVolumeSteps(steps) => self.adjust_volume_steps(steps),
             SessionCommand::RotateClockwise => self.rotate_view(1),
             SessionCommand::RotateCounterClockwise => self.rotate_view(3),
             SessionCommand::ToggleBorderlessFullscreen => {
                 self.metrics.note_fullscreen_toggle_started(now);
                 self.window.toggle_borderless_fullscreen();
-                if let Some(elapsed) = self.metrics.note_fullscreen_toggle_completed(Instant::now()) {
+                if let Some(elapsed) = self
+                    .metrics
+                    .note_fullscreen_toggle_completed(Instant::now())
+                {
                     flog!("fullscreen_toggle_ms={}", elapsed.as_millis());
                 }
             }
@@ -548,6 +527,73 @@ impl PlaybackSession {
         flog!("volume={volume_percent}");
     }
 
+    fn step_frame(
+        &mut self,
+        direction: i8,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.current_source.is_none() {
+            return Ok(());
+        }
+        if !matches!(self.state, PlaybackState::Paused | PlaybackState::Ended) {
+            self.toggle_pause(now)?;
+        }
+
+        let current = self
+            .pending_seek_target
+            .map(SeekTarget::position)
+            .or(self.last_presented_media_position)
+            .unwrap_or_else(|| self.snapshot(now).position);
+        let step = self.frame_step_duration();
+        let target = if direction >= 0 {
+            current.saturating_add(step)
+        } else {
+            current.saturating_sub(step)
+        };
+        let target = match self.media_duration {
+            Some(duration) if target > duration => duration,
+            _ => target,
+        };
+
+        self.pause_after_seek = true;
+        self.seek(SeekTarget::new(target), now)
+    }
+
+    fn frame_step_duration(&self) -> Duration {
+        if let Some(interval) = self.observed_frame_interval {
+            return interval;
+        }
+
+        let mut previous = None;
+        for frame in &self.queued_video_frames {
+            let position = self.media_time_for_pts(frame.pts());
+            if let Some(previous) = previous {
+                let delta = position.saturating_sub(previous);
+                if !delta.is_zero() && delta <= MAX_OBSERVED_FRAME_INTERVAL {
+                    return delta;
+                }
+            }
+            previous = Some(position);
+        }
+
+        DEFAULT_FRAME_STEP
+    }
+
+    fn save_screenshot(
+        &self,
+        capture: BgraFrameCapture,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let directory = screenshot_directory()?;
+        fs::create_dir_all(&directory)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let path = directory.join(format!("fastplay-screenshot-{stamp}.bmp"));
+        fs::write(&path, encode_bgra_bmp(&capture)?)?;
+        Ok(path)
+    }
+
     pub fn tick(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             self.ui_thread_id,
@@ -566,6 +612,23 @@ impl PlaybackSession {
 
     pub fn take_idle_pace_request(&mut self) -> bool {
         std::mem::take(&mut self.idle_pace_requested)
+    }
+
+    /// Whether the player is quiescent — idle, paused, ended, or errored — so
+    /// the UI loop may block waiting for input instead of spin-pacing. In every
+    /// other state playback is actively advancing (frames are scheduled against
+    /// a clock, or an open/seek is in flight) and the loop must keep ticking to
+    /// hit frame deadlines. Worker events that can still arrive in these states
+    /// (device loss, audio endpoint change) are picked up on the next wakeup,
+    /// which the bounded message-wait timeout guarantees happens promptly.
+    pub fn is_idle_for_input(&self) -> bool {
+        matches!(
+            self.state,
+            PlaybackState::Idle
+                | PlaybackState::Paused
+                | PlaybackState::Ended
+                | PlaybackState::Error
+        )
     }
 
     /// Orderly teardown before the session is dropped. Cancels and waits for any
@@ -620,6 +683,18 @@ impl PlaybackSession {
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 }
             }
+            // Gate the video drain on the decoded-video queue, exactly like the
+            // audio loop above. Draining unconditionally and letting
+            // `push_video_frame` drop the overflow removes all backpressure on
+            // the decoder: with nothing to block its sends it free-runs to EOF,
+            // overflow-dropping the whole stream while the audio-clock-gated
+            // presenter can only show frames at or below the 1x audio clock —
+            // every one of which has already been dropped, so the picture
+            // freezes on the first few frames. Stopping here when the queue is
+            // full lets the bounded video channel backpressure the worker, so
+            // the decoder is paced to playback. Audio lives on its own channel
+            // and queue (drained above) and keeps flowing regardless, so a full
+            // video queue cannot starve it.
             loop {
                 if self.queued_video_frames.len() >= self.queued_video_capacity {
                     break;
@@ -634,24 +709,6 @@ impl PlaybackSession {
                 self.handle_resize(size, now)?;
             }
 
-            // Execute any deferred seek once the throttle interval has
-            // elapsed, old worker events have been drained above, and the
-            // number of live worker threads is below the concurrency cap.
-            if self.deferred_seek.is_some()
-                && self.last_worker_spawned_at.is_none_or(|t| {
-                    now.duration_since(t) >= Self::SEEK_WORKER_MIN_INTERVAL
-                })
-                && self.active_worker_count.load(Ordering::Acquire) < 2
-            {
-                if let Some(target) = self.deferred_seek.take() {
-                    if let Some(source) = self.current_source.clone() {
-                        self.execute_seek(source, target, now)?;
-                    }
-                }
-            }
-
-            self.maybe_revert_to_hardware(now)?;
-
             self.submit_due_audio(now)?;
             if self.advance_video_playback(now)? {
                 return Ok(());
@@ -660,14 +717,30 @@ impl PlaybackSession {
             self.refresh_volume_overlay(now)?;
         }
 
-        if self.present_needed {
+        if self.present_needed || self.screenshot_pending {
             let view = crate::render::ViewTransform {
                 zoom: self.view_zoom,
                 pan_x: self.view_pan_x,
                 pan_y: self.view_pan_y,
                 rotation_quarter_turns: self.view_rotation_quarter_turns,
             };
-            match self.presenter.render(&view) {
+            let render_result = if self.screenshot_pending {
+                self.screenshot_pending = false;
+                self.presenter
+                    .render_with_capture(&view)
+                    .map(|(result, capture)| {
+                        if !matches!(result, crate::ffi::dxgi::PresentResult::DeviceLost) {
+                            match self.save_screenshot(capture) {
+                                Ok(path) => flog!("screenshot_saved path={}", path.display()),
+                                Err(error) => flog!("screenshot_failed error={error}"),
+                            }
+                        }
+                        result
+                    })
+            } else {
+                self.presenter.render(&view)
+            };
+            match render_result {
                 Ok(crate::ffi::dxgi::PresentResult::Ok) => {
                     self.present_needed = false;
                     self.metrics.note_present(now);
@@ -930,9 +1003,7 @@ impl PlaybackSession {
                 }
                 let error_msg = error.clone();
                 self.fail_playback(error);
-                flog!(
-                    "playback failed: {error_msg}"
-                );
+                flog!("playback failed: {error_msg}");
             }
             SessionEvent::DeviceLost {
                 open_gen,
@@ -942,7 +1013,12 @@ impl PlaybackSession {
                 if !self.is_current_frame(open_gen, seek_gen, op_id) {
                     return Ok(());
                 }
-                flog!("[DEVICE_LOST] seek={} op={:?} workers={}", seek_gen.0, op_id, self.active_worker_count.load(Ordering::Acquire));
+                flog!(
+                    "[DEVICE_LOST] seek={} op={:?} workers={}",
+                    seek_gen.0,
+                    op_id,
+                    self.active_worker_count.load(Ordering::Acquire)
+                );
                 self.recover_device(now, "worker reported device-lost".to_string())?;
             }
             SessionEvent::AudioEndpointChanged {
@@ -960,20 +1036,16 @@ impl PlaybackSession {
         Ok(())
     }
 
-    /// Minimum interval between spawning decoder worker threads.  Rapid
-    /// scrubbing can request hundreds of seeks per second; each one opens the
-    /// file and allocates a hardware decoder on the GPU.  Most GPUs only
-    /// support 8-16 concurrent decode sessions, so spawning without throttling
-    /// can exhaust GPU resources and crash the driver.
-    const SEEK_WORKER_MIN_INTERVAL: Duration = Duration::from_millis(30);
-
     fn seek(&mut self, target: SeekTarget, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         if self.current_source.is_none() {
             return Ok(());
         }
         // Don't seek during states where it makes no sense or would break
         // the open/recovery sequence.
-        if matches!(self.state, PlaybackState::Idle | PlaybackState::Opening | PlaybackState::Error) {
+        if matches!(
+            self.state,
+            PlaybackState::Idle | PlaybackState::Opening | PlaybackState::Error
+        ) {
             flog!("[seek] rejected: state={:?}", self.state);
             return Ok(());
         }
@@ -984,44 +1056,9 @@ impl PlaybackSession {
         };
         let target = SeekTarget::new(clamped_position);
 
-        // Defer if a worker was spawned very recently or if too many worker
-        // threads are still alive.  Each worker holds a hardware decoder on
-        // the GPU; allowing more than 2 concurrent workers risks exhausting
-        // the GPU's session limit (typically 8-16), especially when multiple
-        // FastPlay instances are running.
-        let workers_alive = self.active_worker_count.load(Ordering::Acquire);
-        let throttled = self.last_worker_spawned_at.is_some_and(|t| now.duration_since(t) < Self::SEEK_WORKER_MIN_INTERVAL);
-        let should_defer = throttled || workers_alive >= 2;
-        if should_defer {
-            if self.decode_preference != VideoDecodePreference::ForceSoftware
-                && self.active_decode_mode == Some(VideoDecodeMode::HardwareD3D11)
-            {
-                // Repeated scrub seeks are still provoking d3d11.dll crashes
-                // on some files in the hardware path. Use software decode while
-                // seek churn is detected; tick() reverts to hardware once it
-                // settles.
-                self.decode_preference = VideoDecodePreference::ForceSoftware;
-                self.scrub_forced_software = true;
-                flog!(
-                    "[seek] forcing software decode after hardware seek churn"
-                );
-                if self.overlay.show_decode_info {
-                    self.update_window_title();
-                }
-            }
-            flog!(
-                "[seek] DEFERRED pos={:.3}s workers={} throttled={}",
-                clamped_position.as_secs_f64(),
-                workers_alive,
-                throttled
-            );
-            self.deferred_seek = Some(target);
-            // Update the visible seek state so the timeline preview stays
-            // responsive even while the worker spawn is deferred.
-            self.pending_seek_target = Some(target);
-            return Ok(());
-        }
-
+        // No throttle/defer: the persistent decoder serves the seek in place and
+        // coalesces rapid scrub seeks to the latest target, so there is no
+        // per-seek decoder spawn to rate-limit.
         let source = self.current_source.clone().unwrap();
         self.execute_seek(source, target, now)
     }
@@ -1055,26 +1092,24 @@ impl PlaybackSession {
         // Keep the previously selected surface visible until the new frame
         // arrives — `validate_and_select_surface` will swap it atomically
         // when the first frame of the new seek generation is presented.
-        // The hardware-churn motivation for dropping it has moved to the
-        // software-decode fallback above.
         self.prepare_runtime_for_operation_inner(false, false, false)?;
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        self.deferred_seek = None;
         if self.decode_thread_serves_current() {
             // Reuse the open file: tell the running thread to seek in place.
             // Bumping seek_gen above already gates out its old in-flight frames.
-            self.decode_control
-                .as_ref()
-                .expect("decode_thread_serves_current implies a control")
-                .send_seek(absolute_target, seek_gen, op_id);
+            // `decode_thread_serves_current` implies a live control; if it is
+            // somehow absent, skip rather than panic — the next operation will
+            // respawn a worker.
+            if let Some(control) = self.decode_control.as_ref() {
+                control.send_seek(absolute_target, seek_gen, op_id);
+            }
         } else {
             // No thread, or the decode preference changed (HW↔SW): reopen.
             self.teardown_decode_thread(false);
             self.spawn_decode_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
         }
-        self.last_worker_spawned_at = Some(now);
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
         self.overlay.subtitle_clock_base = Some(target.position());
@@ -1103,7 +1138,6 @@ impl PlaybackSession {
         self.state = next_state;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        self.deferred_seek = None;
         self.spawn_decode_thread(source, start_position, open_gen, seek_gen, op_id);
         Ok(())
     }
@@ -1213,7 +1247,7 @@ impl PlaybackSession {
             worker_count.load(Ordering::Acquire)
         );
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             // Decrement the live-thread counter on any exit path.
             struct WorkerGuard(Arc<AtomicU32>);
             impl Drop for WorkerGuard {
@@ -1240,6 +1274,7 @@ impl PlaybackSession {
             let worker_send =
                 |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
                     let mut event = event;
+                    let mut full_retries: u32 = 0;
                     loop {
                         match tx.try_send(event) {
                             Ok(()) => return Ok(()),
@@ -1247,7 +1282,20 @@ impl PlaybackSession {
                                 if cancelled() {
                                     return Err(WORKER_CANCELLED.to_string());
                                 }
-                                thread::sleep(std::time::Duration::from_millis(1));
+                                // Poll at 1ms while the consumer is actively
+                                // draining — this is the brief, transient
+                                // backpressure of normal playback, where a freed
+                                // slot must be refilled promptly to avoid audio
+                                // starvation. Once the queue has stayed full well
+                                // past any frame interval, the UI is paused or
+                                // stalled and is not draining at all; back off to
+                                // a longer sleep so a paused player does not spin
+                                // the decode thread. Shutdown and superseded-seek
+                                // are still observed every iteration, so cancel
+                                // latency stays within one sleep interval.
+                                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
+                                full_retries = full_retries.saturating_add(1);
+                                thread::sleep(std::time::Duration::from_millis(sleep_ms));
                                 event = returned;
                             }
                             Err(TrySendError::Disconnected(_)) => {
@@ -1256,6 +1304,16 @@ impl PlaybackSession {
                         }
                     }
                 };
+
+            // Cancellation signal for FFmpeg's interrupt callback: aborts a
+            // blocking open/read/seek when the worker is asked to shut down, so
+            // a worker wedged in FFmpeg I/O (dead network share, vanished drive)
+            // still exits promptly and never hangs teardown. Owned + 'static so
+            // it can live inside the format context for the session's lifetime.
+            let io_cancel: Box<dyn Fn() -> bool> = {
+                let control = control.clone();
+                Box::new(move || control.is_shutdown())
+            };
 
             // Open the file and decoders once. Errors map to open/playback
             // failure exactly as the per-operation worker did.
@@ -1266,6 +1324,7 @@ impl PlaybackSession {
                     audio_format,
                     start_position,
                     decode_preference,
+                    io_cancel,
                     &cancelled,
                     &mut |mode, hw_fallback_count, rotation_quarter_turns| {
                         let (seek_gen, op_id) = gen_cell.get();
@@ -1301,15 +1360,27 @@ impl PlaybackSession {
                 Err(error) => {
                     if !control.is_shutdown() {
                         let (seek_gen, op_id) = gen_cell.get();
-                        let event = if error.contains("device removed")
-                            || device.is_device_removed()
-                        {
-                            SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
-                        } else if start_position.is_some() {
-                            SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
-                        } else {
-                            SessionEvent::OpenFailed { open_gen, op_id, error }
-                        };
+                        let event =
+                            if error.contains("device removed") || device.is_device_removed() {
+                                SessionEvent::DeviceLost {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                }
+                            } else if start_position.is_some() {
+                                SessionEvent::PlaybackFailed {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    error,
+                                }
+                            } else {
+                                SessionEvent::OpenFailed {
+                                    open_gen,
+                                    op_id,
+                                    error,
+                                }
+                            };
                         let _ = worker_send(event, &sender);
                     }
                     return;
@@ -1362,12 +1433,20 @@ impl PlaybackSession {
                         if control.seq() == serving.get() {
                             let (seek_gen, op_id) = gen_cell.get();
                             let _ = worker_send(
-                                SessionEvent::VideoStreamEnded { open_gen, seek_gen, op_id },
+                                SessionEvent::VideoStreamEnded {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                },
                                 &sender,
                             );
                             if session.had_audio_stream() {
                                 let _ = worker_send(
-                                    SessionEvent::AudioStreamEnded { open_gen, seek_gen, op_id },
+                                    SessionEvent::AudioStreamEnded {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                    },
                                     &audio_sender,
                                 );
                             }
@@ -1377,13 +1456,21 @@ impl PlaybackSession {
                     Err(ref error) if error == WORKER_CANCELLED => {}
                     Err(error) => {
                         let (seek_gen, op_id) = gen_cell.get();
-                        let event = if error.contains("device removed")
-                            || device.is_device_removed()
-                        {
-                            SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
-                        } else {
-                            SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
-                        };
+                        let event =
+                            if error.contains("device removed") || device.is_device_removed() {
+                                SessionEvent::DeviceLost {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                }
+                            } else {
+                                SessionEvent::PlaybackFailed {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    error,
+                                }
+                            };
                         let _ = worker_send(event, &sender);
                     }
                 }
@@ -1391,23 +1478,40 @@ impl PlaybackSession {
                 let (command, new_seq) = control.wait_next();
                 match command {
                     DecodeCommand::Shutdown => break,
-                    DecodeCommand::Seek { target, seek_gen, op_id } => {
+                    DecodeCommand::Seek {
+                        target,
+                        seek_gen,
+                        op_id,
+                    } => {
                         serving.set(new_seq);
                         gen_cell.set((seek_gen, op_id));
                         if let Err(error) = unsafe { session.seek(target) } {
-                            let event = if error.contains("device removed")
-                                || device.is_device_removed()
-                            {
-                                SessionEvent::DeviceLost { open_gen, seek_gen, op_id }
-                            } else {
-                                SessionEvent::PlaybackFailed { open_gen, seek_gen, op_id, error }
-                            };
+                            let event =
+                                if error.contains("device removed") || device.is_device_removed() {
+                                    SessionEvent::DeviceLost {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                    }
+                                } else {
+                                    SessionEvent::PlaybackFailed {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                        error,
+                                    }
+                                };
                             let _ = worker_send(event, &sender);
                         }
                     }
                 }
             }
         });
+        // Track the new worker so a blocking teardown can join it. Every spawn
+        // is preceded by `teardown_decode_thread(false)`, which has already
+        // signalled the previous worker to shut down; replacing the handle here
+        // detaches that already-exiting thread (it finishes on its own).
+        self.decode_join = Some(handle);
     }
 
     /// Whether a persistent decode thread is running that can serve a seek of
@@ -1427,11 +1531,37 @@ impl PlaybackSession {
         }
         self.decode_thread_preference = None;
         if wait {
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while self.active_worker_count.load(Ordering::Acquire) > 0
-                && Instant::now() < deadline
+            let handle = self.decode_join.take();
+            // Wait — bounded — for every live worker (the current one plus any
+            // detached straggler from a rapid reopen) to release its resources.
+            // `active_worker_count` only reaches zero once each worker's
+            // `WorkerGuard` drops, which runs after its D3D11 codec/session
+            // teardown. The interrupt callback aborts any in-flight FFmpeg I/O
+            // on `is_shutdown`, and every other worker wait point checks the
+            // same flag, so a healthy worker reaches zero within milliseconds.
+            let deadline = Instant::now() + WORKER_JOIN_TIMEOUT;
+            while self.active_worker_count.load(Ordering::Acquire) > 0 && Instant::now() < deadline
             {
                 thread::sleep(Duration::from_millis(1));
+            }
+
+            if let Some(handle) = handle {
+                if self.active_worker_count.load(Ordering::Acquire) == 0 {
+                    // The worker has released its device clone; join is now
+                    // effectively instant and guarantees the thread (and the
+                    // captured device clone it drops last) is fully gone before
+                    // the caller rebuilds or destroys the shared device.
+                    let _ = handle.join();
+                } else {
+                    // A worker did not exit within the timeout (e.g. wedged
+                    // beyond the interrupt callback's reach). Detach it rather
+                    // than freezing the UI thread on an unbounded join; log so
+                    // the stall is diagnosable.
+                    flog!(
+                        "[teardown] decode worker still alive {}ms after cancel; detaching to avoid UI hang",
+                        WORKER_JOIN_TIMEOUT.as_millis()
+                    );
+                }
             }
         }
     }
@@ -1468,7 +1598,8 @@ impl PlaybackSession {
     }
 
     fn submit_due_audio(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        if self.state == PlaybackState::Paused || self.pause_after_seek || self.playback_rate != 1.0 {
+        if self.state == PlaybackState::Paused || self.pause_after_seek || self.playback_rate != 1.0
+        {
             return Ok(());
         }
 
@@ -1714,6 +1845,15 @@ impl PlaybackSession {
             Ok(_) => {}
         }
 
+        let frame_position = self.media_time_for_pts(frame.pts());
+        if let Some(previous) = self.last_presented_media_position {
+            let interval = frame_position.saturating_sub(previous);
+            if !interval.is_zero() && interval <= MAX_OBSERVED_FRAME_INTERVAL {
+                self.observed_frame_interval = Some(interval);
+            }
+        }
+        self.last_presented_media_position = Some(frame_position);
+
         self.present_needed = true;
         self.metrics.note_video_frame_presented();
         if let Some(elapsed) = self.metrics.note_resume_first_frame(now) {
@@ -1745,7 +1885,11 @@ impl PlaybackSession {
     }
 
     fn push_video_frame(&mut self, frame: DecodedVideoFrame) {
-        let insert_at = if self.queued_video_frames.back().map_or(true, |last| frame.pts() >= last.pts()) {
+        let insert_at = if self
+            .queued_video_frames
+            .back()
+            .map_or(true, |last| frame.pts() >= last.pts())
+        {
             self.queued_video_frames.len()
         } else {
             self.queued_video_frames
@@ -1800,7 +1944,8 @@ impl PlaybackSession {
                 self.metrics.note_resume_requested(now);
                 if self.audio_clock_anchor_pts.is_none() {
                     let resume_pts = self.paused_clock_position.unwrap_or(Duration::ZERO);
-                    self.video_clock = Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
+                    self.video_clock =
+                        Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
                 } else if let Some(sink) = self.audio_sink.as_mut() {
                     sink.resume()?;
                 }
@@ -1821,9 +1966,11 @@ impl PlaybackSession {
     }
 
     fn replay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        self.seek(SeekTarget::new(self.in_point.unwrap_or(Duration::ZERO)), now)
+        self.seek(
+            SeekTarget::new(self.in_point.unwrap_or(Duration::ZERO)),
+            now,
+        )
     }
-
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.overlay.subtitle_track.is_none() {
@@ -1923,7 +2070,8 @@ impl PlaybackSession {
         if self.view_rotation_quarter_turns % 2 != 0 {
             std::mem::swap(&mut w, &mut h);
         }
-        self.window.set_window_client_size((w / 2).max(1), (h / 2).max(1));
+        self.window
+            .set_window_client_size((w / 2).max(1), (h / 2).max(1));
     }
 
     fn step_playback_rate(&mut self, step: i8) {
@@ -1960,7 +2108,11 @@ impl PlaybackSession {
             let rate_str = if self.playback_rate.fract() == 0.0 {
                 format!("{}x", self.playback_rate as u32)
             } else {
-                format!("{:.2}", self.playback_rate).trim_end_matches('0').trim_end_matches('.').to_owned() + "x"
+                format!("{:.2}", self.playback_rate)
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_owned()
+                    + "x"
             };
             suffixes.push(rate_str);
         }
@@ -2000,7 +2152,8 @@ impl PlaybackSession {
 
         let cue = track.cue_at(subtitle_position, self.overlay.active_subtitle_cue);
         let next_index = cue.map(|(index, _)| index);
-        if self.overlay.active_subtitle_cue == next_index && self.overlay.active_subtitle_viewport == Some(viewport)
+        if self.overlay.active_subtitle_cue == next_index
+            && self.overlay.active_subtitle_viewport == Some(viewport)
         {
             return Ok(());
         }
@@ -2262,6 +2415,53 @@ impl PlaybackSession {
             && seek_gen == self.generations.seek()
             && Some(op_id) == self.active_operation_id
     }
+}
+
+fn screenshot_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(profile).join("Pictures").join("FastPlay"));
+    }
+
+    Ok(std::env::current_dir()?.join("FastPlay Screenshots"))
+}
+
+fn encode_bgra_bmp(capture: &BgraFrameCapture) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let width = capture.width;
+    let height = capture.height;
+    let pixel_bytes = width
+        .checked_mul(height)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or("screenshot dimensions overflowed BMP size")?;
+    if capture.pixels.len() != pixel_bytes as usize {
+        return Err("screenshot pixel buffer size did not match dimensions".into());
+    }
+
+    let header_bytes = 14u32 + 40u32;
+    let file_size = header_bytes
+        .checked_add(pixel_bytes)
+        .ok_or("screenshot BMP file size overflowed")?;
+    let top_down_height = -(height as i32);
+
+    let mut bytes = Vec::with_capacity(file_size as usize);
+    bytes.extend_from_slice(b"BM");
+    bytes.extend_from_slice(&file_size.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&header_bytes.to_le_bytes());
+
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&(width as i32).to_le_bytes());
+    bytes.extend_from_slice(&top_down_height.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&pixel_bytes.to_le_bytes());
+    bytes.extend_from_slice(&0i32.to_le_bytes());
+    bytes.extend_from_slice(&0i32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&capture.pixels);
+    Ok(bytes)
 }
 
 impl ModalTickTarget for PlaybackSession {

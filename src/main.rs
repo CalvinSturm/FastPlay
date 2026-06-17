@@ -31,13 +31,16 @@ use std::time::{Duration, Instant};
 use app::commands::SessionCommand;
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
-use media::{
-    seek::SeekTarget,
-    source::MediaSource,
-    video::VideoDecodePreference,
-};
+use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
 use platform::input::InputEvent;
+use platform::open_dialog::show_open_file_dialog;
 use platform::window::NativeWindow;
+
+/// How long the UI loop blocks on the message queue when the player is
+/// quiescent. Short enough that asynchronous worker events and timed overlays
+/// stay responsive (~10 wakeups/sec is negligible CPU), long enough that an
+/// idle player does not busy-spin.
+const IDLE_MESSAGE_WAIT_MS: u32 = 100;
 
 fn main() {
     // ── Vectored Exception Handler ─────────────────────────────────────
@@ -75,6 +78,10 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Set DPI awareness before creating any windows so the system delivers
+    // physical pixel sizes and WM_DPICHANGED on monitor transitions.
+    ffi::runtime::set_dpi_awareness();
+
     // Raise the Windows multimedia timer resolution to 1 ms so that
     // thread::sleep(1ms) wakes up on time.  Without this the default
     // resolution is ~15 ms, which causes the main loop to miss video frame
@@ -111,6 +118,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::ToggleSubtitles => {
                     session.apply_command(SessionCommand::ToggleSubtitles, now)?;
                 }
+                InputEvent::SaveScreenshot => {
+                    session.apply_command(SessionCommand::SaveScreenshot, now)?;
+                }
                 InputEvent::SeekRelativeSeconds(offset_seconds) => {
                     let snapshot = session.snapshot(now);
                     let next_position = if offset_seconds >= 0 {
@@ -120,10 +130,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         snapshot
                             .position
-                            .saturating_sub(std::time::Duration::from_secs((-offset_seconds) as u64))
+                            .saturating_sub(std::time::Duration::from_secs(
+                                (-offset_seconds) as u64,
+                            ))
                     };
-                    session.apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), now)?;
-                    timeline_ui.seek_overlay_until = Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
+                    session
+                        .apply_command(SessionCommand::Seek(SeekTarget::new(next_position)), now)?;
+                    timeline_ui.seek_overlay_until =
+                        Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
+                }
+                InputEvent::StepFrameForward => {
+                    session.apply_command(SessionCommand::StepFrameForward, now)?;
+                    timeline_ui.seek_overlay_until =
+                        Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
+                }
+                InputEvent::StepFrameBackward => {
+                    session.apply_command(SessionCommand::StepFrameBackward, now)?;
+                    timeline_ui.seek_overlay_until =
+                        Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
                 }
                 InputEvent::AdjustVolumeSteps(steps) => {
                     session.apply_command(SessionCommand::AdjustVolumeSteps(steps), now)?;
@@ -137,8 +161,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 InputEvent::ToggleBorderlessFullscreen => {
                     session.apply_command(SessionCommand::ToggleBorderlessFullscreen, now)?;
                 }
-                InputEvent::ZoomAtCursor { delta, cursor_x, cursor_y } => {
-                    session.apply_command(SessionCommand::ZoomAtCursor { delta, cursor_x, cursor_y }, now)?;
+                InputEvent::ZoomAtCursor {
+                    delta,
+                    cursor_x,
+                    cursor_y,
+                } => {
+                    session.apply_command(
+                        SessionCommand::ZoomAtCursor {
+                            delta,
+                            cursor_x,
+                            cursor_y,
+                        },
+                        now,
+                    )?;
                 }
                 InputEvent::ResetView => {
                     session.apply_command(SessionCommand::ResetView, now)?;
@@ -185,7 +220,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 InputEvent::PanDelta { dx, dy } => {
                     session.apply_command(
-                        SessionCommand::PanBy { dx: dx as f32, dy: dy as f32 },
+                        SessionCommand::PanBy {
+                            dx: dx as f32,
+                            dy: dy as f32,
+                        },
                         now,
                     )?;
                 }
@@ -201,12 +239,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     session.open(source, now)?;
                     session.window().set_title(&title);
                 }
+                InputEvent::OpenFileDialog => {
+                    let hwnd = session.window().raw_window().hwnd();
+                    if let Some(path) = show_open_file_dialog(hwnd) {
+                        let source = MediaSource::new(path);
+                        let title = window_title_for(&source);
+                        session.open(source, now)?;
+                        session.window().set_title(&title);
+                    }
+                }
             }
         }
         timeline_ui.update(&mut session, now)?;
         session.tick(now)?;
         if session.take_idle_pace_request() {
-            std::thread::sleep(Duration::from_millis(1));
+            // The tick produced no frame to present. While playback is actively
+            // advancing, pace tightly so the next frame's deadline is not missed.
+            // When the player is quiescent (idle/paused/ended/error), block on
+            // the message queue instead of spinning — this is what keeps an idle
+            // or paused FastPlay from pinning a CPU core. The bounded timeout
+            // still lets asynchronous worker events and timed overlays be picked
+            // up promptly, and any input/resize/drag wakes the wait immediately.
+            if session.is_idle_for_input() {
+                session.window().wait_for_messages(IDLE_MESSAGE_WAIT_MS);
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 
@@ -218,7 +276,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn window_title_for(source: &MediaSource) -> String {
-    let name = source.path()
+    let name = source
+        .path()
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("FastPlay");

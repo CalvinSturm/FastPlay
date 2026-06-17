@@ -8,9 +8,10 @@
 )]
 
 use std::{
+    cell::Cell,
     ffi::{c_void, CStr, CString},
     ptr::{null, null_mut},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -28,6 +29,83 @@ include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
 const SWS_BILINEAR_FLAGS: i32 = 2;
 const AV_NOPTS_SENTINEL: i64 = i64::MIN;
 const AV_TIME_BASE_MICROS: i128 = 1_000_000;
+
+// Wall-clock ceilings for blocking FFmpeg I/O. Without an interrupt callback
+// avformat_open_input / av_read_frame / av_seek_frame can block forever on a
+// disconnected network share, a vanished removable drive, or a corrupt file.
+// The interrupt callback (see `InterruptState`) aborts the operation once the
+// matching deadline passes, surfacing a clear error instead of a frozen worker.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
+const SEEK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Shared state behind an `AVFormatContext`'s interrupt callback. FFmpeg polls
+/// the callback during blocking I/O; returning non-zero aborts the operation.
+/// The callback aborts when the owning worker has been asked to cancel (so a
+/// shutdown can unblock a worker wedged in FFmpeg) or when the deadline for the
+/// current blocking operation has elapsed.
+///
+/// Created and mutated only on the decode worker thread that owns the session;
+/// the embedded `cancel` closure typically observes a `Send`/`Sync` shutdown
+/// flag, which is the only field touched from another thread.
+pub(crate) struct InterruptState {
+    cancel: Box<dyn Fn() -> bool>,
+    deadline: Cell<Option<Instant>>,
+}
+
+impl InterruptState {
+    fn new(cancel: Box<dyn Fn() -> bool>) -> Self {
+        Self {
+            cancel,
+            deadline: Cell::new(None),
+        }
+    }
+
+    /// Arm (or clear) the deadline guarding the next blocking operation.
+    fn set_deadline(&self, deadline: Option<Instant>) {
+        self.deadline.set(deadline);
+    }
+
+    /// Why a blocking operation should abort, if it should. Checked both by the
+    /// FFmpeg interrupt callback and after a blocking call returns an error so
+    /// the reason can be reported.
+    fn aborted_reason(&self) -> Option<&'static str> {
+        if (self.cancel)() {
+            return Some("cancelled");
+        }
+        if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
+            return Some("timed out");
+        }
+        None
+    }
+}
+
+/// FFmpeg interrupt callback. `opaque` points at an [`InterruptState`] that
+/// outlives the `AVFormatContext` it is attached to.
+unsafe extern "C" fn ffmpeg_interrupt_callback(opaque: *mut c_void) -> i32 {
+    if opaque.is_null() {
+        return 0;
+    }
+    let state = &*(opaque as *const InterruptState);
+    i32::from(state.aborted_reason().is_some())
+}
+
+/// `ffmpeg_check` for a blocking call guarded by an interrupt callback: if the
+/// call failed because the callback aborted it (cancel or timeout), report that
+/// reason instead of FFmpeg's generic `AVERROR_EXIT` message.
+unsafe fn check_blocking(
+    status: i32,
+    operation: &str,
+    interrupt: &InterruptState,
+) -> Result<i32, String> {
+    if status >= 0 {
+        return Ok(status);
+    }
+    if let Some(reason) = interrupt.aborted_reason() {
+        return Err(format!("{operation} {reason}"));
+    }
+    ffmpeg_check(status, operation)
+}
 
 #[derive(Debug)]
 pub(crate) enum PendingVideoFrame {
@@ -94,62 +172,9 @@ pub(crate) enum StreamStatus {
     Cancelled,
 }
 
-pub(crate) fn stream_media<V, A, C>(
-    source: &MediaSource,
-    device: &D3D11Device,
-    audio_output_format: AudioStreamFormat,
-    start_position: Option<Duration>,
-    decode_preference: VideoDecodePreference,
-    open_gen: OpenGeneration,
-    seek_gen: SeekGeneration,
-    op_id: OperationId,
-    mut on_decode_mode: impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
-    mut on_duration: impl FnMut(Duration) -> Result<(), String>,
-    should_cancel: C,
-    mut on_video: V,
-    mut on_audio: A,
-) -> Result<StreamStatus, String>
-where
-    V: FnMut(PendingVideoFrame) -> Result<(), String>,
-    A: FnMut(PendingAudioFrame) -> Result<(), String>,
-    C: Fn() -> bool,
-{
-    // SAFETY: the whole FFmpeg pipeline is unsafe FFI. The DecodeSession owns
-    // every C resource (format context, codecs, packet, frame) and frees them
-    // on drop.
-    unsafe {
-        let mut session = match DecodeSession::open(
-            source,
-            device,
-            audio_output_format,
-            start_position,
-            decode_preference,
-            &should_cancel,
-            &mut on_decode_mode,
-            &mut on_duration,
-        )? {
-            Some(session) => session,
-            None => return Ok(StreamStatus::Cancelled),
-        };
-
-        session.run_to_eof(
-            device,
-            open_gen,
-            seek_gen,
-            op_id,
-            &should_cancel,
-            &mut on_decode_mode,
-            &mut on_video,
-            &mut on_audio,
-        )
-    }
-}
-
 /// One open media file with its video (and optional audio) decoders, ready to
-/// decode. Extracted from the former monolithic `stream_media` so a future
-/// persistent-decoder design can seek within an open session instead of
-/// reopening the file per operation. Phase 1: behavior is identical — exactly
-/// one session is opened and run to EOF per `stream_media` call.
+/// decode. The persistent decode worker opens a session once and seeks within
+/// it (`seek` + `run_to_eof`) instead of reopening the file per operation.
 pub(crate) struct DecodeSession {
     input: InputContext,
     video: VideoDecoder,
@@ -161,6 +186,12 @@ pub(crate) struct DecodeSession {
     /// Position the decoder is currently seeked to (None = start of stream).
     /// Used to restart decoding after a mid-stream hardware→software fallback.
     position: Option<Duration>,
+    /// Backs the format context's interrupt callback. Declared last so it is
+    /// dropped *after* `input` (whose teardown could otherwise reference a
+    /// freed callback opaque pointer). The `AVFormatContext` holds a raw
+    /// pointer to this heap allocation, so it must not move while in use —
+    /// `Box` keeps the address stable across `DecodeSession` moves.
+    interrupt: Box<InterruptState>,
 }
 
 impl DecodeSession {
@@ -180,6 +211,7 @@ impl DecodeSession {
         audio_output_format: AudioStreamFormat,
         start_position: Option<Duration>,
         decode_preference: VideoDecodePreference,
+        io_cancel: Box<dyn Fn() -> bool>,
         should_cancel: &impl Fn() -> bool,
         on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
         on_duration: &mut impl FnMut(Duration) -> Result<(), String>,
@@ -191,8 +223,24 @@ impl DecodeSession {
         let source_cstr =
             CString::new(source_path).map_err(|_| "media path contained NUL".to_string())?;
 
-        let mut format_context: *mut AVFormatContext = null_mut();
-        ffmpeg_check(
+        // Pre-allocate the format context so the interrupt callback is armed
+        // *before* the (potentially blocking) open. `interrupt` is declared
+        // before `input` so that on any early return it is dropped after the
+        // input context, never leaving a live callback pointing at freed state.
+        let format_context = fastplay_ffmpeg_alloc_context();
+        if format_context.is_null() {
+            return Err("avformat_alloc_context returned null".into());
+        }
+        let interrupt = Box::new(InterruptState::new(io_cancel));
+        fastplay_ffmpeg_set_interrupt(
+            format_context,
+            Some(ffmpeg_interrupt_callback),
+            (&*interrupt as *const InterruptState) as *mut c_void,
+        );
+
+        let mut format_context = format_context;
+        interrupt.set_deadline(Some(Instant::now() + OPEN_TIMEOUT));
+        check_blocking(
             avformat_open_input(
                 &mut format_context,
                 source_cstr.as_ptr(),
@@ -200,13 +248,17 @@ impl DecodeSession {
                 null_mut(),
             ),
             "avformat_open_input",
+            &interrupt,
         )?;
         let input = InputContext(format_context);
 
-        ffmpeg_check(
+        interrupt.set_deadline(Some(Instant::now() + OPEN_TIMEOUT));
+        check_blocking(
             avformat_find_stream_info(input.0, null_mut()),
             "avformat_find_stream_info",
+            &interrupt,
         )?;
+        interrupt.set_deadline(None);
 
         // Check cancellation before allocating a hardware decoder on the GPU.
         // Without this, rapid seeks pile up concurrent decoder sessions from
@@ -226,7 +278,11 @@ impl DecodeSession {
         let audio_batch = audio
             .as_ref()
             .map(|audio| AudioBatcher::new(audio.output_format));
-        on_decode_mode(video.mode, video.hw_fallback_count, video.rotation_quarter_turns)?;
+        on_decode_mode(
+            video.mode,
+            video.hw_fallback_count,
+            video.rotation_quarter_turns,
+        )?;
         let summary = StreamSummary {
             had_audio_stream: audio.is_some(),
             produced_video_frames: 0,
@@ -234,17 +290,22 @@ impl DecodeSession {
             decode_mode: video.mode,
             hw_fallback_count: video.hw_fallback_count,
         };
-        let total_duration = frame_pts(fastplay_ffmpeg_duration_micros(input.0), AVRational {
-            num: 1,
-            den: 1_000_000,
-        });
+        let total_duration = frame_pts(
+            fastplay_ffmpeg_duration_micros(input.0),
+            AVRational {
+                num: 1,
+                den: 1_000_000,
+            },
+        );
         if !total_duration.is_zero() {
             on_duration(total_duration)?;
         }
 
         if let Some(target) = start_position {
             flog!("[worker] seeking to {:.3}s", target.as_secs_f64());
+            interrupt.set_deadline(Some(Instant::now() + SEEK_TIMEOUT));
             seek_and_flush(input.0, &video, audio.as_ref(), target)?;
+            interrupt.set_deadline(None);
         }
 
         let packet = av_packet_alloc();
@@ -268,13 +329,18 @@ impl DecodeSession {
             frame,
             summary,
             position: start_position,
+            interrupt,
         }))
     }
 
     /// Seek within the already-open file to `target` and flush the decoders,
     /// without reopening anything. The next `run_to_eof` resumes from here.
     pub(crate) unsafe fn seek(&mut self, target: Duration) -> Result<(), String> {
-        seek_and_flush(self.input.0, &self.video, self.audio.as_ref(), target)?;
+        self.interrupt
+            .set_deadline(Some(Instant::now() + SEEK_TIMEOUT));
+        let result = seek_and_flush(self.input.0, &self.video, self.audio.as_ref(), target);
+        self.interrupt.set_deadline(None);
+        result?;
         self.position = Some(target);
         Ok(())
     }
@@ -300,11 +366,15 @@ impl DecodeSession {
                 return Ok(StreamStatus::Cancelled);
             }
 
+            self.interrupt
+                .set_deadline(Some(Instant::now() + READ_TIMEOUT));
             let read_status = av_read_frame(self.input.0, self.packet.0);
             if read_status == fastplay_ffmpeg_error_eof() {
+                self.interrupt.set_deadline(None);
                 break;
             }
-            ffmpeg_check(read_status, "av_read_frame")?;
+            check_blocking(read_status, "av_read_frame", &self.interrupt)?;
+            self.interrupt.set_deadline(None);
 
             if (*self.packet.0).stream_index == self.video.stream_index as i32 {
                 // D3D11VA's avcodec_send_packet may call into the video
@@ -337,9 +407,18 @@ impl DecodeSession {
                             hw_mid_fallback_done = true;
                             self.summary.decode_mode = self.video.mode;
                             self.summary.hw_fallback_count = self.video.hw_fallback_count;
-                            on_decode_mode(self.video.mode, self.video.hw_fallback_count, self.video.rotation_quarter_turns)?;
+                            on_decode_mode(
+                                self.video.mode,
+                                self.video.hw_fallback_count,
+                                self.video.rotation_quarter_turns,
+                            )?;
                             let restart = self.position.unwrap_or(Duration::ZERO);
-                            seek_and_flush(self.input.0, &self.video, self.audio.as_ref(), restart)?;
+                            seek_and_flush(
+                                self.input.0,
+                                &self.video,
+                                self.audio.as_ref(),
+                                restart,
+                            )?;
                             continue;
                         }
                         Err(sw_error) => {
@@ -434,7 +513,13 @@ impl DecodeSession {
                 &|| should_cancel(),
             )?;
             if let Some(batch) = self.audio_batch.as_mut() {
-                batch.flush(open_gen, seek_gen, op_id, &mut self.summary.produced_audio_frames, on_audio)?;
+                batch.flush(
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                    &mut self.summary.produced_audio_frames,
+                    on_audio,
+                )?;
             }
         }
 
@@ -599,7 +684,10 @@ unsafe fn open_hardware_video_decoder(
     (*codec.0).pkt_timebase = pts_time_base;
     (*codec.0).get_format = Some(select_d3d11_pixel_format);
     configure_hw_device(codec.0, device, decoder)?;
-    ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(video)")?;
+    ffmpeg_check(
+        avcodec_open2(codec.0, decoder, null_mut()),
+        "avcodec_open2(video)",
+    )?;
 
     Ok(VideoDecoder {
         stream_index,
@@ -651,7 +739,10 @@ unsafe fn open_software_video_decoder(
     )?;
     let pts_time_base = fastplay_ffmpeg_stream_time_base(stream);
     (*codec.0).pkt_timebase = pts_time_base;
-    ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(video)")?;
+    ffmpeg_check(
+        avcodec_open2(codec.0, decoder, null_mut()),
+        "avcodec_open2(video)",
+    )?;
 
     Ok(VideoDecoder {
         stream_index,
@@ -704,7 +795,10 @@ unsafe fn open_audio_decoder(
     )?;
     let pts_time_base = fastplay_ffmpeg_stream_time_base(stream);
     (*codec.0).pkt_timebase = pts_time_base;
-    ffmpeg_check(avcodec_open2(codec.0, decoder, null_mut()), "avcodec_open2(audio)")?;
+    ffmpeg_check(
+        avcodec_open2(codec.0, decoder, null_mut()),
+        "avcodec_open2(audio)",
+    )?;
 
     let input_channel_layout = &(*codec.0).ch_layout;
     if fastplay_ffmpeg_channel_layout_mask_or_default(input_channel_layout) == 0 {
@@ -1018,8 +1112,7 @@ impl Resampler {
         if context.is_null() {
             return Err(format!(
                 "failed to create float resampler for {} Hz / {} channels output",
-                output_format.sample_rate,
-                output_format.channels
+                output_format.sample_rate, output_format.channels
             ));
         }
         Ok(Self {
@@ -1034,7 +1127,8 @@ impl Resampler {
         ffmpeg_check(out_samples, "swr_get_out_samples")?;
 
         let bytes_per_frame = self.output_format.bytes_per_frame() as usize;
-        self.output_buffer.resize(out_samples as usize * bytes_per_frame, 0);
+        self.output_buffer
+            .resize(out_samples as usize * bytes_per_frame, 0);
         let output_planes = [self.output_buffer.as_mut_ptr()];
         let converted = swr_convert(
             self.context,
