@@ -2106,35 +2106,14 @@ impl PlaybackSession {
     }
 
     fn fit_window(&mut self) {
-        let Some((disp_w, disp_h)) = self.presenter.current_surface_size() else {
+        let Some((mut w, mut h)) = self.presenter.current_surface_size() else {
             return;
         };
-        let Ok((vw, vh)) = self.presenter.viewport_size() else {
-            return;
-        };
-        if disp_w == 0 || disp_h == 0 || vw == 0 || vh == 0 {
-            return;
+        // Account for rotation: odd quarter-turns swap width and height.
+        if self.view_rotation_quarter_turns % 2 != 0 {
+            std::mem::swap(&mut w, &mut h);
         }
-
-        // Compute the zoom needed to fill the viewport with no black bars.
-        let source_aspect = disp_w as f32 / disp_h as f32;
-        let output_aspect = vw as f32 / vh as f32;
-        let fill_zoom = if output_aspect > source_aspect {
-            output_aspect / source_aspect
-        } else {
-            source_aspect / output_aspect
-        };
-        let fill_zoom = fill_zoom.clamp(1.0, 8.0);
-
-        // Toggle: if already at the fill zoom, reset to 1.0 (fit).
-        if (self.view_zoom - fill_zoom).abs() < 0.01 {
-            self.view_zoom = 1.0;
-        } else {
-            self.view_zoom = fill_zoom;
-        }
-        self.view_pan_x = 0.0;
-        self.view_pan_y = 0.0;
-        self.present_needed = true;
+        self.window.fit_window_to_content(w, h);
     }
 
     fn half_size_window(&mut self) {
@@ -2144,10 +2123,6 @@ impl PlaybackSession {
         if self.view_rotation_quarter_turns % 2 != 0 {
             std::mem::swap(&mut w, &mut h);
         }
-        self.view_zoom = 1.0;
-        self.view_pan_x = 0.0;
-        self.view_pan_y = 0.0;
-        self.present_needed = true;
         self.window
             .set_window_client_size((w / 2).max(1), (h / 2).max(1));
     }
