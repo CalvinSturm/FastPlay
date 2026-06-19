@@ -903,8 +903,10 @@ impl PlaybackSession {
                     self.needs_initial_resize = false;
                     let center = !self.has_shown_content;
                     self.has_shown_content = true;
-                    let ffmpeg::PendingVideoFrame::D3D11 { width, height, .. } = &frame;
-                    self.window.resize_for_content(*width, *height, center);
+                    let ffmpeg::PendingVideoFrame::D3D11 { width, height, sar_num, sar_den, .. } = &frame;
+                    let disp_w = width * sar_num;
+                    let disp_h = height * sar_den;
+                    self.window.resize_for_content(disp_w, disp_h, center);
                 }
 
                 let ffmpeg::PendingVideoFrame::D3D11 {

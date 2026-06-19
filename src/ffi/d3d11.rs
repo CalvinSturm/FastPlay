@@ -118,6 +118,8 @@ pub(crate) struct VideoSurface {
     subresource_index: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) sar_num: u32,
+    pub(crate) sar_den: u32,
 }
 
 /// Cached D3D11 video processor objects reused across frames when the
@@ -374,6 +376,8 @@ impl D3D11Device {
         subresource_index: u32,
         width: u32,
         height: u32,
+        sar_num: u32,
+        sar_den: u32,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         // Guard: if the device was removed (GPU TDR) bail out before touching
         // any D3D11 objects.  Without this the worker thread crashes inside
@@ -443,6 +447,8 @@ impl D3D11Device {
             subresource_index: 0,
             width,
             height,
+            sar_num,
+            sar_den,
         })
     }
 
@@ -532,10 +538,15 @@ impl D3D11Device {
             };
 
             let rotation_quarter_turns = view.rotation_quarter_turns % 4;
+            // Compute display dimensions from coded dimensions × sample aspect ratio.
+            // SAR 1:1 (or unknown) leaves display = coded; anamorphic content like
+            // PAL 720×576 with SAR 64:45 yields display 1024×576.
+            let disp_w = surface.width * surface.sar_num;
+            let disp_h = surface.height * surface.sar_den;
             let (display_width, display_height) = if rotation_quarter_turns % 2 == 1 {
-                (surface.height, surface.width)
+                (disp_h, disp_w)
             } else {
-                (surface.width, surface.height)
+                (disp_w, disp_h)
             };
             let base_rect =
                 aspect_fit_rect(display_width, display_height, output_width, output_height);
@@ -1284,6 +1295,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         height: u32,
         data: &[u8],
         stride: usize,
+        sar_num: u32,
+        sar_den: u32,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
             return Err(Box::new(D3D11Error(
@@ -1342,6 +1355,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             subresource_index: 0,
             width,
             height,
+            sar_num,
+            sar_den,
         })
     }
 }

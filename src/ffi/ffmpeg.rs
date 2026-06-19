@@ -116,6 +116,8 @@ pub(crate) enum PendingVideoFrame {
         pts: Duration,
         width: u32,
         height: u32,
+        sar_num: u32,
+        sar_den: u32,
         surface: VideoSurface,
     },
 }
@@ -881,12 +883,18 @@ where
                     ));
                 }
 
+                let sar = (*frame).sample_aspect_ratio;
+                let sar_num = if sar.num > 0 && sar.den > 0 { sar.num as u32 } else { 1 };
+                let sar_den = if sar.num > 0 && sar.den > 0 { sar.den as u32 } else { 1 };
+
                 let surface = device
                     .surface_from_raw_texture(
                         (*frame).data[0].cast::<c_void>(),
                         (*frame).data[1] as usize as u32,
                         (*frame).width as u32,
                         (*frame).height as u32,
+                        sar_num,
+                        sar_den,
                     )
                     .map_err(|error| error.to_string())?;
 
@@ -897,11 +905,16 @@ where
                     pts: decoded_frame_pts(frame, video.pts_time_base),
                     width: (*frame).width as u32,
                     height: (*frame).height as u32,
+                    sar_num,
+                    sar_den,
                     surface,
                 }
             }
             VideoDecoderOutput::Software(converter) => {
                 let surface = converter.convert(frame, device)?;
+                let sar = (*frame).sample_aspect_ratio;
+                let sar_num = if sar.num > 0 && sar.den > 0 { sar.num as u32 } else { 1 };
+                let sar_den = if sar.num > 0 && sar.den > 0 { sar.den as u32 } else { 1 };
                 PendingVideoFrame::D3D11 {
                     open_gen,
                     seek_gen,
@@ -909,6 +922,8 @@ where
                     pts: decoded_frame_pts(frame, video.pts_time_base),
                     width: (*frame).width as u32,
                     height: (*frame).height as u32,
+                    sar_num,
+                    sar_den,
                     surface,
                 }
             }
@@ -982,8 +997,12 @@ impl SoftwareVideoConverter {
         );
         ffmpeg_check(scaled, "sws_scale(video)")?;
 
+        let sar = (*frame).sample_aspect_ratio;
+        let sar_num = if sar.num > 0 && sar.den > 0 { sar.num as u32 } else { 1 };
+        let sar_den = if sar.num > 0 && sar.den > 0 { sar.den as u32 } else { 1 };
+
         device
-            .upload_nv12_surface_contiguous(width as u32, height as u32, &self.frame_buf, stride)
+            .upload_nv12_surface_contiguous(width as u32, height as u32, &self.frame_buf, stride, sar_num, sar_den)
             .map_err(|e| e.to_string())
     }
 
