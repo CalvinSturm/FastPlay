@@ -108,18 +108,17 @@ impl TimelineUiState {
                 }
             }
         } else if self.scrubbing && self.was_left_button_down && !left_button_down {
-            // Land deterministically. Intermediate previews pause-after-seek, so
-            // when playback was running we must issue one authoritative final
-            // seek with `pause_after = false` to resume. Gating a TogglePause on
-            // `is_paused()` would miss the resume when the last preview seek has
-            // not yet settled to `Paused` (state is still `Playing`, sink already
-            // paused), leaving playback stuck. A single terminal reset here does
-            // not cause the WASAPI churn that rapid intermediate resets do. When
-            // the scrub began paused, the previews already land paused, so no
-            // resume is needed.
+            // Land deterministically. Intermediate previews pause-after-seek.
+            // Resume only when the target is inside the active I/O range; an
+            // outside-range target is an inspection position and must remain
+            // paused. Resuming beyond O immediately collides with out-point
+            // enforcement and creates a redundant seek/stop cycle that presents
+            // as lag and jitter.
             if !self.scrub_was_paused {
                 if let Some(target) = self.preview_target {
-                    session.scrub_seek(SeekTarget::new(target), false, now)?;
+                    if session.position_is_in_active_range(target) {
+                        session.scrub_seek(SeekTarget::new(target), false, now)?;
+                    }
                 }
             }
             self.scrub_origin = None;
