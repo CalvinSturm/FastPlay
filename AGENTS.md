@@ -44,6 +44,7 @@ Do not add features that do not clearly improve first-frame, seek, present, or r
 - No exclusive fullscreen support in v1.
 - Do not use `DXGI_PRESENT_RESTART` in the normal windowed or borderless resize path.
 - Software fallback upload textures must remain compatible with the current D3D11 video-processor present path; do not simplify their creation flags without re-validating runtime playback.
+- Treat logical clip boundaries as playback-state transitions, not decoder lifetime boundaries. Park and reuse the persistent decoder; do not asynchronously tear down D3D11VA while the presenter may retain a frame.
 
 ## Scope discipline
 

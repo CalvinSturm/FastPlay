@@ -274,6 +274,10 @@ impl PlaybackSession {
         self.loop_range
     }
 
+    pub fn position_is_in_active_range(&self, position: Duration) -> bool {
+        range_resume_target(position, self.in_point, self.out_point).is_none()
+    }
+
     pub fn replay_indicator_until(&self) -> Option<Instant> {
         self.overlay.replay_indicator_until()
     }
@@ -1598,7 +1602,9 @@ impl PlaybackSession {
     }
 
     fn submit_due_audio(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        if self.state == PlaybackState::Paused || self.pause_after_seek || self.playback_rate != 1.0
+        if matches!(self.state, PlaybackState::Paused | PlaybackState::Ended)
+            || self.pause_after_seek
+            || self.playback_rate != 1.0
         {
             return Ok(());
         }
@@ -1717,7 +1723,7 @@ impl PlaybackSession {
     }
 
     fn advance_video_playback(&mut self, now: Instant) -> Result<bool, Box<dyn std::error::Error>> {
-        if self.state == PlaybackState::Paused {
+        if matches!(self.state, PlaybackState::Paused | PlaybackState::Ended) {
             return Ok(false);
         }
 
@@ -1794,10 +1800,12 @@ impl PlaybackSession {
                             let target = self.in_point.unwrap_or(Duration::ZERO);
                             self.seek(SeekTarget::new(target), now)?;
                         } else {
-                            self.teardown_decode_thread(false);
-                            // Clear op_id so residual events in the channel
-                            // don't pass is_current_frame and restart playback.
-                            self.active_operation_id = None;
+                            // This is a logical clip boundary, not a decoder
+                            // lifetime boundary. Keep the persistent decoder
+                            // parked so Space can replay through an in-place
+                            // seek. Asynchronously tearing down the D3D11VA
+                            // codec here can race the UI rendering the retained
+                            // surface and invalidate the shared device.
                             self.clear_video_queue();
                             self.queued_audio_frames.clear();
                             if let Some(sink) = self.audio_sink.as_mut() {
@@ -1918,6 +1926,12 @@ impl PlaybackSession {
 
     fn toggle_pause(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         match self.state {
+            PlaybackState::Seeking => {
+                self.toggle_pending_seek_pause(now)?;
+            }
+            PlaybackState::Priming if self.pending_seek_target.is_some() => {
+                self.toggle_pending_seek_pause(now)?;
+            }
             PlaybackState::Playing | PlaybackState::Priming | PlaybackState::Draining => {
                 self.metrics.note_pause_requested(now);
                 self.paused_clock_position = self.master_clock_position(now);
@@ -1932,6 +1946,12 @@ impl PlaybackSession {
                 }
             }
             PlaybackState::Paused => {
+                let position = self.snapshot(now).position;
+                if let Some(target) = range_resume_target(position, self.in_point, self.out_point) {
+                    self.pause_after_seek = false;
+                    self.seek(SeekTarget::new(target), now)?;
+                    return Ok(());
+                }
                 // If both streams ended while paused, treat as replay.
                 if self.video_stream_ended
                     && self.queued_video_frames.is_empty()
@@ -1963,6 +1983,37 @@ impl PlaybackSession {
         }
 
         Ok(())
+    }
+
+    fn toggle_pending_seek_pause(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.pause_after_seek {
+            // Space arrived before the seek produced its first frame. Preserve
+            // the pause request so that frame lands paused instead of ignoring
+            // the key while the coordinator is in Seeking/Priming.
+            self.pause_after_seek = true;
+            if let Some(sink) = self.audio_sink.as_mut() {
+                if sink.is_started() {
+                    sink.pause()?;
+                }
+            }
+            return Ok(());
+        }
+
+        // A second Space means resume. Reissue the pending target as the one
+        // authoritative non-pausing seek so the audio sink is reset exactly as
+        // it is at the end of a normal scrub. Resuming outside an active clip
+        // range restarts at its beginning.
+        let position = self
+            .pending_seek_target
+            .map(SeekTarget::position)
+            .unwrap_or_else(|| self.snapshot(now).position);
+        let target =
+            range_resume_target(position, self.in_point, self.out_point).unwrap_or(position);
+        self.pause_after_seek = false;
+        self.seek(SeekTarget::new(target), now)
     }
 
     fn replay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
@@ -2462,6 +2513,62 @@ fn encode_bgra_bmp(capture: &BgraFrameCapture) -> Result<Vec<u8>, Box<dyn std::e
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&capture.pixels);
     Ok(bytes)
+}
+
+fn range_resume_target(
+    position: Duration,
+    in_point: Option<Duration>,
+    out_point: Option<Duration>,
+) -> Option<Duration> {
+    if in_point.is_some_and(|start| position < start)
+        || out_point.is_some_and(|end| position >= end)
+    {
+        Some(in_point.unwrap_or(Duration::ZERO))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::range_resume_target;
+    use std::time::Duration;
+
+    #[test]
+    fn resume_before_in_point_restarts_at_in_point() {
+        assert_eq!(
+            range_resume_target(
+                Duration::from_secs(5),
+                Some(Duration::from_secs(10)),
+                Some(Duration::from_secs(20)),
+            ),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn resume_at_or_after_out_point_restarts_at_range_start() {
+        assert_eq!(
+            range_resume_target(
+                Duration::from_secs(20),
+                Some(Duration::from_secs(10)),
+                Some(Duration::from_secs(20)),
+            ),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn resume_inside_range_keeps_current_position() {
+        assert_eq!(
+            range_resume_target(
+                Duration::from_secs(15),
+                Some(Duration::from_secs(10)),
+                Some(Duration::from_secs(20)),
+            ),
+            None
+        );
+    }
 }
 
 impl ModalTickTarget for PlaybackSession {
