@@ -88,6 +88,25 @@ const MIN_CLIENT_WIDTH: u32 = 640;
 /// Minimum client area height in pixels.
 const MIN_CLIENT_HEIGHT: u32 = 360;
 
+/// Scale `(width, height)` up uniformly so both dimensions meet the enforced
+/// minimum client size (`WM_GETMINMAXINFO` / `ptMinTrackSize`), preserving
+/// aspect ratio. Sizes already at/above the minimum are returned unchanged.
+///
+/// Without this, requesting a client smaller than the minimum lets Windows
+/// clamp each dimension independently into the minimum's 16:9 box, which
+/// letterboxes/pillarboxes non-16:9 video (black bars + apparent shift).
+fn clamp_client_size_to_min(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 || (width >= MIN_CLIENT_WIDTH && height >= MIN_CLIENT_HEIGHT) {
+        return (width, height);
+    }
+    let scale = (MIN_CLIENT_WIDTH as f64 / width as f64)
+        .max(MIN_CLIENT_HEIGHT as f64 / height as f64);
+    (
+        (width as f64 * scale).round() as u32,
+        (height as f64 * scale).round() as u32,
+    )
+}
+
 #[derive(Debug)]
 pub struct DxgiError(String);
 
@@ -354,9 +373,11 @@ impl NativeWindowInner {
             let work_w = (work.right - work.left).max(0) as u32;
             let work_h = (work.bottom - work.top).max(0) as u32;
 
-            // Scale down to fit the work area if needed, preserving aspect ratio.
-            let mut w = content_width;
-            let mut h = content_height;
+            // Scale up to the enforced minimum (preserving aspect) so narrow
+            // content isn't pillarboxed when Windows clamps to ptMinTrackSize,
+            // then scale down to fit the work area if needed (also preserving
+            // aspect). The work area is the hard limit and wins if they conflict.
+            let (mut w, mut h) = clamp_client_size_to_min(content_width, content_height);
             if w > work_w || h > work_h {
                 let scale_x = work_w as f64 / w as f64;
                 let scale_y = work_h as f64 / h as f64;
@@ -469,6 +490,12 @@ impl NativeWindowInner {
         if self.is_borderless.get() || content_width == 0 || content_height == 0 {
             return;
         }
+
+        // Clamp the requested client size up to the enforced minimum while
+        // preserving aspect ratio, so the window is never snapped into the
+        // minimum's 16:9 box (which would letterbox/pillarbox non-16:9 video).
+        let (content_width, content_height) =
+            clamp_client_size_to_min(content_width, content_height);
 
         unsafe {
             let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);

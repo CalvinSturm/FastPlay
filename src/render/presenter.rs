@@ -212,7 +212,9 @@ impl Presenter {
     pub fn current_surface_size(&self) -> Option<(u32, u32)> {
         let handle = self.current_surface?;
         let entry = self.surfaces.get(handle)?;
-        Some((entry.surface.width, entry.surface.height))
+        let s = &entry.surface;
+        let disp_w = s.width * s.sar_num / s.sar_den;
+        Some((disp_w, s.height))
     }
 
     pub fn viewport_size(&self) -> Result<(u32, u32), Box<dyn std::error::Error>> {
