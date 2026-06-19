@@ -400,69 +400,6 @@ impl NativeWindowInner {
         }
     }
 
-    /// Resize the window to fill the work area top-to-bottom with no black
-    /// padding, keeping the window's horizontal center position.
-    pub fn fit_window_to_content(&self, content_width: u32, content_height: u32) {
-        if self.is_borderless.get() || content_width == 0 || content_height == 0 {
-            return;
-        }
-
-        unsafe {
-            let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
-            let mut info = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-                return;
-            }
-            let work = info.rcWork;
-
-            let Ok((chrome_w, chrome_h)) = adjust_window_size(0, 0) else {
-                return;
-            };
-            let max_client_w = ((work.right - work.left) - chrome_w).max(1) as u32;
-            let max_client_h = ((work.bottom - work.top) - chrome_h).max(1) as u32;
-
-            // Fill the full work-area height; derive width from aspect ratio.
-            let scale = max_client_h as f64 / content_height as f64;
-            let w = ((content_width as f64 * scale) as u32)
-                .max(1)
-                .min(max_client_w);
-            let h = if w < (content_width as f64 * scale) as u32 {
-                // Width was clamped — recalculate height from width constraint.
-                ((content_height as f64 * (w as f64 / content_width as f64)) as u32)
-                    .max(1)
-                    .min(max_client_h)
-            } else {
-                max_client_h
-            };
-
-            let Ok((win_w, win_h)) = adjust_window_size(w, h) else {
-                return;
-            };
-
-            // Keep horizontal center, snap to work-area top.
-            let mut rect = RECT::default();
-            let _ = GetWindowRect(self.hwnd, &mut rect);
-            let old_center_x = (rect.left + rect.right) / 2;
-            let x = (old_center_x - win_w / 2)
-                .max(work.left)
-                .min(work.right - win_w);
-            let y = work.top;
-
-            let _ = SetWindowPos(
-                self.hwnd,
-                HWND_TOP,
-                x,
-                y,
-                win_w,
-                win_h,
-                SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
-            );
-        }
-    }
-
     /// Resize the window so the client area is exactly `content_width × content_height`,
     /// keeping the window's current horizontal center and top edge, clamped to the work area.
     pub fn set_window_client_size(&self, content_width: u32, content_height: u32) {
@@ -1323,11 +1260,11 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::RotateCounterClockwise);
                     }
-                    // Ctrl+W → fit window to video (no black padding)
+                    // Ctrl+W → toggle fill viewport / fit
                     0x57 if ctrl_held => {
                         state.input_events.borrow_mut().push(InputEvent::FitWindow);
                     }
-                    // Ctrl+Q → half the video's native resolution
+                    // Ctrl+Q → fit + half-size window
                     0x51 if ctrl_held => {
                         state
                             .input_events
