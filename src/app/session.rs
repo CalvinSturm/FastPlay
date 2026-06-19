@@ -2530,6 +2530,16 @@ fn range_resume_target(
     }
 }
 
+impl ModalTickTarget for PlaybackSession {
+    fn modal_tick(&mut self) {
+        let _ = self.tick(Instant::now());
+    }
+
+    fn modal_tick_window(&self) -> &NativeWindowInner {
+        self.window.raw_window()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::range_resume_target;
@@ -2569,15 +2579,5 @@ mod tests {
             ),
             None
         );
-    }
-}
-
-impl ModalTickTarget for PlaybackSession {
-    fn modal_tick(&mut self) {
-        let _ = self.tick(Instant::now());
-    }
-
-    fn modal_tick_window(&self) -> &NativeWindowInner {
-        self.window.raw_window()
     }
 }
