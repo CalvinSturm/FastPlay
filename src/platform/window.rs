@@ -52,6 +52,11 @@ impl NativeWindow {
             .resize_for_content(content_width, content_height, center);
     }
 
+    pub fn fit_window_to_content(&self, content_width: u32, content_height: u32) {
+        self.inner
+            .fit_window_to_content(content_width, content_height);
+    }
+
     pub fn set_window_client_size(&self, content_width: u32, content_height: u32) {
         self.inner
             .set_window_client_size(content_width, content_height);
