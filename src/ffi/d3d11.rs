@@ -122,6 +122,20 @@ pub(crate) struct VideoSurface {
     pub(crate) sar_den: u32,
 }
 
+impl VideoSurface {
+    /// Display dimensions: coded size corrected by the sample aspect ratio.
+    /// Width carries the SAR scaling (`width * sar_num / sar_den`); height is
+    /// unchanged. SAR 1:1 (or unknown) leaves display == coded; anamorphic
+    /// content like PAL 720×576 with SAR 64:45 yields display 1024×576.
+    ///
+    /// This is the single source of truth for display aspect — window sizing
+    /// and the render's aspect-fit both use it, so their aspect ratios stay
+    /// bit-identical and never disagree by a rounding pixel.
+    pub(crate) fn display_size(&self) -> (u32, u32) {
+        (self.width * self.sar_num / self.sar_den, self.height)
+    }
+}
+
 /// Cached D3D11 video processor objects reused across frames when the
 /// input/output dimensions and backbuffer identity haven't changed.
 /// Avoids per-frame kernel-mode allocations that stress the GPU driver.
@@ -538,11 +552,7 @@ impl D3D11Device {
             };
 
             let rotation_quarter_turns = view.rotation_quarter_turns % 4;
-            // Compute display dimensions from coded dimensions × sample aspect ratio.
-            // SAR 1:1 (or unknown) leaves display = coded; anamorphic content like
-            // PAL 720×576 with SAR 64:45 yields display 1024×576.
-            let disp_w = surface.width * surface.sar_num;
-            let disp_h = surface.height * surface.sar_den;
+            let (disp_w, disp_h) = surface.display_size();
             let (display_width, display_height) = if rotation_quarter_turns % 2 == 1 {
                 (disp_h, disp_w)
             } else {
