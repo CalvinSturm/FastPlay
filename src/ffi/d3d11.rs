@@ -1231,6 +1231,88 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         }))
     }
 
+    /// Build the Recent-files overlay: a list of `rows` (filename, position)
+    /// with `selected` highlighted. Mirrors `create_help_overlay`.
+    pub(crate) fn create_recent_overlay(
+        &self,
+        rows: &[(String, String)],
+        selected: usize,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
+        let Some(bitmap) = render_recent_bitmap(rows, selected)? else {
+            return Ok(None);
+        };
+
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: bitmap.width,
+            Height: bitmap.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: bitmap.pixels.as_ptr().cast(),
+            SysMemPitch: bitmap.width.saturating_mul(4),
+            SysMemSlicePitch: 0,
+        };
+        let vertices =
+            idle_quad_vertices(bitmap.width, bitmap.height, viewport_width, viewport_height);
+        let vertex_buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+        let vertex_buffer_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: vertices.as_ptr().cast(),
+            SysMemPitch: 0,
+            SysMemSlicePitch: 0,
+        };
+        let mut texture = None;
+        let mut shader_resource_view = None;
+        let mut vertex_buffer = None;
+
+        unsafe {
+            self.device
+                .CreateTexture2D(&texture_desc, Some(&initial_data), Some(&mut texture))?;
+            self.device.CreateShaderResourceView(
+                texture
+                    .as_ref()
+                    .ok_or(D3D11Error("CreateTexture2D returned no recent texture"))?,
+                None,
+                Some(&mut shader_resource_view),
+            )?;
+            self.device.CreateBuffer(
+                &vertex_buffer_desc,
+                Some(&vertex_buffer_data),
+                Some(&mut vertex_buffer),
+            )?;
+        }
+
+        let texture = texture.ok_or(D3D11Error("CreateTexture2D returned no recent texture"))?;
+        Ok(Some(SubtitleOverlay {
+            texture,
+            shader_resource_view: shader_resource_view.ok_or(D3D11Error(
+                "CreateShaderResourceView returned no recent view",
+            ))?,
+            vertex_buffer: vertex_buffer
+                .ok_or(D3D11Error("CreateBuffer returned no recent vertex buffer"))?,
+            width: bitmap.width,
+            height: bitmap.height,
+        }))
+    }
+
     pub(crate) fn render_subtitle_overlay(
         &self,
         renderer: &SubtitleRenderer,
@@ -2124,6 +2206,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("\u{2190} / \u{2192}", "Seek 5 s  (hold: 15 s)"),
         ("Ctrl+F / B", "Step frame \u{00B1}1"),
         ("Ctrl+O", "Open media file"),
+        ("Tab", "Recent files"),
         ("Ctrl+S", "Save screenshot"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
@@ -2310,6 +2393,245 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             pixels,
         }))
     }
+}
+
+fn render_recent_bitmap(
+    rows: &[(String, String)],
+    selected: usize,
+) -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
+    const PAD_X: i32 = 22;
+    const PAD_Y: i32 = 16;
+    const HEADER_H: i32 = 24;
+    const SEP: i32 = 8;
+    const LINE_H: i32 = 22;
+    const FOOTER_H: i32 = 22;
+    const BW: u32 = 560;
+    const POS_W: i32 = 78; // right-hand position column width
+    const MAX_NAME_CHARS: usize = 56;
+
+    let row_count = rows.len().max(1) as i32; // at least one line ("No recent files")
+    let rows_top = PAD_Y + HEADER_H + SEP;
+    let bh = (rows_top + row_count * LINE_H + SEP + FOOTER_H + PAD_Y) as u32;
+
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            return Err(Box::new(D3D11Error("CreateCompatibleDC returned null")));
+        }
+
+        let font = CreateFontW(
+            -14,
+            0,
+            0,
+            0,
+            FW_MEDIUM.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+            windows::core::w!("Segoe UI"),
+        );
+        if font.0.is_null() {
+            debug_assert!(DeleteDC(dc).as_bool());
+            return Err(Box::new(D3D11Error(
+                "CreateFontW returned null for recent overlay",
+            )));
+        }
+
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: BW as i32,
+            biHeight: -(bh as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = null_mut();
+        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        if bitmap.0.is_null() || bits.is_null() {
+            debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
+            debug_assert!(DeleteDC(dc).as_bool());
+            return Err(Box::new(D3D11Error(
+                "CreateDIBSection failed for recent overlay",
+            )));
+        }
+
+        let old_bitmap = SelectObject(dc, HGDIOBJ(bitmap.0));
+        let old_font = SelectObject(dc, HGDIOBJ(font.0));
+        std::ptr::write_bytes(bits, 0, (BW * bh * 4) as usize);
+
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let _ = SetTextColor(dc, COLORREF(0x00E8E8E8));
+
+        // Header.
+        let mut header_wide: Vec<u16> = "Recent Files".encode_utf16().chain(Some(0)).collect();
+        let mut header_rect = RECT {
+            left: PAD_X,
+            top: PAD_Y,
+            right: BW as i32 - PAD_X,
+            bottom: PAD_Y + HEADER_H,
+        };
+        let _ = DrawTextW(
+            dc,
+            &mut header_wide,
+            &mut header_rect,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+
+        if rows.is_empty() {
+            let mut empty_wide: Vec<u16> =
+                "No recent files".encode_utf16().chain(Some(0)).collect();
+            let mut empty_rect = RECT {
+                left: PAD_X,
+                top: rows_top,
+                right: BW as i32 - PAD_X,
+                bottom: rows_top + LINE_H,
+            };
+            let _ = DrawTextW(
+                dc,
+                &mut empty_wide,
+                &mut empty_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+            );
+        } else {
+            for (i, (name, pos)) in rows.iter().enumerate() {
+                let y = rows_top + i as i32 * LINE_H;
+                let row_bottom = y + LINE_H;
+                let marker = if i == selected { "\u{203A} " } else { "  " };
+                let truncated = truncate_chars(name, MAX_NAME_CHARS);
+                let mut name_wide: Vec<u16> = format!("{marker}{truncated}")
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .collect();
+                let mut name_rect = RECT {
+                    left: PAD_X,
+                    top: y,
+                    right: BW as i32 - PAD_X - POS_W,
+                    bottom: row_bottom,
+                };
+                let _ = DrawTextW(
+                    dc,
+                    &mut name_wide,
+                    &mut name_rect,
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                );
+
+                let mut pos_wide: Vec<u16> = pos.encode_utf16().chain(Some(0)).collect();
+                let mut pos_rect = RECT {
+                    left: BW as i32 - PAD_X - POS_W,
+                    top: y,
+                    right: BW as i32 - PAD_X,
+                    bottom: row_bottom,
+                };
+                let _ = DrawTextW(
+                    dc,
+                    &mut pos_wide,
+                    &mut pos_rect,
+                    DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                );
+            }
+        }
+
+        // Footer hint.
+        let footer_y = rows_top + row_count * LINE_H + SEP;
+        let mut footer_wide: Vec<u16> =
+            "Enter Open   \u{2191}\u{2193} Select   Del Remove   Esc Close"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+        let mut footer_rect = RECT {
+            left: PAD_X,
+            top: footer_y,
+            right: BW as i32 - PAD_X,
+            bottom: footer_y + FOOTER_H,
+        };
+        let _ = DrawTextW(
+            dc,
+            &mut footer_wide,
+            &mut footer_rect,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+
+        let source: &[u8] = std::slice::from_raw_parts(bits.cast::<u8>(), (BW * bh * 4) as usize);
+        let mut pixels = vec![0u8; source.len()];
+        pixels.copy_from_slice(source);
+
+        for px in pixels.chunks_exact_mut(4) {
+            let intensity = px[0].max(px[1]).max(px[2]);
+            if intensity > 4 {
+                px[0] = 235;
+                px[1] = 235;
+                px[2] = 240;
+                px[3] = intensity.min(230);
+            } else {
+                px[0] = 22;
+                px[1] = 20;
+                px[2] = 18;
+                px[3] = 218;
+            }
+        }
+
+        // Highlight the selected row: brighten only its background pixels, so
+        // the (white) text on that row is left untouched.
+        if !rows.is_empty() && selected < rows.len() {
+            let y0 = (rows_top + selected as i32 * LINE_H) as u32;
+            let y1 = (y0 as i32 + LINE_H) as u32;
+            for y in y0..y1.min(bh) {
+                for x in 0..BW {
+                    let idx = ((y * BW + x) * 4) as usize;
+                    // Only recolor background pixels (dark), not text (bright).
+                    if pixels[idx] < 40 && pixels[idx + 1] < 40 {
+                        pixels[idx] = 46;
+                        pixels[idx + 1] = 52;
+                        pixels[idx + 2] = 70;
+                        pixels[idx + 3] = 230;
+                    }
+                }
+            }
+        }
+
+        let sep_y = (PAD_Y + HEADER_H + SEP / 2) as u32;
+        if sep_y < bh {
+            fill_rect(
+                &mut pixels,
+                BW,
+                bh,
+                PAD_X as u32,
+                sep_y,
+                BW - PAD_X as u32,
+                sep_y + 1,
+                [255, 255, 255, 60],
+            );
+        }
+
+        let _ = SelectObject(dc, old_bitmap);
+        let _ = SelectObject(dc, old_font);
+        debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
+        debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
+        debug_assert!(DeleteDC(dc).as_bool());
+
+        Ok(Some(SubtitleBitmap {
+            width: BW,
+            height: bh,
+            pixels,
+        }))
+    }
+}
+
+/// Truncate `name` to at most `max` characters, appending an ellipsis when cut.
+fn truncate_chars(name: &str, max: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max {
+        return name.to_string();
+    }
+    let kept: String = chars[..max.saturating_sub(1)].iter().collect();
+    format!("{kept}\u{2026}")
 }
 
 fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
