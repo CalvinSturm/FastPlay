@@ -1,6 +1,7 @@
 pub mod audio_controller;
 pub mod clip_range;
 pub mod commands;
+pub mod decode_thread;
 pub mod drop_stats;
 pub mod events;
 pub mod input_dispatch;
