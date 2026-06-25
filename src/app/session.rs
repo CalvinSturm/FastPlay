@@ -284,15 +284,8 @@ impl PlaybackSession {
         &mut self,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self
-            .overlay
-            .volume_overlay_until
-            .is_some_and(|until| now > until)
-        {
-            if self.presenter.set_volume_overlay(None, 0, 0)? {
-                self.present_needed = true;
-            }
-            self.overlay.volume_overlay_until = None;
+        if self.overlay.refresh_volume(now, &mut self.presenter)? {
+            self.present_needed = true;
         }
         Ok(())
     }
@@ -1973,20 +1966,7 @@ impl PlaybackSession {
     }
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.overlay.subtitle_track.is_none() {
-            flog!("subtitle toggle ignored: no external .srt sidecar was loaded");
-            return Ok(());
-        }
-
-        self.overlay.subtitles_enabled = !self.overlay.subtitles_enabled;
-        self.overlay.subtitle_clock_base = None;
-        self.overlay.active_subtitle_cue = None;
-        self.overlay.active_subtitle_viewport = None;
-        if !self.overlay.subtitles_enabled {
-            self.presenter.clear_subtitle_overlay();
-        }
-        flog!("subtitles_enabled={}", self.overlay.subtitles_enabled);
-        Ok(())
+        self.overlay.toggle_subtitles(&mut self.presenter)
     }
 
     fn zoom_at_cursor(&mut self, delta: i16, cursor_x: i32, cursor_y: i32) {
@@ -2048,92 +2028,26 @@ impl PlaybackSession {
     }
 
     fn update_window_title(&self) {
-        let base = self
+        let source_name = self
             .current_source
             .as_ref()
             .and_then(|s| s.path().file_name())
-            .and_then(|n| n.to_str())
-            .map(|n| format!("{n} - FastPlay"))
-            .unwrap_or_else(|| "FastPlay".to_owned());
-
-        let mut suffixes: Vec<String> = Vec::new();
-        if (self.playback_rate - 1.0).abs() >= 0.01 {
-            let rate_str = if self.playback_rate.fract() == 0.0 {
-                format!("{}x", self.playback_rate as u32)
-            } else {
-                format!("{:.2}", self.playback_rate)
-                    .trim_end_matches('0')
-                    .trim_end_matches('.')
-                    .to_owned()
-                    + "x"
-            };
-            suffixes.push(rate_str);
-        }
-        if self.overlay.show_decode_info {
-            if let Some(mode) = self.active_decode_mode {
-                suffixes.push(mode.label().to_owned());
-            }
-        }
-        let title = if suffixes.is_empty() {
-            base
-        } else {
-            format!("{base} [{}]", suffixes.join("  "))
-        };
-
+            .and_then(|n| n.to_str());
+        let decode_label = self.active_decode_mode.map(|mode| mode.label());
+        let title = self
+            .overlay
+            .window_title(source_name, self.playback_rate, decode_label);
         self.window.set_title(&title);
     }
 
     fn update_subtitle_overlay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         let subtitle_position = self.subtitle_position(now);
-        let Some(track) = self.overlay.subtitle_track.as_ref() else {
-            self.overlay.active_subtitle_cue = None;
-            self.overlay.active_subtitle_viewport = None;
-            self.presenter.clear_subtitle_overlay();
-            return Ok(());
-        };
-        if !self.overlay.subtitles_enabled {
-            self.overlay.active_subtitle_cue = None;
-            self.overlay.active_subtitle_viewport = None;
-            self.presenter.clear_subtitle_overlay();
-            return Ok(());
-        }
-
-        let viewport = self.presenter.viewport_size()?;
-        if viewport.0 == 0 || viewport.1 == 0 {
-            return Ok(());
-        }
-
-        let cue = track.cue_at(subtitle_position, self.overlay.active_subtitle_cue);
-        let next_index = cue.map(|(index, _)| index);
-        if self.overlay.active_subtitle_cue == next_index
-            && self.overlay.active_subtitle_viewport == Some(viewport)
+        if self
+            .overlay
+            .update_subtitle(subtitle_position, &mut self.presenter)?
         {
-            return Ok(());
+            self.present_needed = true;
         }
-
-        self.present_needed = true;
-        match cue {
-            Some((index, cue)) => {
-                self.presenter
-                    .set_subtitle_overlay(Some(&cue.text), viewport.0, viewport.1)?;
-                self.overlay.active_subtitle_cue = Some(index);
-                self.overlay.active_subtitle_viewport = Some(viewport);
-                flog!(
-                    "subtitle_cue index={} start_ms={} end_ms={}",
-                    index,
-                    cue.start.as_millis(),
-                    cue.end.as_millis()
-                );
-            }
-            None => {
-                if self.overlay.active_subtitle_cue.take().is_some() {
-                    flog!("subtitle_cue cleared");
-                }
-                self.overlay.active_subtitle_viewport = Some(viewport);
-                self.presenter.clear_subtitle_overlay();
-            }
-        }
-
         Ok(())
     }
 
