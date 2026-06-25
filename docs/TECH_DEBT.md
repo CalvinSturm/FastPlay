@@ -1,6 +1,6 @@
 # Technical Debt
 
-Status: 2026-06-25 · FastPlay v0.2.2
+Status: 2026-06-25 · FastPlay v0.3.0
 
 This document tracks **maintainability** debt only. It does not propose
 architecture changes. `ARCHITECTURE.md` remains the locked charter; everything

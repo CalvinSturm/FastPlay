@@ -938,7 +938,7 @@ If not, it waits.
 
 **Architecture locked. Milestones M0–M6 complete.**
 
-Current release: v0.2.2
+Current release: v0.3.0
 
 Implemented:
 * single-crate Rust implementation matching all module stubs
