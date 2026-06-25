@@ -1,0 +1,72 @@
+name: Feature request
+description: Propose a focused improvement aligned with FastPlay's latency and robustness goals.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        FastPlay intentionally has a narrow scope. Requests should clearly improve first-frame latency, seek responsiveness, present stability, pause/resume immediacy, or playback robustness.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for this request.
+          required: true
+        - label: I reviewed the goals, non-goals, and architecture constraints in `ARCHITECTURE.md`.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user-visible problem, not only the proposed implementation.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Primary project goal
+      options:
+        - Open-to-first-frame latency
+        - Seek responsiveness
+        - Present-path stability
+        - Pause/resume immediacy
+        - Resize, reopen, or device robustness
+        - Other explicitly requested scope
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain what should happen from the user's perspective.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and expected impact
+      description: Include measurements, examples, affected workflows, or why this materially improves the selected goal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: architecture
+    attributes:
+      label: Architecture and scope considerations
+      description: Identify affected modules or invariants and any conflict with `ARCHITECTURE.md`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe workarounds or narrower solutions.

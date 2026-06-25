@@ -1,0 +1,100 @@
+name: Bug report
+description: Report incorrect playback, UI behavior, crashes, or robustness issues.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a FastPlay bug. For security vulnerabilities, use private vulnerability reporting instead of this form.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I reproduced the problem with the latest release or current `main`.
+          required: true
+        - label: This report does not contain a security vulnerability.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: FastPlay version
+      description: Release version or commit SHA.
+      placeholder: v0.2.2 or 28229df
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2, build 26100
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: NVIDIA RTX 4070, driver 576.80
+    validations:
+      required: true
+
+  - type: dropdown
+    id: decode_mode
+    attributes:
+      label: Decode mode
+      options:
+        - Hardware (D3D11)
+        - Software fallback (--force-sw)
+        - Both
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Media details
+      description: Include container, codecs, resolution, frame rate, duration, and subtitle details. Do not upload copyrighted media without permission.
+      placeholder: MP4; H.264 video; AAC audio; 3840x2160 at 60 fps; no subtitles
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open ...
+        2. Seek to ...
+        3. Resize ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error text, logs, screenshots, or a recording when useful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: frequency
+    attributes:
+      label: Reproduction frequency and additional context
+      description: State whether it happens consistently, after reopen/seek/resize, or only under specific conditions.
