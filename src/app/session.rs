@@ -8,7 +8,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc,
     },
-    thread::{self, JoinHandle, ThreadId},
+    thread::{self, ThreadId},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,6 +17,7 @@ use crate::{
         audio_controller::AudioController,
         clip_range::ClipRangeState,
         commands::SessionCommand,
+        decode_thread::DecodeThreadHandle,
         drop_stats::{VideoDropBuckets, VideoDropCause},
         events::SessionEvent,
         overlay::OverlayManager,
@@ -54,11 +55,6 @@ const VERY_LATE_VIDEO_THRESHOLD: Duration = Duration::from_millis(400);
 const MAX_OBSERVED_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_FRAME_STEP: Duration = Duration::from_nanos(33_333_333);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
-/// Upper bound on how long a blocking teardown waits for the decode worker to
-/// release its resources after cancellation. The FFmpeg interrupt callback
-/// aborts in-flight I/O on shutdown, so a healthy worker exits in milliseconds;
-/// this only caps the pathological case so the UI thread can never hang.
-const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
 
 struct QueuedAudioFrame {
@@ -82,23 +78,9 @@ pub struct PlaybackSession {
     active_operation_id: Option<OperationId>,
     current_source: Option<Arc<MediaSource>>,
     decode_preference: VideoDecodePreference,
-    /// Command channel to the current persistent decode thread (if any). A
-    /// same-preference position seek is delivered to it as a command (seek
-    /// within the open file) instead of spawning a fresh worker that reopens
-    /// the file. `None` when no decode thread is running.
-    decode_control: Option<Arc<DecodeControl>>,
-    /// Decode preference the running thread was spawned with. A seek that keeps
-    /// this preference reuses the thread; a change (HW↔SW) respawns it.
-    decode_thread_preference: Option<VideoDecodePreference>,
-    active_worker_count: Arc<AtomicU32>,
-    /// Join handle for the current persistent decode thread. Kept so a
-    /// blocking teardown (`wait = true`) can *join* the worker — guaranteeing
-    /// its entire D3D11 teardown (decoder resources plus the captured device
-    /// clone it releases on exit) has completed before the caller destroys or
-    /// touches the shared device. Waiting on `active_worker_count` alone is
-    /// insufficient: the count is decremented before the device clone is
-    /// released, leaving a window where the worker is still inside d3d11.dll.
-    decode_join: Option<JoinHandle<()>>,
+    /// Persistent decode worker lifecycle (control channel, preference,
+    /// live-worker count, join handle). See [`DecodeThreadHandle`].
+    decode_thread: DecodeThreadHandle,
     /// Worker→UI channel for video frames and all control/error events.
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
@@ -174,10 +156,7 @@ impl PlaybackSession {
             active_operation_id: None,
             current_source: None,
             decode_preference: VideoDecodePreference::Auto,
-            decode_control: None,
-            decode_thread_preference: None,
-            active_worker_count: Arc::new(AtomicU32::new(0)),
-            decode_join: None,
+            decode_thread: DecodeThreadHandle::new(),
             event_tx,
             event_rx,
             audio_event_tx,
@@ -586,7 +565,7 @@ impl PlaybackSession {
     /// Must run while the window HWND is still alive. Prevents the intermittent
     /// use-after-free inside d3d11.dll when the device is destroyed at exit.
     pub fn shutdown(&mut self) {
-        self.teardown_decode_thread(true);
+        self.decode_thread.teardown(true);
         self.clear_video_queue();
         self.queued_audio_frames.clear();
         if let Some(sink) = self.audio_sink.as_mut() {
@@ -959,7 +938,7 @@ impl PlaybackSession {
                     "[DEVICE_LOST] seek={} op={:?} workers={}",
                     seek_gen.0,
                     op_id,
-                    self.active_worker_count.load(Ordering::Acquire)
+                    self.decode_thread.worker_count()
                 );
                 self.recover_device(now, "worker reported device-lost".to_string())?;
             }
@@ -1017,7 +996,7 @@ impl PlaybackSession {
         self.metrics.note_seek_requested(now);
         self.metrics.disable_open_audio_metric();
         let absolute_target = self.absolute_media_position(target.position());
-        let workers_before = self.active_worker_count.load(Ordering::Acquire);
+        let workers_before = self.decode_thread.worker_count();
         flog!(
             "[execute_seek] pos={:.3}s abs={:.3}s open={} seek={} op={:?} workers={} surfaces={} vq={} aq={} device_removed={}",
             target.position().as_secs_f64(),
@@ -1038,18 +1017,17 @@ impl PlaybackSession {
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        if self.decode_thread_serves_current() {
+        if self.decode_thread.serves(self.decode_preference) {
             // Reuse the open file: tell the running thread to seek in place.
             // Bumping seek_gen above already gates out its old in-flight frames.
-            // `decode_thread_serves_current` implies a live control; if it is
-            // somehow absent, skip rather than panic — the next operation will
-            // respawn a worker.
-            if let Some(control) = self.decode_control.as_ref() {
+            // `serves` implies a live control; if it is somehow absent, skip
+            // rather than panic — the next operation will respawn a worker.
+            if let Some(control) = self.decode_thread.control() {
                 control.send_seek(absolute_target, seek_gen, op_id);
             }
         } else {
             // No thread, or the decode preference changed (HW↔SW): reopen.
-            self.teardown_decode_thread(false);
+            self.decode_thread.teardown(false);
             self.spawn_decode_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
         }
         self.pending_seek_target = Some(target);
@@ -1075,7 +1053,7 @@ impl PlaybackSession {
         // Async (wait=false) is fine — the old thread shares the same device and
         // exits promptly on the shutdown signal; recover_device waits explicitly
         // before rebuilding the device.
-        self.teardown_decode_thread(false);
+        self.decode_thread.teardown(false);
         self.prepare_runtime_for_operation(rebuild_audio_sink, reset_audio_expectation)?;
         self.state = next_state;
         self.active_operation_id = Some(op_id);
@@ -1175,17 +1153,16 @@ impl PlaybackSession {
             .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
         let decode_preference = self.decode_preference;
         let control = Arc::new(DecodeControl::new());
-        self.decode_control = Some(control.clone());
-        self.decode_thread_preference = Some(decode_preference);
-        let worker_count = self.active_worker_count.clone();
-        worker_count.fetch_add(1, Ordering::Release);
+        let worker_count = self
+            .decode_thread
+            .prepare_spawn(control.clone(), decode_preference);
 
         flog!(
             "[spawn_decode_thread] open={} seek={} op={:?} workers_now={}",
             open_gen.0,
             seek_gen.0,
             op_id,
-            worker_count.load(Ordering::Acquire)
+            self.decode_thread.worker_count()
         );
 
         let handle = thread::spawn(move || {
@@ -1448,63 +1425,7 @@ impl PlaybackSession {
                 }
             }
         });
-        // Track the new worker so a blocking teardown can join it. Every spawn
-        // is preceded by `teardown_decode_thread(false)`, which has already
-        // signalled the previous worker to shut down; replacing the handle here
-        // detaches that already-exiting thread (it finishes on its own).
-        self.decode_join = Some(handle);
-    }
-
-    /// Whether a persistent decode thread is running that can serve a seek of
-    /// the current decode preference as an in-place command (rather than a
-    /// reopen). False after a preference change (HW↔SW) until respawned.
-    fn decode_thread_serves_current(&self) -> bool {
-        self.decode_control.is_some()
-            && self.decode_thread_preference == Some(self.decode_preference)
-    }
-
-    /// Signal the persistent decode thread to stop. When `wait` is set, block
-    /// briefly until it has exited (releasing its device clone and codecs)
-    /// before the caller rebuilds the device or drops the session.
-    fn teardown_decode_thread(&mut self, wait: bool) {
-        if let Some(control) = self.decode_control.take() {
-            control.send_shutdown();
-        }
-        self.decode_thread_preference = None;
-        if wait {
-            let handle = self.decode_join.take();
-            // Wait — bounded — for every live worker (the current one plus any
-            // detached straggler from a rapid reopen) to release its resources.
-            // `active_worker_count` only reaches zero once each worker's
-            // `WorkerGuard` drops, which runs after its D3D11 codec/session
-            // teardown. The interrupt callback aborts any in-flight FFmpeg I/O
-            // on `is_shutdown`, and every other worker wait point checks the
-            // same flag, so a healthy worker reaches zero within milliseconds.
-            let deadline = Instant::now() + WORKER_JOIN_TIMEOUT;
-            while self.active_worker_count.load(Ordering::Acquire) > 0 && Instant::now() < deadline
-            {
-                thread::sleep(Duration::from_millis(1));
-            }
-
-            if let Some(handle) = handle {
-                if self.active_worker_count.load(Ordering::Acquire) == 0 {
-                    // The worker has released its device clone; join is now
-                    // effectively instant and guarantees the thread (and the
-                    // captured device clone it drops last) is fully gone before
-                    // the caller rebuilds or destroys the shared device.
-                    let _ = handle.join();
-                } else {
-                    // A worker did not exit within the timeout (e.g. wedged
-                    // beyond the interrupt callback's reach). Detach it rather
-                    // than freezing the UI thread on an unbounded join; log so
-                    // the stall is diagnosable.
-                    flog!(
-                        "[teardown] decode worker still alive {}ms after cancel; detaching to avoid UI hang",
-                        WORKER_JOIN_TIMEOUT.as_millis()
-                    );
-                }
-            }
-        }
+        self.decode_thread.set_join(handle);
     }
 
     fn handle_resize(
@@ -2125,7 +2046,7 @@ impl PlaybackSession {
         // The decode thread holds a clone of the device being destroyed — wait
         // for it to exit before rebuilding so its codec/device teardown cannot
         // race the new device.
-        self.teardown_decode_thread(true);
+        self.decode_thread.teardown(true);
         if let Err(error) = self.presenter.rebuild_device(&self.window) {
             flog!("device recovery failed: {error}");
             self.fail_playback(format!("device recovery failed: {error}"));
@@ -2199,7 +2120,7 @@ impl PlaybackSession {
     }
 
     fn fail_open(&mut self, error: String) {
-        self.teardown_decode_thread(false);
+        self.decode_thread.teardown(false);
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
@@ -2209,7 +2130,7 @@ impl PlaybackSession {
     }
 
     fn fail_playback(&mut self, error: String) {
-        self.teardown_decode_thread(false);
+        self.decode_thread.teardown(false);
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
