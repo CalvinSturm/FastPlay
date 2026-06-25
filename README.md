@@ -1,6 +1,6 @@
 # <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
 
-FastPlay is a Windows video player built for the parts of playback people actually notice: opening a file, reaching the first frame quickly, scrubbing without friction, adjusting the picture easily, and getting out of the way while you watch.
+FastPlay is a Windows video player built for the parts of playback people actually notice: opening a file, reaching the first frame quickly, resuming where you left off, scrubbing without friction, adjusting the picture easily, and getting out of the way while you watch.
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
@@ -63,6 +63,7 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 
 ### Playback
 - `Ctrl+O` file open dialog and drag-and-drop file open
+- recent-files overlay with automatic per-file resume playback
 - quick open and first-frame path
 - responsive keyboard seek with accelerated hold behavior
 - timeline scrubbing overlay with playback position

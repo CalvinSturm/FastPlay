@@ -1,6 +1,6 @@
 # Roadmap
 
-Status: 2026-06-25 · FastPlay v0.2.2
+Status: 2026-06-25 · FastPlay v0.3.0
 
 Practical, prioritized plan for maintaining FastPlay before new features land.
 This complements (does not replace) `ARCHITECTURE.md`, which stays the locked
@@ -15,42 +15,26 @@ Each item below is intended to be its own small, reviewable PR.
 
 ---
 
-## 1. Refactor: split `PlaybackSession` responsibilities (do first)
+## 1. Refactor: split `PlaybackSession` responsibilities — **implemented**
 
-Goal: reduce `session.rs` (~2.6k lines) from one flat struct into the coordinator
-plus a handful of focused, individually testable helper units, while keeping the
-public coordinator surface and `tick(now)` contract identical.
+The v0.3.0 refactor reduced `session.rs` from one flat coordinator into
+`PlaybackSession` plus focused, individually testable helpers while preserving
+the public coordinator surface and `tick(now)` contract.
 
-Approach: extract one cluster per PR. Prefer **concrete sub-structs that the
-session owns** (e.g. `session.view`, `session.clip_range`) or **free functions
-that take plain inputs and return plain outputs**. The session continues to own
-the orchestration order in `tick(now)` (`ARCHITECTURE.md §13`).
+Completed extractions:
 
-Suggested order (lowest risk / highest clarity first):
+- `viewport.rs` — zoom, pan, rotation, and display geometry
+- `clip_range.rs` — in/out points, looping, and restart decisions
+- `overlay.rs` — timeline, volume, subtitle, help, and error overlays
+- `audio_controller.rs` — audio batching, anchors, and submission state
+- `video_queue.rs` — frame queueing and drop bookkeeping
+- `input_dispatch.rs` — input-event to command routing
+- `decode_thread.rs` — decode-thread handle lifecycle
 
-1. **Viewport / zoom / pan / rotation controller** — `view_zoom`, `view_pan_*`,
-   `*_rotation_quarter_turns` plus `zoom_at_cursor`, `clamp_pan`, `rotate_view`,
-   `reset_view`, `fit_window`, `half_size_window`. Nearly pure geometry; easiest
-   to extract and unit-test.
-2. **Clip range controller** — `in_point`, `out_point`, `loop_range`,
-   `position_is_in_active_range`, `range_resume_target`, `desired_restart_position`.
-   Already has resume-target tests to pin behavior.
-3. **Overlay controller** — timeline/volume/subtitle/error overlays and title.
-4. **Audio controller** — due-audio submission, anchors, volume, endpoint
-   recovery (keeps WASAPI ownership in `audio::sink` / `ffi::wasapi`).
-5. **Video scheduler / frame selection** — `advance_video_playback`,
-   `present_video_frame`, drop/clear/push, `step_frame`, `is_current_frame`.
-6. **Seek / scrub controller** — seek issue, settle tracking, pending-pause.
-7. **Lifecycle / open-close handling** — open, fail-open, runtime prep, decode
-   thread spawn/teardown. Extract last; highest coupling to FFI and generations.
-8. **Input dispatch** — `apply_command` / `handle_event` routing to the above.
-
-Each PR: extract, keep behavior identical, run `fmt`/`clippy`/`test`, and add
-unit tests for the newly isolated logic (this is the R2 payoff in
-`TECH_DEBT.md`).
-
-Done when: `session.rs` is materially smaller, each helper compiles and tests in
-isolation, and the charter invariants are unchanged.
+Seek, open/close, state transitions, stale-work rejection, and presentation
+scheduling remain in `PlaybackSession` because they are coordinator
+responsibilities under the locked architecture. Further extraction should be
+evidence-driven rather than pursued solely to reduce line count.
 
 ---
 
@@ -89,14 +73,16 @@ Notes:
 
 ---
 
-## 3. Product basics (after refactor + harness)
+## 3. Product basics
 
 Small, charter-aligned quality-of-life features. Each must still pass the
 implementation filter in `ARCHITECTURE.md §30` and not introduce a media
 library or sprawl.
 
-- **Recent files** — most-recently-opened list (no library, no indexing).
-- **Resume playback position** — remember last position per file; resume on open.
+- ✅ **Recent files** — implemented in v0.3.0 as a capped,
+  most-recently-opened overlay with no indexing or library behavior.
+- ✅ **Resume playback position** — implemented in v0.3.0 for CLI, file-dialog,
+  drag/drop, and recent-file opens, with near-end resume suppression.
 - **Open next / previous file in folder** — sibling-file navigation only.
 - **Optional file associations** — already partially present via MSI; make it an
   explicit, optional toggle.
@@ -140,9 +126,9 @@ this roadmap:
 ## Sequencing at a glance
 
 1. ✅ rustfmt-clean + CI fmt enforcement + docs.
-2. **In progress:** `PlaybackSession` helper extractions (§1) — viewport,
-   clip-range, overlay, audio, video-queue, and input-dispatch done; lifecycle /
-   open-close remains.
+2. ✅ `PlaybackSession` helper extractions (§1).
 3. ✅ benchmark harness (§2) — `bench/`.
-4. **After:** finish §1 (lifecycle), then product basics (§3).
-5. **Later:** creator review mode (§4).
+4. ✅ first product basics: recent files and resume playback (§3).
+5. **Next:** choose among the remaining product basics based on measured user
+   value and architecture fit.
+6. **Later:** creator review mode (§4).
