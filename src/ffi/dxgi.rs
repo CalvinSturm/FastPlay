@@ -99,8 +99,8 @@ fn clamp_client_size_to_min(width: u32, height: u32) -> (u32, u32) {
     if width == 0 || height == 0 || (width >= MIN_CLIENT_WIDTH && height >= MIN_CLIENT_HEIGHT) {
         return (width, height);
     }
-    let scale = (MIN_CLIENT_WIDTH as f64 / width as f64)
-        .max(MIN_CLIENT_HEIGHT as f64 / height as f64);
+    let scale =
+        (MIN_CLIENT_WIDTH as f64 / width as f64).max(MIN_CLIENT_HEIGHT as f64 / height as f64);
     (
         (width as f64 * scale).round() as u32,
         (height as f64 * scale).round() as u32,
