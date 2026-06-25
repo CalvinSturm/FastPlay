@@ -111,16 +111,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         session.window().take_input_events(&mut input_events);
         for input in input_events.drain(..) {
+            // Context-free events translate directly to a command. The remaining
+            // events need event-loop context (current position, scrub UI, window
+            // state, file I/O) and are handled below.
+            if let Some(command) = app::input_dispatch::command_for(&input) {
+                session.apply_command(command, now)?;
+                continue;
+            }
             match input {
-                InputEvent::TogglePause => {
-                    session.apply_command(SessionCommand::TogglePause, now)?;
-                }
-                InputEvent::ToggleSubtitles => {
-                    session.apply_command(SessionCommand::ToggleSubtitles, now)?;
-                }
-                InputEvent::SaveScreenshot => {
-                    session.apply_command(SessionCommand::SaveScreenshot, now)?;
-                }
                 InputEvent::SeekRelativeSeconds(offset_seconds) => {
                     let snapshot = session.snapshot(now);
                     let next_position = if offset_seconds >= 0 {
@@ -149,59 +147,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     timeline_ui.seek_overlay_until =
                         Some(now + app::timeline_ui::SEEK_OVERLAY_DURATION);
                 }
-                InputEvent::AdjustVolumeSteps(steps) => {
-                    session.apply_command(SessionCommand::AdjustVolumeSteps(steps), now)?;
-                }
-                InputEvent::RotateClockwise => {
-                    session.apply_command(SessionCommand::RotateClockwise, now)?;
-                }
-                InputEvent::RotateCounterClockwise => {
-                    session.apply_command(SessionCommand::RotateCounterClockwise, now)?;
-                }
-                InputEvent::ToggleBorderlessFullscreen => {
-                    session.apply_command(SessionCommand::ToggleBorderlessFullscreen, now)?;
-                }
-                InputEvent::ZoomAtCursor {
-                    delta,
-                    cursor_x,
-                    cursor_y,
-                } => {
-                    session.apply_command(
-                        SessionCommand::ZoomAtCursor {
-                            delta,
-                            cursor_x,
-                            cursor_y,
-                        },
-                        now,
-                    )?;
-                }
-                InputEvent::ResetView => {
-                    session.apply_command(SessionCommand::ResetView, now)?;
-                }
-                InputEvent::SetInPoint => {
-                    session.apply_command(SessionCommand::SetInPoint, now)?;
-                }
-                InputEvent::ClearInPoint => {
-                    session.apply_command(SessionCommand::ClearInPoint, now)?;
-                }
-                InputEvent::SetOutPoint => {
-                    session.apply_command(SessionCommand::SetOutPoint, now)?;
-                }
-                InputEvent::ClearOutPoint => {
-                    session.apply_command(SessionCommand::ClearOutPoint, now)?;
-                }
-                InputEvent::ToggleLoopRange => {
-                    session.apply_command(SessionCommand::ToggleLoopRange, now)?;
-                }
-                InputEvent::FitWindow => {
-                    session.apply_command(SessionCommand::FitWindow, now)?;
-                }
-                InputEvent::HalfSizeWindow => {
-                    session.apply_command(SessionCommand::HalfSizeWindow, now)?;
-                }
-                InputEvent::ToggleDecodeInfo => {
-                    session.apply_command(SessionCommand::ToggleDecodeInfo, now)?;
-                }
                 InputEvent::EscapeKey => {
                     if session.window().is_borderless() {
                         session.apply_command(SessionCommand::ToggleBorderlessFullscreen, now)?;
@@ -211,27 +156,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if timeline_ui.is_scrubbing() {
                         timeline_ui.cancel_scrub(&mut session, now)?;
                     }
-                }
-                InputEvent::StepPlaybackRate(step) => {
-                    session.apply_command(SessionCommand::StepPlaybackRate(step), now)?;
-                }
-                InputEvent::ResetPlaybackRate => {
-                    session.apply_command(SessionCommand::ResetPlaybackRate, now)?;
-                }
-                InputEvent::PanDelta { dx, dy } => {
-                    session.apply_command(
-                        SessionCommand::PanBy {
-                            dx: dx as f32,
-                            dy: dy as f32,
-                        },
-                        now,
-                    )?;
-                }
-                InputEvent::ShowHelp => {
-                    session.apply_command(SessionCommand::ShowHelp, now)?;
-                }
-                InputEvent::HideHelp => {
-                    session.apply_command(SessionCommand::HideHelp, now)?;
                 }
                 InputEvent::FileDropped(path) => {
                     let source = MediaSource::new(path);
@@ -248,6 +172,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         session.window().set_title(&title);
                     }
                 }
+                // All other events are context-free and handled by
+                // `command_for` above.
+                _ => {}
             }
         }
         timeline_ui.update(&mut session, now)?;
