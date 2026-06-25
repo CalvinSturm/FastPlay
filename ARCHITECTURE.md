@@ -120,36 +120,47 @@ fastplay/
   ARCHITECTURE.md
   src/
     main.rs
+    logging.rs
 
     app/
       mod.rs
-      session.rs
-      state.rs
-      events.rs
+      audio_controller.rs
+      clip_range.rs
       commands.rs
+      decode_thread.rs
+      drop_stats.rs
+      events.rs
+      input_dispatch.rs
       overlay.rs
+      recent.rs
+      session.rs
+      settings.rs
+      state.rs
       timeline_ui.rs
+      video_queue.rs
+      viewport.rs
 
     playback/
       mod.rs
       clock.rs
+      decode_control.rs
+      generations.rs
       metrics.rs
       queues.rs
-      generations.rs
 
     media/
       mod.rs
-      source.rs
-      video.rs
       audio.rs
       seek.rs
+      source.rs
       subtitle.rs
+      video.rs
 
     render/
       mod.rs
       presenter.rs
-      swapchain.rs
       surface_registry.rs
+      swapchain.rs
       timeline.rs
 
     audio/
@@ -158,16 +169,18 @@ fastplay/
 
     platform/
       mod.rs
-      window.rs
       input.rs
+      open_dialog.rs
+      window.rs
 
     ffi/
       mod.rs
+      d3d11.rs
+      dxgi.rs
       ffmpeg.rs
       ffmpeg_shim.c
       ffmpeg_shim.h
-      d3d11.rs
-      dxgi.rs
+      runtime.rs
       wasapi.rs
 ```
 
@@ -941,16 +954,21 @@ If not, it waits.
 Current release: v0.3.0
 
 Implemented:
-* single-crate Rust implementation matching all module stubs
+* single-crate Rust implementation with the module boundaries shown in §5
 * concrete `PlaybackSession` and `tick(now)` loop
+* focused coordinator-owned helpers for viewport, clip range, overlays, audio,
+  video queueing, input dispatch, and decode-thread lifecycle
 * D3D11 hw decode + DXGI flip-model present
 * WASAPI shared-mode audio with audio-master clock
 * seek generations, stale-drop enforcement, reopen handling
+* latest-command-wins seek coalescing with in-flight decode cancellation
 * software fallback path (D3D11 upload + video-processor present)
 * external `.srt` subtitle overlay
 * borderless fullscreen, zoom/pan, rotation, resize/device recovery
 * timeline scrub overlay with cancel
+* recent-files overlay and per-file resume playback position
 * file associations and MSI installer
+* local p50/p95 benchmark harness with JSON/CSV output
 * playback speed control
 * in/out point markers
 * help overlay (H key)
@@ -958,7 +976,6 @@ Implemented:
 * auto-rotation from stream display matrix metadata (CCW→CW corrected)
 * decode info toggle
 * 1 ms Windows timer resolution for smooth playback
-* seek worker throttling to prevent GPU resource exhaustion during scrubbing
 * audio underrun recovery (clock re-anchor)
 * error state idle overlay for recovery
 * Start Menu shortcut and custom install directory in MSI
