@@ -14,6 +14,7 @@ use std::{
 
 use crate::{
     app::{
+        audio_controller::AudioController,
         clip_range::ClipRangeState,
         commands::SessionCommand,
         drop_stats::{VideoDropBuckets, VideoDropCause},
@@ -109,8 +110,7 @@ pub struct PlaybackSession {
     video_clock: Option<PlaybackClock>,
     media_time_origin_pts: Option<Duration>,
     paused_clock_position: Option<Duration>,
-    audio_clock_anchor_pts: Option<Duration>,
-    audio_submitted_frames: u64,
+    audio: AudioController,
     media_duration: Option<Duration>,
     pending_seek_target: Option<SeekTarget>,
     seek_discard_before_pts: Option<Duration>,
@@ -136,7 +136,6 @@ pub struct PlaybackSession {
     pause_after_seek: bool,
     playback_rate: f64,
     clip_range: ClipRangeState,
-    saved_volume: f32,
     idle_pace_requested: bool,
     /// Audio sink buffered-frame count cached for the duration of one `tick`.
     /// `GetCurrentPadding` is a driver/COM call and the master clock is
@@ -187,8 +186,7 @@ impl PlaybackSession {
             video_clock: None,
             media_time_origin_pts: None,
             paused_clock_position: None,
-            audio_clock_anchor_pts: None,
-            audio_submitted_frames: 0,
+            audio: AudioController::new(saved_volume),
             media_duration: None,
             pending_seek_target: None,
             seek_discard_before_pts: None,
@@ -214,7 +212,6 @@ impl PlaybackSession {
             pause_after_seek: false,
             playback_rate: 1.0,
             clip_range: ClipRangeState::new(),
-            saved_volume,
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
         })
@@ -433,8 +430,7 @@ impl PlaybackSession {
                 if (self.playback_rate - 1.0).abs() >= 0.01 {
                     self.playback_rate = 1.0;
                     self.video_clock = None;
-                    self.audio_clock_anchor_pts = None;
-                    self.audio_submitted_frames = 0;
+                    self.audio.reset_clock();
                     self.queued_audio_frames.clear();
                     self.update_window_title();
                 }
@@ -463,10 +459,7 @@ impl PlaybackSession {
         let Some(sink) = self.audio_sink.as_mut() else {
             return;
         };
-        sink.adjust_volume_steps(steps);
-        self.saved_volume = sink.volume();
-        super::settings::save_volume(self.saved_volume);
-        let volume_percent = sink.volume_percent();
+        let volume_percent = self.audio.adjust_volume(steps, sink);
         if let Ok((viewport_width, viewport_height)) = self.presenter.viewport_size() {
             if self
                 .presenter
@@ -1123,8 +1116,7 @@ impl PlaybackSession {
             self.seek_discard_before_pts = None;
         }
         self.paused_clock_position = None;
-        self.audio_clock_anchor_pts = None;
-        self.audio_submitted_frames = 0;
+        self.audio.reset_clock();
         self.drop_buckets = VideoDropBuckets::default();
         self.metrics.reset_for_operation();
         self.video_stream_ended = false;
@@ -1141,7 +1133,7 @@ impl PlaybackSession {
         if rebuild_audio_sink {
             self.audio_sink = match AudioSink::create_shared_default() {
                 Ok(mut sink) => {
-                    sink.set_volume(self.saved_volume);
+                    sink.set_volume(self.audio.saved_volume());
                     self.audio_sink_error = None;
                     Some(sink)
                 }
@@ -1584,8 +1576,7 @@ impl PlaybackSession {
                 }
 
                 wrote_any_audio = true;
-                self.audio_submitted_frames =
-                    self.audio_submitted_frames.saturating_add(written as u64);
+                self.audio.record_submitted(written as u64);
                 front.submitted_frames = front.submitted_frames.saturating_add(written);
                 if front.submitted_frames >= front.frame.frame_count() {
                     self.queued_audio_frames.pop_front();
@@ -1598,8 +1589,8 @@ impl PlaybackSession {
                 }
             }
 
-            if wrote_any_audio && self.audio_clock_anchor_pts.is_none() && sink.is_started() {
-                self.audio_clock_anchor_pts = first_written_pts;
+            if wrote_any_audio && !self.audio.is_clock_anchored() && sink.is_started() {
+                self.audio.set_clock_anchor(first_written_pts);
                 self.video_clock = None;
                 if self.metrics.measure_open_audio() {
                     self.metrics.pending_first_audio = true;
@@ -1635,8 +1626,7 @@ impl PlaybackSession {
             // next successful submission clears video_clock and re-establishes
             // the audio clock (see the anchor handoff above).
             let resume_pts = self.master_clock_position(now).unwrap_or(Duration::ZERO);
-            self.audio_clock_anchor_pts = None;
-            self.audio_submitted_frames = 0;
+            self.audio.reset_clock();
             if self.video_clock.is_none() {
                 self.video_clock = Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
             }
@@ -1659,7 +1649,7 @@ impl PlaybackSession {
         }
 
         if self.audio_stream_expected
-            && self.audio_clock_anchor_pts.is_some()
+            && self.audio.is_clock_anchored()
             && self.state == PlaybackState::Priming
         {
             self.state = PlaybackState::Playing;
@@ -1675,7 +1665,7 @@ impl PlaybackSession {
 
         // Compute the master clock once — it is constant within this call since `now`
         // is fixed and audio state does not change mid-function.
-        let audio_clock = if self.audio_clock_anchor_pts.is_some() {
+        let audio_clock = if self.audio.is_clock_anchored() {
             let Some(clock) = self.master_clock_position(now) else {
                 return Ok(false);
             };
@@ -1776,7 +1766,7 @@ impl PlaybackSession {
     }
 
     fn present_video_frame(&mut self, frame: DecodedVideoFrame, now: Instant) {
-        if self.video_clock.is_none() && self.audio_clock_anchor_pts.is_none() {
+        if self.video_clock.is_none() && !self.audio.is_clock_anchored() {
             self.video_clock = Some(PlaybackClock::new(
                 now,
                 self.media_time_for_pts(frame.pts()),
@@ -1821,7 +1811,7 @@ impl PlaybackSession {
             self.pause_after_seek = false;
             self.paused_clock_position = self.pending_seek_target.map(|t| t.position());
             self.state = PlaybackState::Paused;
-        } else if !self.audio_stream_expected || self.audio_clock_anchor_pts.is_some() {
+        } else if !self.audio_stream_expected || self.audio.is_clock_anchored() {
             self.state = PlaybackState::Playing;
         }
     }
@@ -1908,7 +1898,7 @@ impl PlaybackSession {
                     return Ok(());
                 }
                 self.metrics.note_resume_requested(now);
-                if self.audio_clock_anchor_pts.is_none() {
+                if !self.audio.is_clock_anchored() {
                     let resume_pts = self.paused_clock_position.unwrap_or(Duration::ZERO);
                     self.video_clock =
                         Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
@@ -2021,8 +2011,7 @@ impl PlaybackSession {
         self.playback_rate = new_rate;
         // Reset clock state — clocks re-anchor on next frame/audio submission.
         self.video_clock = None;
-        self.audio_clock_anchor_pts = None;
-        self.audio_submitted_frames = 0;
+        self.audio.reset_clock();
         self.queued_audio_frames.clear();
         self.update_window_title();
     }
@@ -2073,11 +2062,11 @@ impl PlaybackSession {
         }
 
         if let (Some(anchor_pts), Some(sink)) =
-            (self.audio_clock_anchor_pts, self.audio_sink.as_ref())
+            (self.audio.clock_anchor_pts(), self.audio_sink.as_ref())
         {
             if sink.is_started() {
                 let buffered_frames = self.current_buffered_frames() as u64;
-                let played_frames = self.audio_submitted_frames.saturating_sub(buffered_frames);
+                let played_frames = self.audio.played_frames(buffered_frames);
                 let sample_rate = sink.format().sample_rate;
                 if sample_rate > 0 {
                     let played = Duration::from_secs_f64(played_frames as f64 / sample_rate as f64);
@@ -2101,7 +2090,7 @@ impl PlaybackSession {
 
     fn seek_is_settled(&self) -> bool {
         self.seek_frame_presented_since_request
-            && (!self.audio_stream_expected || self.audio_clock_anchor_pts.is_some())
+            && (!self.audio_stream_expected || self.audio.is_clock_anchored())
     }
 
     fn desired_restart_position(&self, now: Instant) -> Duration {
