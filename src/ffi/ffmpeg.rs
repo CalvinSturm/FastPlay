@@ -343,6 +343,11 @@ impl DecodeSession {
         let result = seek_and_flush(self.input.0, &self.video, self.audio.as_ref(), target);
         self.interrupt.set_deadline(None);
         result?;
+        // Drop any partial pre-seek audio batch so its stale first-sample pts
+        // cannot stamp post-seek audio (see AudioBatcher::reset).
+        if let Some(batch) = self.audio_batch.as_mut() {
+            batch.reset();
+        }
         self.position = Some(target);
         Ok(())
     }
@@ -1249,6 +1254,19 @@ impl AudioBatcher {
         Ok(())
     }
 
+    /// Drop any partially-accumulated batch without emitting it. Called on seek:
+    /// the buffered samples belong to the pre-seek position, and — critically —
+    /// the retained `pts` (the first buffered sample's timestamp) would
+    /// otherwise stamp the *next* batch of post-seek audio, anchoring the audio
+    /// master clock to a stale position and desyncing A/V (worst on backward
+    /// seeks, where the stale pts is ahead of the seek target and so escapes the
+    /// coordinator's `seek_discard_before_pts` guard).
+    fn reset(&mut self) {
+        self.pts = None;
+        self.frame_count = 0;
+        self.data.clear();
+    }
+
     fn flush<F>(
         &mut self,
         open_gen: OpenGeneration,
@@ -1449,5 +1467,97 @@ impl Drop for Frame {
         unsafe {
             av_frame_free(&mut self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::audio::AudioStreamFormat;
+    use std::num::NonZeroU64;
+    use std::time::Duration;
+
+    fn op() -> OperationId {
+        OperationId(NonZeroU64::new(1).unwrap())
+    }
+
+    // Collect the pts of every batch the batcher emits.
+    fn drive(reset_between: bool) -> Vec<Duration> {
+        let fmt = AudioStreamFormat::stereo_f32_48khz();
+        let bpf = fmt.bytes_per_frame() as usize;
+        let mut batcher = AudioBatcher::new(fmt);
+        let mut produced = 0u64;
+        let mut emitted: Vec<Duration> = Vec::new();
+        // 10 frames is far below target_frames (sample_rate/10), so push does not
+        // auto-flush; the batch stays partial until the explicit flush below.
+        let data = vec![0u8; 10 * bpf];
+
+        // Pre-seek audio decoded ahead of playback (e.g. ~14.3s).
+        batcher
+            .push(
+                Duration::from_millis(14_300),
+                10,
+                &data,
+                OpenGeneration(0),
+                SeekGeneration(0),
+                op(),
+                &mut produced,
+                &mut |f| {
+                    emitted.push(f.pts);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        // A backward seek to ~7s happens here.
+        if reset_between {
+            batcher.reset();
+        }
+
+        // Post-seek audio decoded from the new (7s) position.
+        batcher
+            .push(
+                Duration::from_millis(7_000),
+                10,
+                &data,
+                OpenGeneration(0),
+                SeekGeneration(1),
+                op(),
+                &mut produced,
+                &mut |f| {
+                    emitted.push(f.pts);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        batcher
+            .flush(
+                OpenGeneration(0),
+                SeekGeneration(1),
+                op(),
+                &mut produced,
+                &mut |f| {
+                    emitted.push(f.pts);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        emitted
+    }
+
+    #[test]
+    fn reset_on_seek_stamps_post_seek_audio_with_post_seek_pts() {
+        // With the seek reset, the emitted batch carries the post-seek pts (7s),
+        // so the audio master clock anchors at the seek target — A/V stay synced.
+        assert_eq!(drive(true), vec![Duration::from_millis(7_000)]);
+    }
+
+    #[test]
+    fn without_reset_stale_pre_seek_pts_leaks() {
+        // Documents the desync bug the fix prevents: without the reset, the
+        // partial pre-seek batch retains its first-sample pts (14.3s) and stamps
+        // the post-seek audio, anchoring the clock ~7s ahead of video.
+        assert_eq!(drive(false), vec![Duration::from_millis(14_300)]);
     }
 }
