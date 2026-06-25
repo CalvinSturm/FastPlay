@@ -3,6 +3,7 @@ pub mod clip_range;
 pub mod commands;
 pub mod drop_stats;
 pub mod events;
+pub mod input_dispatch;
 pub mod overlay;
 pub mod session;
 pub mod settings;
