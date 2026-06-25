@@ -14,6 +14,7 @@ use std::{
 
 use crate::{
     app::{
+        clip_range::ClipRangeState,
         commands::SessionCommand,
         drop_stats::{VideoDropBuckets, VideoDropCause},
         events::SessionEvent,
@@ -132,12 +133,9 @@ pub struct PlaybackSession {
     viewport: ViewportState,
     needs_initial_resize: bool,
     has_shown_content: bool,
-    auto_replay: bool,
     pause_after_seek: bool,
     playback_rate: f64,
-    in_point: Option<Duration>,
-    out_point: Option<Duration>,
-    loop_range: bool,
+    clip_range: ClipRangeState,
     saved_volume: f32,
     idle_pace_requested: bool,
     /// Audio sink buffered-frame count cached for the duration of one `tick`.
@@ -213,12 +211,9 @@ impl PlaybackSession {
             viewport: ViewportState::new(),
             needs_initial_resize: false,
             has_shown_content: false,
-            auto_replay: false,
             pause_after_seek: false,
             playback_rate: 1.0,
-            in_point: None,
-            out_point: None,
-            loop_range: false,
+            clip_range: ClipRangeState::new(),
             saved_volume,
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
@@ -252,23 +247,23 @@ impl PlaybackSession {
     }
 
     pub fn auto_replay(&self) -> bool {
-        self.auto_replay
+        self.clip_range.auto_replay()
     }
 
     pub fn in_point(&self) -> Option<Duration> {
-        self.in_point
+        self.clip_range.in_point()
     }
 
     pub fn out_point(&self) -> Option<Duration> {
-        self.out_point
+        self.clip_range.out_point()
     }
 
     pub fn loop_range(&self) -> bool {
-        self.loop_range
+        self.clip_range.loop_range()
     }
 
     pub fn position_is_in_active_range(&self, position: Duration) -> bool {
-        range_resume_target(position, self.in_point, self.out_point).is_none()
+        self.clip_range.position_is_in_active_range(position)
     }
 
     pub fn replay_indicator_until(&self) -> Option<Instant> {
@@ -323,9 +318,7 @@ impl PlaybackSession {
         self.overlay.active_subtitle_cue = None;
         self.overlay.active_subtitle_viewport = None;
         self.playback_rate = 1.0;
-        self.in_point = None;
-        self.out_point = None;
-        self.loop_range = false;
+        self.clip_range.reset_for_open();
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
         self.media_duration = None;
@@ -414,42 +407,19 @@ impl PlaybackSession {
                 self.reset_view();
             }
             SessionCommand::SetInPoint => {
-                self.in_point = Some(self.snapshot(now).position);
-                // If the new in-point is at or past the out-point, clear the out-point.
-                if let (Some(i), Some(o)) = (self.in_point, self.out_point) {
-                    if i >= o {
-                        self.out_point = None;
-                    }
-                }
+                self.clip_range.set_in_point(self.snapshot(now).position);
             }
             SessionCommand::ClearInPoint => {
-                self.in_point = None;
-                // Clearing the in-point while loop_range is active with only an in-point
-                // set would leave an invalid range — disable looping too.
-                if self.out_point.is_none() {
-                    self.loop_range = false;
-                }
+                self.clip_range.clear_in_point();
             }
             SessionCommand::SetOutPoint => {
-                let pos = self.snapshot(now).position;
-                // Out-point must be strictly after the in-point (or after 0 if none set).
-                if pos > self.in_point.unwrap_or(Duration::ZERO) {
-                    self.out_point = Some(pos);
-                }
+                self.clip_range.set_out_point(self.snapshot(now).position);
             }
             SessionCommand::ClearOutPoint => {
-                self.out_point = None;
-                // Clearing the out-point while loop_range is active with only an out-point
-                // set would leave an invalid range — disable looping too.
-                if self.in_point.is_none() {
-                    self.loop_range = false;
-                }
+                self.clip_range.clear_out_point();
             }
             SessionCommand::ToggleLoopRange => {
-                if self.in_point.is_some() || self.out_point.is_some() {
-                    self.loop_range = !self.loop_range;
-                } else {
-                    self.auto_replay = !self.auto_replay;
+                if self.clip_range.toggle_loop_or_replay() {
                     self.overlay.replay_indicator_until = Some(now + Duration::from_millis(1500));
                 }
             }
@@ -799,7 +769,7 @@ impl PlaybackSession {
                 self.drop_buckets.surface_mismatch,
                 self.drop_buckets.scheduler_late
             );
-            if self.auto_replay || self.loop_range {
+            if self.clip_range.should_replay_at_end() {
                 self.replay(now)?;
             } else {
                 self.state = PlaybackState::Ended;
@@ -1771,7 +1741,7 @@ impl PlaybackSession {
 
             // Check out-point by frame PTS before presenting, so we stop exactly
             // on the right frame rather than relying on the lagging audio clock.
-            if let Some(out_pt) = self.out_point {
+            if let Some(out_pt) = self.clip_range.out_point() {
                 if matches!(
                     self.state,
                     PlaybackState::Playing | PlaybackState::Priming | PlaybackState::Draining
@@ -1779,8 +1749,8 @@ impl PlaybackSession {
                     let frame_pos = self.media_time_for_pts(frame.pts());
                     if frame_pos >= out_pt {
                         self.presenter.release_surface(frame.surface());
-                        if self.loop_range {
-                            let target = self.in_point.unwrap_or(Duration::ZERO);
+                        if self.clip_range.loop_range() {
+                            let target = self.clip_range.replay_position();
                             self.seek(SeekTarget::new(target), now)?;
                         } else {
                             // This is a logical clip boundary, not a decoder
@@ -1930,7 +1900,7 @@ impl PlaybackSession {
             }
             PlaybackState::Paused => {
                 let position = self.snapshot(now).position;
-                if let Some(target) = range_resume_target(position, self.in_point, self.out_point) {
+                if let Some(target) = self.clip_range.resume_target(position) {
                     self.pause_after_seek = false;
                     self.seek(SeekTarget::new(target), now)?;
                     return Ok(());
@@ -1993,17 +1963,13 @@ impl PlaybackSession {
             .pending_seek_target
             .map(SeekTarget::position)
             .unwrap_or_else(|| self.snapshot(now).position);
-        let target =
-            range_resume_target(position, self.in_point, self.out_point).unwrap_or(position);
+        let target = self.clip_range.resume_target(position).unwrap_or(position);
         self.pause_after_seek = false;
         self.seek(SeekTarget::new(target), now)
     }
 
     fn replay(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
-        self.seek(
-            SeekTarget::new(self.in_point.unwrap_or(Duration::ZERO)),
-            now,
-        )
+        self.seek(SeekTarget::new(self.clip_range.replay_position()), now)
     }
 
     fn toggle_subtitles(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -2451,20 +2417,6 @@ fn encode_bgra_bmp(capture: &BgraFrameCapture) -> Result<Vec<u8>, Box<dyn std::e
     Ok(bytes)
 }
 
-fn range_resume_target(
-    position: Duration,
-    in_point: Option<Duration>,
-    out_point: Option<Duration>,
-) -> Option<Duration> {
-    if in_point.is_some_and(|start| position < start)
-        || out_point.is_some_and(|end| position >= end)
-    {
-        Some(in_point.unwrap_or(Duration::ZERO))
-    } else {
-        None
-    }
-}
-
 impl ModalTickTarget for PlaybackSession {
     fn modal_tick(&mut self) {
         let _ = self.tick(Instant::now());
@@ -2472,47 +2424,5 @@ impl ModalTickTarget for PlaybackSession {
 
     fn modal_tick_window(&self) -> &NativeWindowInner {
         self.window.raw_window()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::range_resume_target;
-    use std::time::Duration;
-
-    #[test]
-    fn resume_before_in_point_restarts_at_in_point() {
-        assert_eq!(
-            range_resume_target(
-                Duration::from_secs(5),
-                Some(Duration::from_secs(10)),
-                Some(Duration::from_secs(20)),
-            ),
-            Some(Duration::from_secs(10))
-        );
-    }
-
-    #[test]
-    fn resume_at_or_after_out_point_restarts_at_range_start() {
-        assert_eq!(
-            range_resume_target(
-                Duration::from_secs(20),
-                Some(Duration::from_secs(10)),
-                Some(Duration::from_secs(20)),
-            ),
-            Some(Duration::from_secs(10))
-        );
-    }
-
-    #[test]
-    fn resume_inside_range_keeps_current_position() {
-        assert_eq!(
-            range_resume_target(
-                Duration::from_secs(15),
-                Some(Duration::from_secs(10)),
-                Some(Duration::from_secs(20)),
-            ),
-            None
-        );
     }
 }

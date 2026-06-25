@@ -1,3 +1,4 @@
+pub mod clip_range;
 pub mod commands;
 pub mod drop_stats;
 pub mod events;
