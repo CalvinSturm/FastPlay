@@ -21,6 +21,7 @@ use crate::{
         events::SessionEvent,
         overlay::OverlayManager,
         state::PlaybackState,
+        video_queue::VideoFrameQueue,
         viewport::ViewportState,
     },
     audio::sink::AudioSink,
@@ -117,9 +118,8 @@ pub struct PlaybackSession {
     seek_frame_presented_since_request: bool,
     audio_stream_expected: bool,
     overlay: OverlayManager,
-    queued_video_frames: VecDeque<DecodedVideoFrame>,
+    video_queue: VideoFrameQueue,
     queued_audio_frames: VecDeque<QueuedAudioFrame>,
-    queued_video_capacity: usize,
     queued_audio_capacity: usize,
     drop_buckets: VideoDropBuckets,
     video_stream_ended: bool,
@@ -193,9 +193,8 @@ impl PlaybackSession {
             seek_frame_presented_since_request: false,
             audio_stream_expected: false,
             overlay: OverlayManager::new(),
-            queued_video_frames: VecDeque::with_capacity(queue_defaults.decoded_video_frames),
+            video_queue: VideoFrameQueue::with_capacity(queue_defaults.decoded_video_frames),
             queued_audio_frames: VecDeque::with_capacity(queue_defaults.decoded_audio_frames),
-            queued_video_capacity: queue_defaults.decoded_video_frames,
             queued_audio_capacity: queue_defaults.decoded_audio_frames,
             drop_buckets: VideoDropBuckets::default(),
             video_stream_ended: false,
@@ -515,7 +514,7 @@ impl PlaybackSession {
         }
 
         let mut previous = None;
-        for frame in &self.queued_video_frames {
+        for frame in self.video_queue.iter() {
             let position = self.media_time_for_pts(frame.pts());
             if let Some(previous) = previous {
                 let delta = position.saturating_sub(previous);
@@ -646,7 +645,7 @@ impl PlaybackSession {
             // and queue (drained above) and keeps flowing regardless, so a full
             // video queue cannot starve it.
             loop {
-                if self.queued_video_frames.len() >= self.queued_video_capacity {
+                if self.video_queue.is_full() {
                     break;
                 }
                 match self.event_rx.try_recv() {
@@ -1028,7 +1027,7 @@ impl PlaybackSession {
             op_id,
             workers_before,
             self.surfaces_alive(),
-            self.queued_video_frames.len(),
+            self.video_queue.len(),
             self.queued_audio_frames.len(),
             self.presenter.device().is_device_removed()
         );
@@ -1675,7 +1674,7 @@ impl PlaybackSession {
         };
 
         loop {
-            let Some(next_frame) = self.queued_video_frames.front() else {
+            let Some(next_frame) = self.video_queue.front() else {
                 return Ok(false);
             };
 
@@ -1686,17 +1685,14 @@ impl PlaybackSession {
                 }
 
                 let lateness = audio_clock.saturating_sub(next_frame_time);
-                if lateness > VERY_LATE_VIDEO_THRESHOLD && self.queued_video_frames.len() > 1 {
-                    let dropped = self
-                        .queued_video_frames
-                        .pop_front()
-                        .expect("front frame existed");
+                if lateness > VERY_LATE_VIDEO_THRESHOLD && self.video_queue.len() > 1 {
+                    let dropped = self.video_queue.pop_front().expect("front frame existed");
                     self.drop_video_frame(dropped, VideoDropCause::SchedulerLate);
                     continue;
                 }
 
-                while self.queued_video_frames.len() > 1 {
-                    let Some(upcoming_frame) = self.queued_video_frames.get(1) else {
+                while self.video_queue.len() > 1 {
+                    let Some(upcoming_frame) = self.video_queue.peek_second() else {
                         break;
                     };
                     let upcoming_time = self.media_time_for_pts(upcoming_frame.pts());
@@ -1704,10 +1700,7 @@ impl PlaybackSession {
                         break;
                     }
 
-                    let dropped = self
-                        .queued_video_frames
-                        .pop_front()
-                        .expect("front frame existed");
+                    let dropped = self.video_queue.pop_front().expect("front frame existed");
                     self.drop_video_frame(dropped, VideoDropCause::SchedulerLate);
                 }
             } else if let Some(clock) = self.video_clock {
@@ -1717,10 +1710,7 @@ impl PlaybackSession {
                 }
             }
 
-            let frame = self
-                .queued_video_frames
-                .pop_front()
-                .expect("front frame existed");
+            let frame = self.video_queue.pop_front().expect("front frame existed");
 
             // Check out-point by frame PTS before presenting, so we stop exactly
             // on the right frame rather than relying on the lagging audio clock.
@@ -1823,29 +1813,15 @@ impl PlaybackSession {
     }
 
     fn clear_video_queue(&mut self) {
-        while let Some(frame) = self.queued_video_frames.pop_front() {
+        while let Some(frame) = self.video_queue.pop_front() {
             self.presenter.release_surface(frame.surface());
         }
     }
 
     fn push_video_frame(&mut self, frame: DecodedVideoFrame) {
-        let insert_at = if self
-            .queued_video_frames
-            .back()
-            .map_or(true, |last| frame.pts() >= last.pts())
-        {
-            self.queued_video_frames.len()
-        } else {
-            self.queued_video_frames
-                .binary_search_by(|queued| queued.pts().cmp(&frame.pts()))
-                .unwrap_or_else(|pos| pos)
-        };
-        self.queued_video_frames.insert(insert_at, frame);
-
-        while self.queued_video_frames.len() > self.queued_video_capacity {
-            if let Some(dropped) = self.queued_video_frames.pop_front() {
-                self.drop_video_frame(dropped, VideoDropCause::QueueOverflow);
-            }
+        self.video_queue.insert_ordered(frame);
+        while let Some(dropped) = self.video_queue.evict_overflow() {
+            self.drop_video_frame(dropped, VideoDropCause::QueueOverflow);
         }
     }
 
@@ -1890,7 +1866,7 @@ impl PlaybackSession {
                 }
                 // If both streams ended while paused, treat as replay.
                 if self.video_stream_ended
-                    && self.queued_video_frames.is_empty()
+                    && self.video_queue.is_empty()
                     && (!self.audio_stream_expected
                         || (self.audio_stream_ended && self.queued_audio_frames.is_empty()))
                 {
@@ -2203,7 +2179,7 @@ impl PlaybackSession {
     }
 
     fn can_finish_with_buffered(&self, buffered: u32) -> Result<bool, Box<dyn std::error::Error>> {
-        if !self.video_stream_ended || !self.queued_video_frames.is_empty() {
+        if !self.video_stream_ended || !self.video_queue.is_empty() {
             return Ok(false);
         }
 
