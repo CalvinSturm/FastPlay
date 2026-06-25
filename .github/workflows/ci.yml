@@ -1,6 +1,8 @@
 name: CI
-# rustfmt is intentionally not enforced yet: the existing codebase is not
-# rustfmt-clean and reformatting it is a separate task.
+# CI enforces formatting, lints, and tests:
+#   - cargo fmt --check        (formatting is mandatory; codebase is rustfmt-clean)
+#   - cargo clippy -D warnings (no warnings allowed; no baseline allow-list)
+#   - cargo test               (unit tests)
 
 on:
   push:
@@ -23,7 +25,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
+
+      # Formatting is independent of the build, so check it first for fast feedback
+      # before downloading FFmpeg and compiling.
+      - name: fmt
+        run: cargo fmt --check
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
