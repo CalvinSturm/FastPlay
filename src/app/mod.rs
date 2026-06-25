@@ -6,6 +6,7 @@ pub mod drop_stats;
 pub mod events;
 pub mod input_dispatch;
 pub mod overlay;
+pub mod recent;
 pub mod session;
 pub mod settings;
 pub mod state;

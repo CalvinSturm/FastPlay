@@ -92,6 +92,11 @@ pub struct PlaybackSession {
     metrics: MetricsCollector,
     video_clock: Option<PlaybackClock>,
     media_time_origin_pts: Option<Duration>,
+    /// Normalized position the current open began decoding at (resume offset).
+    /// Subtracted when the media-time origin is first established so that a
+    /// resume open anchors the origin at the file start, not at the resume PTS
+    /// (otherwise the whole normalized timeline shifts by the resume amount).
+    open_start_position: Duration,
     paused_clock_position: Option<Duration>,
     audio: AudioController,
     media_duration: Option<Duration>,
@@ -164,6 +169,7 @@ impl PlaybackSession {
             metrics: MetricsCollector::new(),
             video_clock: None,
             media_time_origin_pts: None,
+            open_start_position: Duration::ZERO,
             paused_clock_position: None,
             audio: AudioController::new(saved_volume),
             media_duration: None,
@@ -265,9 +271,31 @@ impl PlaybackSession {
         Ok(())
     }
 
-    pub fn open(
+    /// Show the Recent-files overlay with the given (filename, position) rows
+    /// and highlighted selection. Owned by the event loop, which holds the
+    /// recent-files state; the session just renders it.
+    pub fn show_recent_overlay(
+        &mut self,
+        rows: &[(String, String)],
+        selected: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
+        self.presenter.show_recent_overlay(rows, selected, vw, vh)?;
+        self.present_needed = true;
+        Ok(())
+    }
+
+    pub fn clear_recent_overlay(&mut self) {
+        self.presenter.clear_recent_overlay();
+        self.present_needed = true;
+    }
+
+    /// Open `source`, beginning playback at `start_position` when given (used to
+    /// resume a previously-watched file). `None` starts from the beginning.
+    pub fn open_at(
         &mut self,
         source: MediaSource,
+        start_position: Option<Duration>,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let open_gen = self.generations.bump_open();
@@ -286,6 +314,10 @@ impl PlaybackSession {
         self.overlay.active_subtitle_cue = None;
         self.overlay.active_subtitle_viewport = None;
         self.playback_rate = 1.0;
+        // Resume opens begin decoding at `start_position`; record it so the
+        // media-time origin is anchored at the file start rather than the
+        // resume PTS (see observe_media_time_origin).
+        self.open_start_position = start_position.unwrap_or(Duration::ZERO);
         self.clip_range.reset_for_open();
         let source = Arc::new(source);
         self.current_source = Some(Arc::clone(&source));
@@ -306,7 +338,7 @@ impl PlaybackSession {
         self.metrics.enable_open_audio_metric();
         self.begin_operation(
             source,
-            None,
+            start_position,
             open_gen,
             seek_gen,
             op_id,
@@ -1977,7 +2009,12 @@ impl PlaybackSession {
 
     fn observe_media_time_origin(&mut self, pts: Duration) {
         if self.media_time_origin_pts.is_none() {
-            self.media_time_origin_pts = Some(pts);
+            // On a resume open the first decoded frame is at ~`file_start +
+            // open_start_position`. Anchor the origin at the file start so
+            // normalized positions stay aligned with the timeline (a non-resume
+            // open uses offset 0, unchanged behavior).
+            self.media_time_origin_pts = Some(media_time_origin(pts, self.open_start_position));
+            self.open_start_position = Duration::ZERO;
         }
     }
 
@@ -2224,5 +2261,63 @@ impl ModalTickTarget for PlaybackSession {
 
     fn modal_tick_window(&self) -> &NativeWindowInner {
         self.window.raw_window()
+    }
+}
+
+/// The media-time origin (PTS of normalized position 0) to record when the
+/// first frame of an open is observed. `first_pts` is that frame's PTS;
+/// `start_position` is the normalized position the open began decoding at (the
+/// resume offset, or zero for a normal open). Anchoring at `first_pts -
+/// start_position` keeps a resumed file's timeline aligned: the resumed frame
+/// reports `start_position`, not zero.
+fn media_time_origin(first_pts: Duration, start_position: Duration) -> Duration {
+    first_pts.saturating_sub(start_position)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::media_time_origin;
+    use std::time::Duration;
+
+    fn s(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
+    // Normalized position of `frame_pts` under an origin derived from a first
+    // frame at `first_pts` for an open that started at `start_position`.
+    fn normalized(first_pts: Duration, start_position: Duration, frame_pts: Duration) -> Duration {
+        let origin = media_time_origin(first_pts, start_position);
+        frame_pts.saturating_sub(origin)
+    }
+
+    #[test]
+    fn normal_open_origin_is_file_start() {
+        // Non-resume open: first frame ~file start (0), offset 0.
+        assert_eq!(media_time_origin(s(0), s(0)), s(0));
+        // A later frame reports its true position.
+        assert_eq!(normalized(s(0), s(0), s(42)), s(42));
+    }
+
+    #[test]
+    fn resume_open_reports_resume_position_not_zero() {
+        // Resume to 60s on a file with start_time 0: first frame ~60s.
+        // Bug was: origin = 60 -> resumed frame reported position 0.
+        assert_eq!(media_time_origin(s(60), s(60)), s(0));
+        assert_eq!(normalized(s(60), s(60), s(60)), s(60)); // resumed frame -> 60s
+        assert_eq!(normalized(s(60), s(60), s(90)), s(90)); // later frame -> 90s, in range
+    }
+
+    #[test]
+    fn resume_open_with_nonzero_container_start_time() {
+        // Container start_time 10s, resume to 50s -> first frame ~60s abs.
+        // Origin should be the file start (10s); positions are 0-based from there.
+        assert_eq!(media_time_origin(s(60), s(50)), s(10));
+        assert_eq!(normalized(s(60), s(50), s(60)), s(50)); // resumed frame -> 50s
+    }
+
+    #[test]
+    fn keyframe_before_target_saturates_without_underflow() {
+        // A backward seek may land a hair before the target; never underflow.
+        assert_eq!(media_time_origin(s(58), s(60)), s(0));
     }
 }

@@ -38,4 +38,10 @@ pub enum InputEvent {
     ShowHelp,
     HideHelp,
     OpenFileDialog,
+    // Recent-files overlay (handled by the event loop, not the coordinator).
+    ToggleRecentOverlay,
+    NavigateUp,
+    NavigateDown,
+    Confirm,
+    RemoveSelected,
 }
