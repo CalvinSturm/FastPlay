@@ -4,11 +4,35 @@ FastPlay is a Windows video player built for the parts of playback people actual
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-[Download MSI installer](https://github.com/CalvinSturm/FastPlay/releases/latest) • [All releases](../../releases) • [Report an issue](../../issues)
+**[Download FastPlay v0.3.0 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.3.0/fastplay-0.3.0-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
 ![demo](https://github.com/user-attachments/assets/ac8ae5f1-b4e3-42ca-b21e-c20c1c5de5c0)
+
+## Why FastPlay exists
+
+Most of the time you open a video player, you are not managing a library or transcoding a stream. You are opening one local file and watching it. FastPlay is built around that single moment: how fast the file opens, how quickly the first frame appears, whether it resumes where you left off, and how cleanly it scrubs and gets out of the way.
+
+The mainstream players are excellent and do far more than this. FastPlay deliberately does less, so the path from double-click to watching stays short and the controls stay responsive. It is a focused tool for local playback on Windows, not a replacement for a full-featured media suite.
+
+## Compared to VLC and MPC-HC
+
+VLC and MPC-HC are mature, capable, and the right choice for most people when they need broad format support, streaming, playlists, deep configuration, and years of hardening. FastPlay is not trying to compete on breadth.
+
+Where FastPlay differs is scope and intent:
+
+| | FastPlay | VLC | MPC-HC |
+|---|---|---|---|
+| Primary focus | Fast local playback on Windows | Everything, everywhere | Lightweight local playback (Windows) |
+| Platforms | Windows x64 only | Cross-platform | Windows |
+| Format/codec breadth | Common formats via FFmpeg | Very broad | Broad |
+| Streaming / network | No | Yes | Limited |
+| Playlists / library | No | Yes | Basic |
+| Per-file resume | Built in | Plugin/config | Limited |
+| Render path | D3D11-first, GPU-resident | Multiple backends | DirectShow / madVR etc. |
+
+Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. Reach for FastPlay when you want a snappy, no-friction window for the local file in front of you.
 
 ## Controls
 
@@ -122,6 +146,19 @@ FastPlay does **not** currently aim to provide:
 - advanced subtitle styling or embedded subtitle track selection
 - HDR or tone mapping
 - extra hardware backends beyond the current D3D11-first design
+
+## Known limitations
+
+These are current real-world caveats, separate from the deliberate non-goals above:
+
+- **Windows x64 only.** No macOS, Linux, or ARM builds.
+- **Common formats, not exhaustive.** Decoding depends on the FFmpeg build in use; uncommon or exotic codecs may not play. Software decode is the fallback when hardware decode is unavailable.
+- **External `.srt` subtitles only.** Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal.
+- **Single-file playback.** No playlists, queue, or "next file" yet. Opening a new file replaces the current one and resets in/out points.
+- **No streaming or network sources.** Local files only.
+- **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
+- **HDR is not tone-mapped.** HDR content plays but is not color-managed.
+- **Early release.** Behavior, shortcuts, and metrics are still changing between versions.
 
 ## Requirements
 
