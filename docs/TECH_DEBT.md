@@ -89,13 +89,15 @@ audio submission, recovery) have little direct coverage because they are
 entangled with I/O and FFI. Extracting the clusters in R1 into helpers with
 plain inputs/outputs is the enabler for testing them.
 
-### R3 — No benchmark harness for the latency claims
+### R3 — Benchmark harness — **resolved** (`bench/`)
 
 `ARCHITECTURE.md §24` specifies percentile metrics (open-to-first-frame,
-seek-to-first-frame, pause/resume, drops, underruns, hw-fallback) and the code
-has a `MetricsCollector`, but there is no repeatable harness that produces
-p50/p95 numbers. Performance regressions are therefore not observable in CI or
-locally. (Plan in `ROADMAP.md §2`.)
+seek-to-first-frame, pause/resume, drops, underruns, hw-fallback). A repeatable
+harness now produces p50/p95 from these by driving the release build and parsing
+`session.log` — see [`bench/README.md`](../bench/README.md) and `ROADMAP.md §2`.
+Remaining: it is local/optional and not yet wired into CI, so regressions are
+observable on demand but not automatically gated. Promote to CI once it is
+proven stable across machines.
 
 ### R4 — Historical / loose working docs in the repo root
 

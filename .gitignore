@@ -2,3 +2,7 @@ target/
 validation/*.log
 validation/*.mp4
 .claude/
+
+# Benchmark harness: generated corpus and result reports (see bench/README.md)
+bench/corpus/
+bench/results/
