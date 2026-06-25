@@ -265,9 +265,31 @@ impl PlaybackSession {
         Ok(())
     }
 
-    pub fn open(
+    /// Show the Recent-files overlay with the given (filename, position) rows
+    /// and highlighted selection. Owned by the event loop, which holds the
+    /// recent-files state; the session just renders it.
+    pub fn show_recent_overlay(
+        &mut self,
+        rows: &[(String, String)],
+        selected: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
+        self.presenter.show_recent_overlay(rows, selected, vw, vh)?;
+        self.present_needed = true;
+        Ok(())
+    }
+
+    pub fn clear_recent_overlay(&mut self) {
+        self.presenter.clear_recent_overlay();
+        self.present_needed = true;
+    }
+
+    /// Open `source`, beginning playback at `start_position` when given (used to
+    /// resume a previously-watched file). `None` starts from the beginning.
+    pub fn open_at(
         &mut self,
         source: MediaSource,
+        start_position: Option<Duration>,
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let open_gen = self.generations.bump_open();
@@ -306,7 +328,7 @@ impl PlaybackSession {
         self.metrics.enable_open_audio_metric();
         self.begin_operation(
             source,
-            None,
+            start_position,
             open_gen,
             seek_gen,
             op_id,

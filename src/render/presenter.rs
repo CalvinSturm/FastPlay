@@ -30,6 +30,7 @@ pub struct Presenter {
     volume_text: Option<String>,
     idle_overlay: Option<SubtitleOverlay>,
     help_overlay: Option<SubtitleOverlay>,
+    recent_overlay: Option<SubtitleOverlay>,
     has_ever_shown_content: bool,
     device: D3D11Device,
 }
@@ -53,8 +54,28 @@ impl Presenter {
             volume_text: None,
             idle_overlay,
             help_overlay: None,
+            recent_overlay: None,
             has_ever_shown_content: false,
         })
+    }
+
+    /// Show the Recent-files overlay (mutually exclusive with the help overlay;
+    /// `rows` are (filename, position) pairs, `selected` is the highlighted row).
+    pub fn show_recent_overlay(
+        &mut self,
+        rows: &[(String, String)],
+        selected: usize,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.recent_overlay =
+            self.device
+                .create_recent_overlay(rows, selected, viewport_width, viewport_height)?;
+        Ok(())
+    }
+
+    pub fn clear_recent_overlay(&mut self) {
+        self.recent_overlay = None;
     }
 
     pub fn render(
@@ -76,7 +97,7 @@ impl Presenter {
                     self.subtitle_overlay.as_ref(),
                     self.timeline_overlay.as_ref(),
                     self.volume_overlay.as_ref(),
-                    self.help_overlay.as_ref(),
+                    self.recent_overlay.as_ref().or(self.help_overlay.as_ref()),
                     view,
                 );
             }
@@ -88,7 +109,7 @@ impl Presenter {
             self.idle_overlay.as_ref(),
             self.timeline_overlay.as_ref(),
             self.volume_overlay.as_ref(),
-            self.help_overlay.as_ref(),
+            self.recent_overlay.as_ref().or(self.help_overlay.as_ref()),
         )
     }
 
@@ -111,7 +132,7 @@ impl Presenter {
                     self.subtitle_overlay.as_ref(),
                     self.timeline_overlay.as_ref(),
                     self.volume_overlay.as_ref(),
-                    self.help_overlay.as_ref(),
+                    self.recent_overlay.as_ref().or(self.help_overlay.as_ref()),
                     view,
                 );
             }
@@ -123,7 +144,7 @@ impl Presenter {
             self.idle_overlay.as_ref(),
             self.timeline_overlay.as_ref(),
             self.volume_overlay.as_ref(),
-            self.help_overlay.as_ref(),
+            self.recent_overlay.as_ref().or(self.help_overlay.as_ref()),
         )
     }
 
@@ -336,6 +357,7 @@ impl Presenter {
     pub fn prepare_for_shutdown(&mut self) {
         self.reset_surfaces();
         self.help_overlay = None;
+        self.recent_overlay = None;
         self.idle_overlay = None;
         // Releases swap-chain resources, then ClearState + Flush the context.
         self.drop_swap_chain();

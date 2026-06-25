@@ -1435,6 +1435,34 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::SeekRelativeSeconds(step));
                     }
+                    // Tab → toggle the Recent-files overlay (first press only).
+                    0x09 if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ToggleRecentOverlay);
+                    }
+                    // Up / Down → move selection (repeat allowed for held keys).
+                    0x26 => {
+                        state.input_events.borrow_mut().push(InputEvent::NavigateUp);
+                    }
+                    0x28 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::NavigateDown);
+                    }
+                    // Enter → confirm selection (first press only).
+                    0x0D if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state.input_events.borrow_mut().push(InputEvent::Confirm);
+                    }
+                    // Delete → remove selected (first press only).
+                    0x2E if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::RemoveSelected);
+                    }
                     _ => {}
                 }
             }

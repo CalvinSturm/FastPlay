@@ -61,7 +61,13 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         | InputEvent::EscapeKey
         | InputEvent::BackspaceKey
         | InputEvent::FileDropped(_)
-        | InputEvent::OpenFileDialog => return None,
+        | InputEvent::OpenFileDialog
+        // Recent-files overlay events are handled by the event loop.
+        | InputEvent::ToggleRecentOverlay
+        | InputEvent::NavigateUp
+        | InputEvent::NavigateDown
+        | InputEvent::Confirm
+        | InputEvent::RemoveSelected => return None,
     };
     Some(command)
 }
