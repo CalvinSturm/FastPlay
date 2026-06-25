@@ -20,6 +20,7 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 | `Ctrl+F` | Move one frame forward |
 | `Ctrl+B` | Move one frame backward |
 | `Ctrl+O` | Open media file |
+| `Ctrl+Shift+O` | Recent files overlay (↑↓ select · Enter open · Del remove · Esc close) |
 | `Ctrl+S` | Save screenshot |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
