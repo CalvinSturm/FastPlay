@@ -6,3 +6,4 @@ pub mod session;
 pub mod settings;
 pub mod state;
 pub mod timeline_ui;
+pub mod viewport;

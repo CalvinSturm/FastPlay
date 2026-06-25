@@ -19,6 +19,7 @@ use crate::{
         events::SessionEvent,
         overlay::OverlayManager,
         state::PlaybackState,
+        viewport::ViewportState,
     },
     audio::sink::AudioSink,
     ffi::{
@@ -128,11 +129,7 @@ pub struct PlaybackSession {
     screenshot_pending: bool,
     observed_frame_interval: Option<Duration>,
     last_presented_media_position: Option<Duration>,
-    view_zoom: f32,
-    view_pan_x: f32,
-    view_pan_y: f32,
-    view_rotation_quarter_turns: u8,
-    stream_rotation_quarter_turns: u8,
+    viewport: ViewportState,
     needs_initial_resize: bool,
     has_shown_content: bool,
     auto_replay: bool,
@@ -213,11 +210,7 @@ impl PlaybackSession {
             screenshot_pending: false,
             observed_frame_interval: None,
             last_presented_media_position: None,
-            view_zoom: 1.0,
-            view_pan_x: 0.0,
-            view_pan_y: 0.0,
-            view_rotation_quarter_turns: 0,
-            stream_rotation_quarter_turns: 0,
+            viewport: ViewportState::new(),
             needs_initial_resize: false,
             has_shown_content: false,
             auto_replay: false,
@@ -339,8 +332,7 @@ impl PlaybackSession {
         self.active_decode_mode = None;
         self.observed_frame_interval = None;
         self.last_presented_media_position = None;
-        self.view_rotation_quarter_turns = 0;
-        self.stream_rotation_quarter_turns = 0;
+        self.viewport.reset_for_open();
         if let Some(track) = self.overlay.subtitle_track.as_ref() {
             flog!(
                 "subtitle_track_loaded path={} cues={}",
@@ -485,10 +477,8 @@ impl PlaybackSession {
                 }
             }
             SessionCommand::PanBy { dx, dy } => {
-                if self.view_zoom > 1.0 {
-                    self.view_pan_x += dx;
-                    self.view_pan_y += dy;
-                    self.clamp_pan();
+                let viewport = self.presenter.viewport_size().unwrap_or((1, 1));
+                if self.viewport.pan_by(dx, dy, viewport) {
                     self.present_needed = true;
                 }
             }
@@ -722,12 +712,7 @@ impl PlaybackSession {
         }
 
         if self.present_needed || self.screenshot_pending {
-            let view = crate::render::ViewTransform {
-                zoom: self.view_zoom,
-                pan_x: self.view_pan_x,
-                pan_y: self.view_pan_y,
-                rotation_quarter_turns: self.view_rotation_quarter_turns,
-            };
+            let view = self.viewport.transform();
             let render_result = if self.screenshot_pending {
                 self.screenshot_pending = false;
                 self.presenter
@@ -853,10 +838,7 @@ impl PlaybackSession {
                 // fire this event again with the same stream rotation; in
                 // that case the user may have rotated the view manually, and
                 // we must not clobber their choice.
-                if self.stream_rotation_quarter_turns != rotation_quarter_turns {
-                    self.stream_rotation_quarter_turns = rotation_quarter_turns;
-                    self.view_rotation_quarter_turns = rotation_quarter_turns;
-                }
+                self.viewport.apply_stream_rotation(rotation_quarter_turns);
                 if self.overlay.show_decode_info {
                     self.update_window_title();
                 }
@@ -2042,86 +2024,39 @@ impl PlaybackSession {
     }
 
     fn zoom_at_cursor(&mut self, delta: i16, cursor_x: i32, cursor_y: i32) {
-        let factor = if delta > 0 { 1.125f32 } else { 1.0 / 1.125 };
-        let new_zoom = (self.view_zoom * factor).clamp(1.0, 8.0);
-
-        if (new_zoom - self.view_zoom).abs() < f32::EPSILON {
-            return;
+        let viewport = self.presenter.viewport_size().unwrap_or((1, 1));
+        if self
+            .viewport
+            .zoom_at_cursor(delta, cursor_x, cursor_y, viewport)
+        {
+            self.present_needed = true;
         }
-
-        // Compute the viewport size for cursor-centered zoom.
-        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1, 1));
-        let cx = vw as f32 * 0.5;
-        let cy = vh as f32 * 0.5;
-
-        // Pixel under cursor in content space: content_pt = (cursor - center - pan) / zoom
-        // New pan keeps that content point under the cursor.
-        let dx = cursor_x as f32 - cx;
-        let dy = cursor_y as f32 - cy;
-        let content_x = (dx - self.view_pan_x) / self.view_zoom;
-        let content_y = (dy - self.view_pan_y) / self.view_zoom;
-        let new_pan_x = dx - content_x * new_zoom;
-        let new_pan_y = dy - content_y * new_zoom;
-
-        self.view_zoom = new_zoom;
-
-        // Clamp at zoom == 1.0: no pan drift.
-        if new_zoom <= 1.0 {
-            self.view_pan_x = 0.0;
-            self.view_pan_y = 0.0;
-        } else {
-            self.view_pan_x = new_pan_x;
-            self.view_pan_y = new_pan_y;
-            self.clamp_pan();
-        }
-
-        self.present_needed = true;
-    }
-
-    /// Clamp pan so that at least 25% of the content remains visible on each
-    /// axis. Without this the user can drag the video entirely off-screen.
-    fn clamp_pan(&mut self) {
-        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1, 1));
-        let max_pan_x = vw as f32 * self.view_zoom * 0.75;
-        let max_pan_y = vh as f32 * self.view_zoom * 0.75;
-        self.view_pan_x = self.view_pan_x.clamp(-max_pan_x, max_pan_x);
-        self.view_pan_y = self.view_pan_y.clamp(-max_pan_y, max_pan_y);
     }
 
     fn rotate_view(&mut self, delta_quarter_turns: u8) {
-        self.view_rotation_quarter_turns = self
-            .view_rotation_quarter_turns
-            .wrapping_add(delta_quarter_turns)
-            % 4;
+        self.viewport.rotate(delta_quarter_turns);
         self.present_needed = true;
     }
 
     fn reset_view(&mut self) {
-        self.view_zoom = 1.0;
-        self.view_pan_x = 0.0;
-        self.view_pan_y = 0.0;
-        self.view_rotation_quarter_turns = self.stream_rotation_quarter_turns;
+        self.viewport.reset();
         self.present_needed = true;
     }
 
     fn fit_window(&mut self) {
-        let Some((mut w, mut h)) = self.presenter.current_surface_size() else {
+        let Some((w, h)) = self.presenter.current_surface_size() else {
             return;
         };
         // Account for rotation: odd quarter-turns swap width and height.
-        if self.view_rotation_quarter_turns % 2 != 0 {
-            std::mem::swap(&mut w, &mut h);
-        }
+        let (w, h) = self.viewport.orient_dimensions(w, h);
         self.window.fit_window_to_content(w, h);
     }
 
     fn half_size_window(&mut self) {
-        let Some((mut w, mut h)) = self.presenter.current_surface_size() else {
+        let Some((w, h)) = self.presenter.current_surface_size() else {
             return;
         };
-        if self.view_rotation_quarter_turns % 2 != 0 {
-            std::mem::swap(&mut w, &mut h);
-        }
+        let (w, h) = self.viewport.orient_dimensions(w, h);
         self.window
             .set_window_client_size((w / 2).max(1), (h / 2).max(1));
     }
