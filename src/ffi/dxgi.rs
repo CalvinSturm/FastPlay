@@ -1317,12 +1317,21 @@ unsafe extern "system" fn window_proc(
                             state.input_events.borrow_mut().push(InputEvent::SetInPoint);
                         }
                     }
-                    // Ctrl+O → open file dialog, Shift+O → clear out-point, O → set out-point
+                    // Ctrl+Shift+O → recent files, Ctrl+O → open file dialog,
+                    // Shift+O → clear out-point, O → set out-point
                     0x4F if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::OpenFileDialog);
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        if shift_held {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::ToggleRecentOverlay);
+                        } else {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::OpenFileDialog);
+                        }
                     }
                     0x4F => {
                         let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
@@ -1434,13 +1443,6 @@ unsafe extern "system" fn window_proc(
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::SeekRelativeSeconds(step));
-                    }
-                    // Tab → toggle the Recent-files overlay (first press only).
-                    0x09 if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ToggleRecentOverlay);
                     }
                     // Up / Down → move selection (repeat allowed for held keys).
                     0x26 => {
