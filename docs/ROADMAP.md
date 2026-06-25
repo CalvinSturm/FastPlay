@@ -54,13 +54,22 @@ isolation, and the charter invariants are unchanged.
 
 ---
 
-## 2. Benchmark harness (do after the first extractions)
+## 2. Benchmark harness — **implemented** (`bench/`)
 
-Add a repeatable harness that turns the existing `MetricsCollector` data into
-reportable percentiles, matching `ARCHITECTURE.md §24`. Keep it Windows-only and
-out of the steady-state hot path.
+A repeatable harness that turns the metrics the app already logs to
+`session.log` into reportable percentiles, matching `ARCHITECTURE.md §24`. It is
+Windows-only, drives the real release build via `PostMessageW`, and does not
+touch the steady-state hot path or app code. See [`bench/README.md`](../bench/README.md).
 
-Target measurements (p50 / p95 unless noted):
+- `bench/gen-corpus.ps1` — generates a synthetic ffmpeg corpus (no media in repo).
+- `bench/run-bench.ps1` — drives open → seeks → pause/resume → playthrough →
+  graceful close per clip/iteration, parses `session.log`, and emits a p50/p95
+  console table plus `bench/results/*.json` and `*.csv`.
+
+It is intentionally **not** wired into `cargo`/CI yet (local/optional first, per
+the note below); promote it once it has proven stable across machines.
+
+Target measurements (p50 / p95 unless noted) — all captured:
 
 - open-to-first-frame
 - seek-to-first-frame
@@ -130,9 +139,10 @@ this roadmap:
 
 ## Sequencing at a glance
 
-1. **Now:** rustfmt-clean + CI fmt enforcement + these docs (this pass).
-2. **Next:** `PlaybackSession` helper extractions (§1), one cluster per PR, with
-   tests.
-3. **Then:** benchmark harness (§2).
-4. **After:** product basics (§3).
+1. ✅ rustfmt-clean + CI fmt enforcement + docs.
+2. **In progress:** `PlaybackSession` helper extractions (§1) — viewport,
+   clip-range, overlay, audio, video-queue, and input-dispatch done; lifecycle /
+   open-close remains.
+3. ✅ benchmark harness (§2) — `bench/`.
+4. **After:** finish §1 (lifecycle), then product basics (§3).
 5. **Later:** creator review mode (§4).
