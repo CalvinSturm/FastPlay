@@ -1,0 +1,85 @@
+name: Performance regression
+description: Report a measurable regression in open, seek, present, pause/resume, or recovery behavior.
+title: "[Performance]: "
+labels:
+  - performance
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for this regression.
+          required: true
+        - label: I compared equivalent scenarios and can provide measurements.
+          required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Compared versions
+      description: Identify the good and regressed releases or commits.
+      placeholder: Good v0.2.2; regressed commit abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: metric
+    attributes:
+      label: Primary affected metric
+      options:
+        - open_to_first_frame_ms
+        - open_to_first_audio_ms
+        - play_to_motion_ms
+        - pause_to_stop_ms
+        - seek_to_first_frame_ms
+        - seek_to_av_settled_ms
+        - resize_recover_ms
+        - fullscreen_toggle_ms
+        - device_recovery_ms
+        - dropped_video_frames
+        - audio_underruns
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Before and after measurements
+      description: Prefer multiple runs with p50 and p95. Include sample count.
+      placeholder: |
+        Good: p50 42 ms, p95 57 ms, n=30
+        Regressed: p50 71 ms, p95 104 ms, n=30
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Test environment
+      description: Include Windows version, CPU, GPU/driver, storage class, display refresh rate, decode mode, and warm/cold status.
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Media workload
+      description: Include container, codecs, resolution, frame rate, bitrate, duration, and any relevant subtitle/audio details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: method
+    attributes:
+      label: Reproduction and measurement method
+      description: Explain how the scenario was run and how timings were collected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include logs, traces, suspected commits, or observations about seek, present, resize, reopen, or device churn.
