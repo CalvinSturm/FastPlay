@@ -2206,7 +2206,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("\u{2190} / \u{2192}", "Seek 5 s  (hold: 15 s)"),
         ("Ctrl+F / B", "Step frame \u{00B1}1"),
         ("Ctrl+O", "Open media file"),
-        ("Tab", "Recent files"),
+        ("Ctrl+Shift+O", "Recent files"),
         ("Ctrl+S", "Save screenshot"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
