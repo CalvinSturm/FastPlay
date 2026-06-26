@@ -154,7 +154,7 @@ These are current real-world caveats, separate from the deliberate non-goals abo
 - **Windows x64 only.** No macOS, Linux, or ARM builds.
 - **Common formats, not exhaustive.** Decoding depends on the FFmpeg build in use; uncommon or exotic codecs may not play. Software decode is the fallback when hardware decode is unavailable.
 - **External `.srt` subtitles only.** Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal.
-- **Single-file playback.** No playlists, queue, or "next file" yet. Opening a new file replaces the current one and resets in/out points.
+- **No playlist/queue yet.** Each FastPlay window has one active file. Multiple instances can be opened side by side, but there is no in-window playlist, queue, or "next file" flow yet.
 - **No streaming or network sources.** Local files only.
 - **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
 - **HDR is not tone-mapped.** HDR content plays but is not color-managed.
