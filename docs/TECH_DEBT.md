@@ -1,6 +1,6 @@
 # Technical Debt
 
-Status: 2026-06-25 · FastPlay v0.3.0
+Status: 2026-06-26 · FastPlay v0.4.0
 
 This document tracks **maintainability** debt only. It does not propose
 architecture changes. `ARCHITECTURE.md` remains the locked charter; everything
@@ -36,7 +36,7 @@ only coordinator entrypoint.
 | File | Lines | Role |
 |------|------:|------|
 | `src/ffi/d3d11.rs` | 3036 | D3D11 FFI seam (inherently large; unsafe is correctly boxed here) |
-| `src/app/session.rs` | 2323 | Coordinator; still large, but focused state/helpers have been extracted |
+| `src/app/session.rs` | 2413 | Coordinator; still large, but focused state/helpers have been extracted |
 | `src/ffi/dxgi.rs` | 1842 | DXGI FFI seam |
 | `src/ffi/ffmpeg.rs` | 1563 | FFmpeg FFI seam |
 
@@ -64,11 +64,13 @@ extraction needs a concrete reviewability, correctness, or testability payoff.
 
 ### R2 — Coordinator-adjacent test coverage — **substantially improved**
 
-The suite now contains 106 unit tests. In addition to the earlier subtitle,
-timeline, queue, and drop-stat coverage, v0.3.0 adds direct tests for viewport
+The suite now contains 140 unit tests. In addition to the earlier subtitle,
+timeline, queue, and drop-stat coverage, v0.3.0 added direct tests for viewport
 geometry, clip-range behavior, overlay decisions, audio coordination, video
 queue behavior, input dispatch, decode-thread command handling, recent-file
-persistence policy, and resume timeline normalization.
+persistence policy, and resume timeline normalization; v0.4.0 adds play-queue
+construction/navigation, the shared media-extension helper, drop classification,
+the edge-triggered ended-signal latch, and auto-advance planning.
 
 FFI-coupled end-to-end coordinator paths still rely on build checks, the local
 benchmark harness, and manual playback validation. That residual gap is
@@ -102,7 +104,7 @@ an archive folder. Not addressed in this pass to keep it small.
 - `cargo clippy --all-targets -- -D warnings` — **clean**. There is **no
   baseline allow-list**; no `#![allow(...)]` debt is being hidden. Nothing to
   pay down here today.
-- `cargo test --all-targets` — **106 passing, 0 failing**.
+- `cargo test --all-targets` — **140 passing, 0 failing**.
 
 CI runs all three on `windows-latest`. There is no known lint debt to document
 as deferred.
