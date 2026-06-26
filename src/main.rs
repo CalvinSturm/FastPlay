@@ -247,6 +247,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         timeline_ui.update(&mut session, now)?;
         session.tick(now)?;
+        // A natural end-of-file (no loop/auto-replay/out-point) latches the
+        // ended signal exactly once; auto-advance to the next queued item.
+        if session.take_ended_signal() {
+            auto_advance_queue(
+                &mut session,
+                &mut recent,
+                &mut current,
+                &mut play_queue,
+                now,
+            )?;
+        }
         if session.take_idle_pace_request() {
             // The tick produced no frame to present. While playback is actively
             // advancing, pace tightly so the next frame's deadline is not missed.
@@ -542,6 +553,65 @@ fn navigate_queue(
     Ok(())
 }
 
+/// Status shown when a multi-item queue's last file ends (no wrapping).
+const END_OF_QUEUE_MESSAGE: &str = "End of queue";
+
+/// What auto-advance should do when the current file reaches its natural end.
+/// Pure (derives only from the queue) so the decision is unit-testable; the
+/// actual open is delegated to [`navigate_queue`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AutoAdvance {
+    /// Single-file queue (or empty): nothing to advance to, stay ended quietly.
+    Skip,
+    /// Multi-item queue sitting on its last item: no wrapping.
+    EndOfQueue,
+    /// Multi-item queue with a next candidate to open.
+    OpenNext(PathBuf),
+}
+
+/// Decide the auto-advance action for `play_queue` at end-of-file. Uses
+/// [`PlayQueue::next_path`] so the cursor is not moved; the commit happens only
+/// after a successful open, inside [`navigate_queue`].
+fn plan_auto_advance(play_queue: &PlayQueue) -> AutoAdvance {
+    // Auto-advance is only ever for multi-item queues.
+    if play_queue.len() <= 1 {
+        return AutoAdvance::Skip;
+    }
+    match play_queue.next_path() {
+        Some(next) => AutoAdvance::OpenNext(next.to_path_buf()),
+        None => AutoAdvance::EndOfQueue,
+    }
+}
+
+/// Auto-advance to the next queued file when the current one ends naturally.
+/// Reuses [`navigate_queue`] for the open, so the candidate/commit discipline,
+/// resume, subtitles, metrics, and in/out reset all match manual navigation.
+fn auto_advance_queue(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match plan_auto_advance(play_queue) {
+        // A single-file open just ended: no queue to advance, no parent-folder
+        // scan, no message.
+        AutoAdvance::Skip => Ok(()),
+        AutoAdvance::EndOfQueue => {
+            session.show_status_message(END_OF_QUEUE_MESSAGE);
+            Ok(())
+        }
+        AutoAdvance::OpenNext(_) => navigate_queue(
+            session,
+            recent,
+            current,
+            play_queue,
+            QueueDirection::Next,
+            now,
+        ),
+    }
+}
+
 /// Handle an input event while the Recent overlay is open (it is modal).
 fn handle_recent_overlay_input(
     input: &InputEvent,
@@ -710,6 +780,45 @@ mod tests {
             classify_dropped_paths(&paths),
             DropTarget::MultipleFiles(paths.clone())
         );
+    }
+
+    #[test]
+    fn auto_advance_skips_single_file_queue() {
+        // A natural end of a single-file queue must not auto-advance (and must
+        // never scan a parent folder).
+        let queue = PlayQueue::single(PathBuf::from(r"C:\v\only.mp4"));
+        assert_eq!(plan_auto_advance(&queue), AutoAdvance::Skip);
+    }
+
+    #[test]
+    fn auto_advance_opens_next_candidate_without_moving_cursor() {
+        let queue = PlayQueue::from_paths(vec![
+            PathBuf::from(r"C:\v\a.mp4"),
+            PathBuf::from(r"C:\v\b.mp4"),
+            PathBuf::from(r"C:\v\c.mp4"),
+        ]);
+        // Cursor is at a; the plan targets b without committing.
+        assert_eq!(
+            plan_auto_advance(&queue),
+            AutoAdvance::OpenNext(PathBuf::from(r"C:\v\b.mp4"))
+        );
+        assert_eq!(queue.cursor(), 0, "planning does not move the cursor");
+    }
+
+    #[test]
+    fn auto_advance_does_not_wrap_at_end_of_queue() {
+        let mut queue = PlayQueue::from_paths(vec![
+            PathBuf::from(r"C:\v\a.mp4"),
+            PathBuf::from(r"C:\v\b.mp4"),
+        ]);
+        queue.commit_next(); // now on the last item
+        assert_eq!(plan_auto_advance(&queue), AutoAdvance::EndOfQueue);
+    }
+
+    #[test]
+    fn auto_advance_skips_empty_queue() {
+        let queue = PlayQueue::from_paths(Vec::<PathBuf>::new());
+        assert_eq!(plan_auto_advance(&queue), AutoAdvance::Skip);
     }
 
     #[test]
