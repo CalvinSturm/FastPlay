@@ -1,6 +1,6 @@
 # Roadmap
 
-Status: 2026-06-25 · FastPlay v0.3.0
+Status: 2026-06-26 · FastPlay v0.4.0
 
 Practical, prioritized plan for maintaining FastPlay before new features land.
 This complements (does not replace) `ARCHITECTURE.md`, which stays the locked
@@ -83,7 +83,11 @@ library or sprawl.
   most-recently-opened overlay with no indexing or library behavior.
 - ✅ **Resume playback position** — implemented in v0.3.0 for CLI, file-dialog,
   drag/drop, and recent-file opens, with near-end resume suppression.
-- **Open next / previous file in folder** — sibling-file navigation only.
+- ✅ **Open next / previous file in folder** — implemented in v0.4.0 as a
+  lightweight, in-memory play queue owned by the event loop (not by
+  `PlaybackSession`): build a queue by dropping multiple files or a folder,
+  step with `PageUp` / `PageDown`, and auto-advance at the natural end of each
+  file. No persistent playlists, recursive scanning, shuffle, or repeat.
 - **Optional file associations** — already partially present via MSI; make it an
   explicit, optional toggle.
 - **Portable ZIP artifact** — ship a no-installer build alongside the MSI.
@@ -129,6 +133,9 @@ this roadmap:
 2. ✅ `PlaybackSession` helper extractions (§1).
 3. ✅ benchmark harness (§2) — `bench/`.
 4. ✅ first product basics: recent files and resume playback (§3).
-5. **Next:** choose among the remaining product basics based on measured user
-   value and architecture fit.
-6. **Later:** creator review mode (§4).
+5. ✅ lightweight play queue: next/previous + folder playback + auto-advance
+   (§3), shipped in v0.4.0.
+6. **Next:** choose among the remaining product basics (portable ZIP artifact,
+   optional file-association toggle) based on measured user value and
+   architecture fit.
+7. **Later:** creator review mode (§4).

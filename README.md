@@ -4,7 +4,7 @@ FastPlay is a Windows video player built for the parts of playback people actual
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-**[Download FastPlay v0.3.0 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.3.0/fastplay-0.3.0-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
+**[Download FastPlay v0.4.0 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.0/fastplay-0.4.0-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
@@ -88,7 +88,7 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 
 ### Playback
 - `Ctrl+O` file open dialog and drag-and-drop file open
-- lightweight play queue: drop multiple files or a folder, then step through with `PageUp` / `PageDown`
+- lightweight play queue: drop multiple files or a folder, step through with `PageUp` / `PageDown`, and auto-advance to the next file at the natural end of each one
 - recent-files overlay with automatic per-file resume playback
 - quick open and first-frame path
 - responsive keyboard seek with accelerated hold behavior
@@ -149,7 +149,7 @@ FastPlay does **not** currently aim to provide:
 * HDR or tone mapping
 * extra hardware backends beyond the current D3D11-first design
 
-Simple queue/folder playback is not a non-goal, but it is not implemented yet.
+Lightweight queue/folder playback is implemented (see Features); full playlists, persistent playlist files, and media-library behavior remain non-goals.
 
 ## Known limitations
 
@@ -158,7 +158,7 @@ These are current real-world caveats, separate from the deliberate non-goals abo
 * **Windows x64 only.** No macOS, Linux, or ARM builds.
 * **Common formats, not exhaustive.** Decoding depends on the FFmpeg build in use; uncommon or exotic codecs may not play. Software decode is the fallback when hardware decode is unavailable.
 * **External `.srt` subtitles only.** Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal.
-* **No in-window queue yet.** Each FastPlay window has one active file. Multiple instances can be opened side by side, but there is not yet a simple queue, folder playback, or "next file" flow.
+* **Queue is in-memory and session-only.** Dropping multiple files or a folder builds a play queue you can step through (`PageUp` / `PageDown`) with auto-advance at end of file, but the queue is not saved between runs, there are no persistent playlist files, folder scanning is non-recursive, and there is no shuffle, repeat, or in-window queue list.
 * **No streaming or network sources.** Local files only.
 * **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
 * **HDR is not tone-mapped.** HDR content plays but is not color-managed.
