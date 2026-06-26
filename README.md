@@ -1,6 +1,6 @@
 # <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
 
-FastPlay is a Windows video player built for the parts of playback people actually notice: opening a file, reaching the first frame quickly, resuming where you left off, scrubbing without friction, adjusting the picture easily, and getting out of the way while you watch.
+FastPlay is a keyboard-first Windows video player for fast local playback, smooth scrubbing, and ergonomic control across monitors.
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
