@@ -28,10 +28,12 @@ pub fn show_open_file_dialog(hwnd: HWND) -> Option<PathBuf> {
     // ── File type filters ────────────────────────────────────────────────
     // Common video and audio formats, plus a catch-all.
     let media_filter_name: Vec<u16> = "Media Files\0".encode_utf16().collect();
-    let media_filter_spec: Vec<u16> = "*.mp4;*.mkv;*.avi;*.mov;*.webm;*.wmv;*.flv;*.m4v;\
-        *.ts;*.mpg;*.mpeg;*.mp3;*.flac;*.wav;*.ogg;*.aac;*.m4a;*.opus;*.srt\0"
-        .encode_utf16()
-        .collect();
+    // The supported-extension list lives in `app::media_ext` so the dialog filter
+    // and the play queue cannot drift apart.
+    let media_filter_spec: Vec<u16> =
+        format!("{}\0", crate::app::media_ext::media_dialog_filter_spec())
+            .encode_utf16()
+            .collect();
     let all_filter_name: Vec<u16> = "All Files\0".encode_utf16().collect();
     let all_filter_spec: Vec<u16> = "*.*\0".encode_utf16().collect();
 
