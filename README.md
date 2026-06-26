@@ -139,26 +139,28 @@ FastPlay prioritizes:
 
 FastPlay does **not** currently aim to provide:
 
-- playlists or media library management
-- streaming support
-- plugin support
-- browser or web UI
-- advanced subtitle styling or embedded subtitle track selection
-- HDR or tone mapping
-- extra hardware backends beyond the current D3D11-first design
+* media library management, scraping, or collection organization
+* streaming support
+* plugin support
+* browser or web UI
+* advanced subtitle styling or embedded subtitle track selection
+* HDR or tone mapping
+* extra hardware backends beyond the current D3D11-first design
+
+Simple queue/folder playback is not a non-goal, but it is not implemented yet.
 
 ## Known limitations
 
 These are current real-world caveats, separate from the deliberate non-goals above:
 
-- **Windows x64 only.** No macOS, Linux, or ARM builds.
-- **Common formats, not exhaustive.** Decoding depends on the FFmpeg build in use; uncommon or exotic codecs may not play. Software decode is the fallback when hardware decode is unavailable.
-- **External `.srt` subtitles only.** Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal.
-- **No playlist/queue yet.** Each FastPlay window has one active file. Multiple instances can be opened side by side, but there is no in-window playlist, queue, or "next file" flow yet.
-- **No streaming or network sources.** Local files only.
-- **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
-- **HDR is not tone-mapped.** HDR content plays but is not color-managed.
-- **Early release.** Behavior, shortcuts, and metrics are still changing between versions.
+* **Windows x64 only.** No macOS, Linux, or ARM builds.
+* **Common formats, not exhaustive.** Decoding depends on the FFmpeg build in use; uncommon or exotic codecs may not play. Software decode is the fallback when hardware decode is unavailable.
+* **External `.srt` subtitles only.** Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal.
+* **No in-window queue yet.** Each FastPlay window has one active file. Multiple instances can be opened side by side, but there is not yet a simple queue, folder playback, or "next file" flow.
+* **No streaming or network sources.** Local files only.
+* **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
+* **HDR is not tone-mapped.** HDR content plays but is not color-managed.
+* **Early release.** Behavior, shortcuts, and metrics are still changing between versions.
 
 ## Requirements
 
