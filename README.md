@@ -45,6 +45,7 @@ Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. R
 | `Ctrl+B` | Move one frame backward |
 | `Ctrl+O` | Open media file |
 | `Ctrl+Shift+O` | Recent files overlay (↑↓ select · Enter open · Del remove · Esc close) |
+| `PageUp` / `PageDown` | Previous / next file in the play queue |
 | `Ctrl+S` | Save screenshot |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
@@ -87,6 +88,7 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 
 ### Playback
 - `Ctrl+O` file open dialog and drag-and-drop file open
+- lightweight play queue: drop multiple files or a folder, then step through with `PageUp` / `PageDown`
 - recent-files overlay with automatic per-file resume playback
 - quick open and first-frame path
 - responsive keyboard seek with accelerated hold behavior

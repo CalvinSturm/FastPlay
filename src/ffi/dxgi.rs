@@ -1173,12 +1173,13 @@ impl IDropTarget_Impl for FastPlayDropTarget_Impl {
     ) -> windows_core::Result<()> {
         unsafe { *pdweffect = DROPEFFECT_COPY }
         if let Some(data_obj) = pdataobj {
-            if let Some(path) = unsafe { extract_drop_path(data_obj) } {
+            let paths = unsafe { extract_drop_paths(data_obj) };
+            if !paths.is_empty() {
                 if let Some(state) = unsafe { window_state(self.hwnd) } {
                     state
                         .input_events
                         .borrow_mut()
-                        .push(InputEvent::FileDropped(path));
+                        .push(InputEvent::FilesDropped(paths));
                 }
             }
         }
@@ -1186,8 +1187,10 @@ impl IDropTarget_Impl for FastPlayDropTarget_Impl {
     }
 }
 
-/// Try to resolve a drag-and-drop `IDataObject` to a filesystem path via `CF_HDROP`.
-unsafe fn extract_drop_path(data_obj: &IDataObject) -> Option<PathBuf> {
+/// Resolve all paths in a drag-and-drop `IDataObject` via `CF_HDROP`. A drop can
+/// carry several files or a folder; the event loop decides how they become a
+/// queue. Non-existent entries are skipped. Order follows the shell's drop order.
+unsafe fn extract_drop_paths(data_obj: &IDataObject) -> Vec<PathBuf> {
     let hdrop_fmt = FORMATETC {
         cfFormat: 15u16, // CF_HDROP
         ptd: std::ptr::null_mut(),
@@ -1195,25 +1198,24 @@ unsafe fn extract_drop_path(data_obj: &IDataObject) -> Option<PathBuf> {
         lindex: -1,
         tymed: 1, // TYMED_HGLOBAL
     };
-    let mut medium = data_obj.GetData(&hdrop_fmt).ok()?;
+    let Ok(mut medium) = data_obj.GetData(&hdrop_fmt) else {
+        return Vec::new();
+    };
     let hdrop = HDROP(medium.u.hGlobal.0);
     let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
-    let path = if count > 0 {
-        let len = DragQueryFileW(hdrop, 0, None) as usize;
+    let mut paths = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let len = DragQueryFileW(hdrop, index, None) as usize;
         let mut buf = vec![0u16; len + 1];
-        DragQueryFileW(hdrop, 0, Some(&mut buf));
+        DragQueryFileW(hdrop, index, Some(&mut buf));
         buf.retain(|&c| c != 0);
-        let p = PathBuf::from(std::ffi::OsString::from_wide(&buf));
-        if p.exists() {
-            Some(p)
-        } else {
-            None
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&buf));
+        if path.exists() {
+            paths.push(path);
         }
-    } else {
-        None
-    };
+    }
     ReleaseStgMedium(&mut medium);
-    path
+    paths
 }
 
 unsafe extern "system" fn window_proc(
@@ -1464,6 +1466,17 @@ unsafe extern "system" fn window_proc(
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::RemoveSelected);
+                    }
+                    // PageUp / PageDown → previous / next play-queue item
+                    // (first press only; holding must not blast through files).
+                    0x21 if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::QueuePrevious);
+                    }
+                    0x22 if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state.input_events.borrow_mut().push(InputEvent::QueueNext);
                     }
                     _ => {}
                 }

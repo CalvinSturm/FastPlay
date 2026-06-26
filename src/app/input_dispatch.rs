@@ -14,8 +14,10 @@ use crate::platform::input::InputEvent;
 /// Returns `None` for events that need state only the event loop has — the
 /// current playback position ([`InputEvent::SeekRelativeSeconds`]), the
 /// timeline-scrub UI ([`InputEvent::BackspaceKey`]), window state
-/// ([`InputEvent::EscapeKey`]), file I/O ([`InputEvent::FileDropped`],
-/// [`InputEvent::OpenFileDialog`]), or an accompanying overlay side effect
+/// ([`InputEvent::EscapeKey`]), file I/O ([`InputEvent::FilesDropped`],
+/// [`InputEvent::OpenFileDialog`]), play-queue navigation
+/// ([`InputEvent::QueuePrevious`]/[`InputEvent::QueueNext`]), or an accompanying
+/// overlay side effect
 /// ([`InputEvent::StepFrameForward`]/[`InputEvent::StepFrameBackward`]). Those
 /// are handled directly in the loop.
 pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
@@ -60,8 +62,11 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         | InputEvent::StepFrameBackward
         | InputEvent::EscapeKey
         | InputEvent::BackspaceKey
-        | InputEvent::FileDropped(_)
+        | InputEvent::FilesDropped(_)
         | InputEvent::OpenFileDialog
+        // Play-queue navigation is handled by the event loop, which owns the queue.
+        | InputEvent::QueuePrevious
+        | InputEvent::QueueNext
         // Recent-files overlay events are handled by the event loop.
         | InputEvent::ToggleRecentOverlay
         | InputEvent::NavigateUp
@@ -193,9 +198,11 @@ mod tests {
         assert_eq!(command_for(&InputEvent::EscapeKey), None);
         assert_eq!(command_for(&InputEvent::BackspaceKey), None);
         assert_eq!(
-            command_for(&InputEvent::FileDropped(PathBuf::from("x.mp4"))),
+            command_for(&InputEvent::FilesDropped(vec![PathBuf::from("x.mp4")])),
             None
         );
         assert_eq!(command_for(&InputEvent::OpenFileDialog), None);
+        assert_eq!(command_for(&InputEvent::QueuePrevious), None);
+        assert_eq!(command_for(&InputEvent::QueueNext), None);
     }
 }

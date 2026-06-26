@@ -30,7 +30,14 @@ pub enum InputEvent {
     BackspaceKey,
     StepPlaybackRate(i8),
     ResetPlaybackRate,
-    FileDropped(PathBuf),
+    /// One or more files (or a folder) dropped onto the window in a single drop.
+    /// The event loop decides whether this becomes a single-file or multi-item
+    /// play queue.
+    FilesDropped(Vec<PathBuf>),
+    /// Manual play-queue navigation (PageUp / PageDown). Handled by the event
+    /// loop, which owns the queue; only acts when the queue has >1 item.
+    QueuePrevious,
+    QueueNext,
     PanDelta {
         dx: i32,
         dy: i32,
