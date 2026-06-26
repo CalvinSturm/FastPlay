@@ -123,12 +123,36 @@ pub struct PlaybackSession {
     pause_after_seek: bool,
     playback_rate: f64,
     clip_range: ClipRangeState,
+    /// One-shot "playback just reached its natural end" signal, consumed by the
+    /// event loop to drive play-queue auto-advance. See [`EndedSignal`].
+    ended_signal: EndedSignal,
     idle_pace_requested: bool,
     /// Audio sink buffered-frame count cached for the duration of one `tick`.
     /// `GetCurrentPadding` is a driver/COM call and the master clock is
     /// recomputed several times per tick; the value is stable across those
     /// reads because no audio is submitted between them.
     cached_buffered_frames: Cell<Option<u32>>,
+}
+
+/// A one-shot, edge-triggered "playback just ended" latch.
+///
+/// [`latch`](EndedSignal::latch) marks it on the single transition into the
+/// ended state; [`take`](EndedSignal::take) consumes it once and returns `false`
+/// thereafter until the next `latch`. This is what keeps play-queue auto-advance
+/// from firing every tick while the session sits in the ended state.
+#[derive(Default)]
+struct EndedSignal {
+    pending: bool,
+}
+
+impl EndedSignal {
+    fn latch(&mut self) {
+        self.pending = true;
+    }
+
+    fn take(&mut self) -> bool {
+        std::mem::take(&mut self.pending)
+    }
 }
 
 impl PlaybackSession {
@@ -196,6 +220,7 @@ impl PlaybackSession {
             pause_after_seek: false,
             playback_rate: 1.0,
             clip_range: ClipRangeState::new(),
+            ended_signal: EndedSignal::default(),
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
         })
@@ -307,6 +332,16 @@ impl PlaybackSession {
         self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
     }
 
+    /// Consume the edge-triggered "playback reached its natural end" signal.
+    /// Returns `true` exactly once per real transition into the ended state
+    /// (natural end-of-file, with no loop/auto-replay active), and `false` on
+    /// every later tick until another such transition. The event loop polls this
+    /// after `tick` to drive play-queue auto-advance without firing every frame
+    /// while the session sits in the ended state.
+    pub fn take_ended_signal(&mut self) -> bool {
+        self.ended_signal.take()
+    }
+
     /// Open `source`, beginning playback at `start_position` when given (used to
     /// resume a previously-watched file). `None` starts from the beginning.
     pub fn open_at(
@@ -318,6 +353,9 @@ impl PlaybackSession {
         let open_gen = self.generations.bump_open();
         let seek_gen = self.generations.seek();
         let op_id = self.operation_clock.next();
+        // A freshly opened file is not ended: discard any unconsumed signal so a
+        // stale latch can never auto-advance the new file.
+        self.ended_signal.take();
         self.decode_preference = source.decode_preference();
         self.overlay.subtitle_track = match SubtitleTrack::load_sidecar(&source) {
             Ok(track) => track,
@@ -786,6 +824,11 @@ impl PlaybackSession {
                 self.replay(now)?;
             } else {
                 self.state = PlaybackState::Ended;
+                // Natural end of the file with no loop/auto-replay active: latch
+                // the edge-triggered signal so the event loop can auto-advance to
+                // the next queued item. Deliberately NOT latched on the out-point
+                // clip-stop path (an intentional range end, not a natural EOF).
+                self.ended_signal.latch();
             }
         }
 
@@ -2293,8 +2336,38 @@ fn media_time_origin(first_pts: Duration, start_position: Duration) -> Duration 
 
 #[cfg(test)]
 mod tests {
-    use super::media_time_origin;
+    use super::{media_time_origin, EndedSignal};
     use std::time::Duration;
+
+    #[test]
+    fn ended_signal_fires_once_on_latch() {
+        let mut signal = EndedSignal::default();
+        assert!(!signal.take(), "no signal before any end");
+        signal.latch();
+        assert!(signal.take(), "fires once on the ended transition");
+    }
+
+    #[test]
+    fn ended_signal_is_consumed_and_does_not_repeat() {
+        let mut signal = EndedSignal::default();
+        signal.latch();
+        assert!(signal.take());
+        // While still "ended" (no new latch), later polls return false so
+        // auto-advance cannot fire every tick.
+        assert!(!signal.take());
+        assert!(!signal.take());
+    }
+
+    #[test]
+    fn ended_signal_relatches_on_a_new_transition() {
+        let mut signal = EndedSignal::default();
+        signal.latch();
+        assert!(signal.take());
+        assert!(!signal.take());
+        // A new real end-of-file transition latches again.
+        signal.latch();
+        assert!(signal.take());
+    }
 
     fn s(secs: u64) -> Duration {
         Duration::from_secs(secs)
