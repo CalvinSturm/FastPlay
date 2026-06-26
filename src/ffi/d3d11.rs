@@ -2207,6 +2207,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("Ctrl+F / B", "Step frame \u{00B1}1"),
         ("Ctrl+O", "Open media file"),
         ("Ctrl+Shift+O", "Recent files"),
+        ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),

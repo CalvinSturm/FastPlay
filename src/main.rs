@@ -26,10 +26,11 @@ mod platform;
 mod playback;
 mod render;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use app::commands::SessionCommand;
+use app::play_queue::PlayQueue;
 use app::recent::RecentFiles;
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
@@ -104,12 +105,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut current: Option<PathBuf> = None;
     // Recent overlay selection; `Some(index)` while the overlay is open.
     let mut recent_selected: Option<usize> = None;
+    // The play queue. Owned here, beside `RecentFiles`; `PlaybackSession` stays a
+    // single-file coordinator and is unaware of it. Empty until the first open.
+    let mut play_queue: PlayQueue = PlayQueue::from_paths(Vec::<PathBuf>::new());
 
     if let Some(source) = media_path {
-        open_media(
+        open_single_file(
             &mut session,
             &mut recent,
             &mut current,
+            &mut play_queue,
             source,
             Instant::now(),
         )?;
@@ -134,6 +139,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mut recent,
                     &mut recent_selected,
                     &mut current,
+                    &mut play_queue,
                     now,
                 )?;
                 continue;
@@ -190,26 +196,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         timeline_ui.cancel_scrub(&mut session, now)?;
                     }
                 }
-                InputEvent::FileDropped(path) => {
-                    open_media(
+                InputEvent::FilesDropped(paths) => {
+                    open_dropped_paths(
                         &mut session,
                         &mut recent,
                         &mut current,
-                        MediaSource::new(path),
+                        &mut play_queue,
+                        paths,
                         now,
                     )?;
                 }
                 InputEvent::OpenFileDialog => {
                     let hwnd = session.window().raw_window().hwnd();
                     if let Some(path) = show_open_file_dialog(hwnd) {
-                        open_media(
+                        open_single_file(
                             &mut session,
                             &mut recent,
                             &mut current,
+                            &mut play_queue,
                             MediaSource::new(path),
                             now,
                         )?;
                     }
+                }
+                InputEvent::QueuePrevious => {
+                    navigate_queue(
+                        &mut session,
+                        &mut recent,
+                        &mut current,
+                        &mut play_queue,
+                        QueueDirection::Previous,
+                        now,
+                    )?;
+                }
+                InputEvent::QueueNext => {
+                    navigate_queue(
+                        &mut session,
+                        &mut recent,
+                        &mut current,
+                        &mut play_queue,
+                        QueueDirection::Next,
+                        now,
+                    )?;
                 }
                 // All other events are context-free and handled by
                 // `command_for` above (or are Recent-overlay keys ignored while
@@ -330,6 +358,190 @@ fn open_media(
     Ok(())
 }
 
+/// Direction of a manual play-queue navigation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueueDirection {
+    Previous,
+    Next,
+}
+
+/// Status shown after a queue navigation opens a file.
+fn nav_opened_message(direction: QueueDirection, file_name: &str) -> String {
+    match direction {
+        QueueDirection::Previous => format!("Previous: {file_name}"),
+        QueueDirection::Next => format!("Next: {file_name}"),
+    }
+}
+
+/// Status shown when there is no item to navigate to in `direction`.
+fn nav_none_message(direction: QueueDirection) -> &'static str {
+    match direction {
+        QueueDirection::Previous => "No previous file",
+        QueueDirection::Next => "No next file",
+    }
+}
+
+/// Status shown when the candidate could not be opened; the cursor is unchanged.
+const OPEN_FAILED_MESSAGE: &str = "Open failed";
+
+/// Short display label for a path (its file name, or the whole path if none).
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| path.to_str().unwrap_or("(unknown)"))
+        .to_string()
+}
+
+/// How a single drop resolves into a queue. Owned (not borrowed) so callers can
+/// reuse the dropped paths freely. Classifying is pure aside from the `is_dir`
+/// probe, which lets a dropped folder become a multi-item queue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DropTarget {
+    /// Nothing usable was dropped.
+    Empty,
+    /// A single file: becomes a single-file queue.
+    SingleFile(PathBuf),
+    /// A single folder: becomes a multi-item queue from its media files.
+    Folder(PathBuf),
+    /// Several dropped paths: become a multi-item queue (filtered to media).
+    MultipleFiles(Vec<PathBuf>),
+}
+
+/// Classify the paths from one drop. A lone directory is a folder open; a lone
+/// file is a single open; anything else is a multi-file queue. Multi-file drops
+/// keep any folders in the list — [`PlayQueue::from_paths`] simply ignores
+/// non-media entries (recursive expansion is intentionally out of scope).
+fn classify_dropped_paths(paths: &[PathBuf]) -> DropTarget {
+    match paths {
+        [] => DropTarget::Empty,
+        [one] if one.is_dir() => DropTarget::Folder(one.clone()),
+        [one] => DropTarget::SingleFile(one.clone()),
+        many => DropTarget::MultipleFiles(many.to_vec()),
+    }
+}
+
+/// Open `source` as a fresh single-file queue. Used for every explicit single
+/// open (CLI argument, single drop, file dialog, Recent pick) so normal
+/// single-file behavior — including no parent-folder scan — is preserved.
+fn open_single_file(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    source: MediaSource,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = source.path().to_path_buf();
+    open_media(session, recent, current, source, now)?;
+    *play_queue = PlayQueue::single(path);
+    Ok(())
+}
+
+/// Make `queue` the active queue and open its first item. No-op (with a status
+/// message) when the queue has no playable media. Only replaces the live queue
+/// after the first open is initiated.
+fn open_queue(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    queue: PlayQueue,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match queue.current() {
+        Some(first) => {
+            let first = first.to_path_buf();
+            open_media(session, recent, current, MediaSource::new(first), now)?;
+            *play_queue = queue;
+        }
+        None => session.show_status_message("No playable media"),
+    }
+    Ok(())
+}
+
+/// Open whatever was dropped onto the window: a single file, a folder (whose
+/// media files form a queue), or several files (a multi-item queue).
+fn open_dropped_paths(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    paths: Vec<PathBuf>,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match classify_dropped_paths(&paths) {
+        DropTarget::Empty => {}
+        DropTarget::SingleFile(path) => {
+            open_single_file(
+                session,
+                recent,
+                current,
+                play_queue,
+                MediaSource::new(path),
+                now,
+            )?;
+        }
+        DropTarget::Folder(dir) => {
+            open_queue(
+                session,
+                recent,
+                current,
+                play_queue,
+                PlayQueue::from_folder(&dir),
+                now,
+            )?;
+        }
+        DropTarget::MultipleFiles(paths) => {
+            open_queue(
+                session,
+                recent,
+                current,
+                play_queue,
+                PlayQueue::from_paths(paths),
+                now,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Open the previous/next queue item using the same path as a normal open, so
+/// subtitles, resume, metrics, and in/out reset stay consistent.
+///
+/// Cursor discipline (see [`PlayQueue`]): look up the candidate *without* moving
+/// the cursor, open it, and only commit the move if the open is initiated. A
+/// missing candidate file leaves the cursor on the current item.
+fn navigate_queue(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    direction: QueueDirection,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let candidate = match direction {
+        QueueDirection::Previous => play_queue.previous_path(),
+        QueueDirection::Next => play_queue.next_path(),
+    };
+    let Some(candidate) = candidate.map(Path::to_path_buf) else {
+        session.show_status_message(nav_none_message(direction));
+        return Ok(());
+    };
+    if !candidate.exists() {
+        // The file moved or was deleted since enumeration: keep the cursor put.
+        session.show_status_message(OPEN_FAILED_MESSAGE);
+        return Ok(());
+    }
+    let label = file_label(&candidate);
+    open_media(session, recent, current, MediaSource::new(candidate), now)?;
+    match direction {
+        QueueDirection::Previous => play_queue.commit_previous(),
+        QueueDirection::Next => play_queue.commit_next(),
+    };
+    session.show_status_message(&nav_opened_message(direction, &label));
+    Ok(())
+}
+
 /// Handle an input event while the Recent overlay is open (it is modal).
 fn handle_recent_overlay_input(
     input: &InputEvent,
@@ -337,6 +549,7 @@ fn handle_recent_overlay_input(
     recent: &mut RecentFiles,
     selected: &mut Option<usize>,
     current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
     now: Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sel = selected.unwrap_or(0);
@@ -362,7 +575,14 @@ fn handle_recent_overlay_input(
                 if path.exists() {
                     session.clear_recent_overlay();
                     *selected = None;
-                    open_media(session, recent, current, MediaSource::new(path), now)?;
+                    open_single_file(
+                        session,
+                        recent,
+                        current,
+                        play_queue,
+                        MediaSource::new(path),
+                        now,
+                    )?;
                 } else {
                     // The file moved/was deleted: drop it and keep browsing.
                     recent.remove_index(sel);
@@ -436,4 +656,75 @@ fn parse_media_source_from_args() -> Result<Option<MediaSource>, Box<dyn std::er
             source
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn nav_messages_are_direction_specific() {
+        assert_eq!(
+            nav_opened_message(QueueDirection::Next, "ep2.mp4"),
+            "Next: ep2.mp4"
+        );
+        assert_eq!(
+            nav_opened_message(QueueDirection::Previous, "ep1.mp4"),
+            "Previous: ep1.mp4"
+        );
+        assert_eq!(nav_none_message(QueueDirection::Next), "No next file");
+        assert_eq!(
+            nav_none_message(QueueDirection::Previous),
+            "No previous file"
+        );
+    }
+
+    #[test]
+    fn file_label_uses_file_name() {
+        assert_eq!(
+            file_label(Path::new(r"C:\videos\My Clip.mkv")),
+            "My Clip.mkv"
+        );
+        assert_eq!(file_label(Path::new("bare.mp4")), "bare.mp4");
+    }
+
+    #[test]
+    fn classify_empty_drop() {
+        assert_eq!(classify_dropped_paths(&[]), DropTarget::Empty);
+    }
+
+    #[test]
+    fn classify_single_file_drop() {
+        let paths = vec![PathBuf::from("a.mp4")];
+        assert_eq!(
+            classify_dropped_paths(&paths),
+            DropTarget::SingleFile(PathBuf::from("a.mp4"))
+        );
+    }
+
+    #[test]
+    fn classify_multiple_file_drop() {
+        let paths = vec![PathBuf::from("a.mp4"), PathBuf::from("b.mkv")];
+        assert_eq!(
+            classify_dropped_paths(&paths),
+            DropTarget::MultipleFiles(paths.clone())
+        );
+    }
+
+    #[test]
+    fn classify_single_folder_drop() {
+        // A lone existing directory classifies as a folder open.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("fastplay_main_drop_{}_{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = vec![dir.clone()];
+        assert_eq!(
+            classify_dropped_paths(&paths),
+            DropTarget::Folder(dir.clone())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

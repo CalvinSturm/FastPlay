@@ -290,6 +290,23 @@ impl PlaybackSession {
         self.present_needed = true;
     }
 
+    /// Show a brief status message using the transient overlay — the same slot
+    /// and auto-timeout as the volume indicator. Used by the event loop for
+    /// play-queue navigation feedback. This is a render-only convenience (like
+    /// [`Self::show_recent_overlay`]); it adds no queue state to the coordinator.
+    pub fn show_status_message(&mut self, text: &str) {
+        if let Ok((viewport_width, viewport_height)) = self.presenter.viewport_size() {
+            if self
+                .presenter
+                .set_volume_overlay(Some(text), viewport_width, viewport_height)
+                .unwrap_or(false)
+            {
+                self.present_needed = true;
+            }
+        }
+        self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
+    }
+
     /// Open `source`, beginning playback at `start_position` when given (used to
     /// resume a previously-watched file). `None` starts from the beginning.
     pub fn open_at(
