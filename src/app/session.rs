@@ -646,11 +646,23 @@ impl PlaybackSession {
         )
     }
 
-    /// Orderly teardown before the session is dropped. Cancels and waits for any
-    /// decode worker (so no other thread holds a D3D11 device clone or touches
-    /// the immediate context), then releases GPU resources and idles the device.
-    /// Must run while the window HWND is still alive. Prevents the intermittent
-    /// use-after-free inside d3d11.dll when the device is destroyed at exit.
+    /// Stop the background workers before the process exits, *without* releasing
+    /// any D3D11/GPU resources.
+    ///
+    /// Joining the decode worker first guarantees no thread is executing inside
+    /// the graphics/codec drivers when the process subsequently calls
+    /// `ExitProcess` — otherwise a terminated worker holding a driver/loader
+    /// lock could deadlock the DLL-detach path.
+    ///
+    /// We deliberately do **not** tear down the swap chain, device, or
+    /// HW-decode surfaces here. Releasing them in-process at exit intermittently
+    /// faults inside the graphics driver (an access violation through a dangling
+    /// vtable), which hands an unhandled exception to Windows Error Reporting;
+    /// WER then freezes the still-visible window for several seconds while it
+    /// writes a multi-megabyte crash dump before the process dies — the "lag on
+    /// close". The caller [`crate::main`] flushes logs and then exits the
+    /// process, letting the OS reclaim every GPU resource instantly and
+    /// crash-free.
     pub fn shutdown(&mut self) {
         self.decode_thread.teardown(true);
         self.clear_video_queue();
@@ -659,7 +671,6 @@ impl PlaybackSession {
             let _ = sink.pause();
         }
         self.audio_sink = None;
-        self.presenter.prepare_for_shutdown();
     }
 
     fn tick_inner(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
