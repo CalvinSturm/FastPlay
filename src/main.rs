@@ -278,11 +278,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     save_current_progress(&session, &mut recent, &current, Instant::now());
     recent.save();
 
+    // Stop the background workers (decode + audio) so no thread is executing
+    // inside the graphics/codec drivers when we exit.
     session.window().clear_modal_tick();
-    // Tear down GPU/worker resources in a controlled order while the window
-    // HWND is still alive, before the session is dropped.
     session.shutdown();
-    Ok(())
+
+    // Flush the buffered trace, then hard-exit the process. We deliberately do
+    // NOT release the D3D11 device, swap chain, or HW-decode surfaces: doing so
+    // in-process at exit intermittently faults inside the graphics driver
+    // (access violation through a dangling vtable), which hands an unhandled
+    // exception to Windows Error Reporting. WER then freezes the still-visible
+    // window for several seconds while it writes a multi-megabyte crash dump
+    // before the process dies — the "lag on close". Letting the OS reclaim GPU
+    // resources on process teardown is instant and crash-free. State is
+    // persisted and workers are stopped above, so there is nothing left to do.
+    logging::dump_to_session_log();
+    std::process::exit(0);
 }
 
 /// Format a millisecond position as `m:ss` (or `h:mm:ss` past an hour).
