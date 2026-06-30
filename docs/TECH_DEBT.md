@@ -87,12 +87,11 @@ Remaining: it is local/optional and not yet wired into CI, so regressions are
 observable on demand but not automatically gated. Promote to CI once it is
 proven stable across machines.
 
-### R4 — Historical / loose working docs in the repo root
+### R4 — Historical / loose working docs — **resolved**
 
-Root-level files like `fastplay_audit_6.16.md`, `fastplay_phase 3.md`, and
-`implementation_plan.md` are point-in-time notes, not current guidance. They
-risk being mistaken for live docs. Low priority: consider moving to `docs/` or
-an archive folder. Not addressed in this pass to keep it small.
+Point-in-time audit and planning notes have been moved out of the repo root and
+archived under [`docs/audits/`](./audits/). They are now explicitly marked as
+historical context, not current guidance.
 
 ---
 
