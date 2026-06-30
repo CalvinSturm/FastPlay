@@ -4,7 +4,7 @@ FastPlay is a keyboard-first Windows video player for fast local playback, smoot
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-**[Download FastPlay v0.4.0 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.0/fastplay-0.4.0-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
+**[Download FastPlay v0.4.1 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.1/fastplay-0.4.1-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
