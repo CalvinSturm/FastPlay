@@ -213,6 +213,7 @@ impl DecodeSession {
         audio_output_format: AudioStreamFormat,
         start_position: Option<Duration>,
         decode_preference: VideoDecodePreference,
+        decode_audio: bool,
         io_cancel: Box<dyn Fn() -> bool>,
         should_cancel: &impl Fn() -> bool,
         on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
@@ -276,7 +277,15 @@ impl DecodeSession {
         if should_cancel() {
             return Ok(None);
         }
-        let audio = open_audio_decoder(input.0, audio_output_format)?;
+        // Audio can be handled by an independent [`AudioDecodeSession`] on its
+        // own thread so it is never gated behind slow (e.g. software-decoded
+        // 4K60) video work here. When `decode_audio` is false this session is
+        // video-only and emits no audio frames or audio-ended events.
+        let audio = if decode_audio {
+            open_audio_decoder(input.0, audio_output_format)?
+        } else {
+            None
+        };
         let audio_batch = audio
             .as_ref()
             .map(|audio| AudioBatcher::new(audio.output_format));
@@ -538,6 +547,217 @@ impl DecodeSession {
     }
 }
 
+/// An independent, audio-only decode session with its own `AVFormatContext`.
+///
+/// Runs on a dedicated worker thread in parallel with the video [`DecodeSession`]
+/// so audio decoding is never gated behind sub-realtime (e.g. software-decoded
+/// 4K60) video work on a shared worker. The two sessions share nothing except
+/// the seek target the coordinator hands each of them: late video frames are
+/// dropped at the presenter while this session keeps the audio sink fed.
+///
+/// Audio decode is cheap and never uses the GPU, so there is no hardware
+/// fallback and no D3D11 device involved here.
+pub(crate) struct AudioDecodeSession {
+    input: InputContext,
+    audio: AudioDecoder,
+    audio_batch: AudioBatcher,
+    packet: Packet,
+    frame: Frame,
+    produced_audio_frames: u64,
+    interrupt: Box<InterruptState>,
+}
+
+impl AudioDecodeSession {
+    /// Open `source` audio-only. Returns `Ok(None)` when the file has no audio
+    /// stream (the coordinator then simply runs without an audio worker) or when
+    /// cancellation was signalled during the open.
+    pub(crate) unsafe fn open(
+        source: &MediaSource,
+        audio_output_format: AudioStreamFormat,
+        start_position: Option<Duration>,
+        io_cancel: Box<dyn Fn() -> bool>,
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<Option<Self>, String> {
+        let source_path = source
+            .path()
+            .to_str()
+            .ok_or_else(|| "media path must be valid UTF-8 for FFmpeg open".to_string())?;
+        let source_cstr =
+            CString::new(source_path).map_err(|_| "media path contained NUL".to_string())?;
+
+        let format_context = fastplay_ffmpeg_alloc_context();
+        if format_context.is_null() {
+            return Err("avformat_alloc_context returned null".into());
+        }
+        let interrupt = Box::new(InterruptState::new(io_cancel));
+        fastplay_ffmpeg_set_interrupt(
+            format_context,
+            Some(ffmpeg_interrupt_callback),
+            (&*interrupt as *const InterruptState) as *mut c_void,
+        );
+
+        let mut format_context = format_context;
+        interrupt.set_deadline(Some(Instant::now() + OPEN_TIMEOUT));
+        check_blocking(
+            avformat_open_input(
+                &mut format_context,
+                source_cstr.as_ptr(),
+                null(),
+                null_mut(),
+            ),
+            "avformat_open_input(audio)",
+            &interrupt,
+        )?;
+        let input = InputContext(format_context);
+
+        interrupt.set_deadline(Some(Instant::now() + OPEN_TIMEOUT));
+        check_blocking(
+            avformat_find_stream_info(input.0, null_mut()),
+            "avformat_find_stream_info(audio)",
+            &interrupt,
+        )?;
+        interrupt.set_deadline(None);
+
+        if should_cancel() {
+            return Ok(None);
+        }
+
+        let Some(audio) = open_audio_decoder(input.0, audio_output_format)? else {
+            return Ok(None);
+        };
+        let audio_batch = AudioBatcher::new(audio.output_format);
+
+        if let Some(target) = start_position {
+            interrupt.set_deadline(Some(Instant::now() + SEEK_TIMEOUT));
+            seek_format_to_target(input.0, target)?;
+            fastplay_ffmpeg_flush_codec(audio.codec.0);
+            interrupt.set_deadline(None);
+        }
+
+        let packet = av_packet_alloc();
+        if packet.is_null() {
+            return Err("av_packet_alloc returned null".into());
+        }
+        let packet = Packet(packet);
+
+        let frame = av_frame_alloc();
+        if frame.is_null() {
+            return Err("av_frame_alloc returned null".into());
+        }
+        let frame = Frame(frame);
+
+        Ok(Some(Self {
+            input,
+            audio,
+            audio_batch,
+            packet,
+            frame,
+            produced_audio_frames: 0,
+            interrupt,
+        }))
+    }
+
+    /// Seek within the already-open file to `target` and flush the audio
+    /// decoder, without reopening anything. The next `run_to_eof` resumes from
+    /// here. Mirrors [`DecodeSession::seek`] for the audio-only worker so rapid
+    /// scrubbing reuses the open demuxer instead of reopening the file.
+    pub(crate) unsafe fn seek(&mut self, target: Duration) -> Result<(), String> {
+        self.interrupt
+            .set_deadline(Some(Instant::now() + SEEK_TIMEOUT));
+        let result = seek_format_to_target(self.input.0, target);
+        self.interrupt.set_deadline(None);
+        result?;
+        fastplay_ffmpeg_flush_codec(self.audio.codec.0);
+        // Drop any partial pre-seek audio batch so its stale first-sample pts
+        // cannot stamp post-seek audio (see AudioBatcher::reset).
+        self.audio_batch.reset();
+        Ok(())
+    }
+
+    /// Decode audio from the current position to end of stream, delivering
+    /// batched frames through `on_audio`. Returns `Cancelled` if cancellation
+    /// was signalled mid-stream.
+    pub(crate) unsafe fn run_to_eof(
+        &mut self,
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        should_cancel: &impl Fn() -> bool,
+        on_audio: &mut impl FnMut(PendingAudioFrame) -> Result<(), String>,
+    ) -> Result<StreamStatus, String> {
+        loop {
+            if should_cancel() {
+                return Ok(StreamStatus::Cancelled);
+            }
+            self.interrupt
+                .set_deadline(Some(Instant::now() + READ_TIMEOUT));
+            let read_status = av_read_frame(self.input.0, self.packet.0);
+            if read_status == fastplay_ffmpeg_error_eof() {
+                self.interrupt.set_deadline(None);
+                break;
+            }
+            check_blocking(read_status, "av_read_frame(audio)", &self.interrupt)?;
+            self.interrupt.set_deadline(None);
+
+            if (*self.packet.0).stream_index == self.audio.stream_index as i32 {
+                ffmpeg_check(
+                    avcodec_send_packet(self.audio.codec.0, self.packet.0),
+                    "avcodec_send_packet(audio)",
+                )?;
+                av_packet_unref(self.packet.0);
+                receive_audio_frames(
+                    &mut self.audio,
+                    self.frame.0,
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                    Some(&mut self.audio_batch),
+                    &mut self.produced_audio_frames,
+                    on_audio,
+                    &|| should_cancel(),
+                )?;
+            } else {
+                av_packet_unref(self.packet.0);
+            }
+        }
+
+        if should_cancel() {
+            return Ok(StreamStatus::Cancelled);
+        }
+        ffmpeg_check(
+            avcodec_send_packet(self.audio.codec.0, null()),
+            "avcodec_send_packet(audio flush)",
+        )?;
+        receive_audio_frames(
+            &mut self.audio,
+            self.frame.0,
+            open_gen,
+            seek_gen,
+            op_id,
+            Some(&mut self.audio_batch),
+            &mut self.produced_audio_frames,
+            on_audio,
+            &|| should_cancel(),
+        )?;
+        self.audio_batch.flush(
+            open_gen,
+            seek_gen,
+            op_id,
+            &mut self.produced_audio_frames,
+            on_audio,
+        )?;
+
+        Ok(StreamStatus::Completed(StreamSummary {
+            had_audio_stream: true,
+            produced_video_frames: 0,
+            produced_audio_frames: self.produced_audio_frames,
+            // Unused for the audio path; the audio worker never inspects it.
+            decode_mode: VideoDecodeMode::Software,
+            hw_fallback_count: 0,
+        }))
+    }
+}
+
 struct VideoDecoder {
     stream_index: usize,
     codec: CodecContext,
@@ -563,10 +783,10 @@ struct AudioDecoder {
     output_format: AudioStreamFormat,
 }
 
-unsafe fn seek_and_flush(
+/// Seek the format context to `target` (relative to the stream start time).
+/// Codec flushing is the caller's responsibility.
+unsafe fn seek_format_to_target(
     format_context: *mut AVFormatContext,
-    video: &VideoDecoder,
-    audio: Option<&AudioDecoder>,
     target: Duration,
 ) -> Result<(), String> {
     let target_micros = target.as_micros().min(i64::MAX as u128) as i64;
@@ -579,7 +799,17 @@ unsafe fn seek_and_flush(
     ffmpeg_check(
         fastplay_ffmpeg_seek_to_micros(format_context, absolute_target_micros),
         "av_seek_frame",
-    )?;
+    )
+    .map(|_| ())
+}
+
+unsafe fn seek_and_flush(
+    format_context: *mut AVFormatContext,
+    video: &VideoDecoder,
+    audio: Option<&AudioDecoder>,
+    target: Duration,
+) -> Result<(), String> {
+    seek_format_to_target(format_context, target)?;
     fastplay_ffmpeg_flush_codec(video.codec.0);
     if let Some(audio) = audio {
         fastplay_ffmpeg_flush_codec(audio.codec.0);

@@ -413,8 +413,21 @@ v1 keeps the thread model small.
 ### Threads
 
 * UI/render thread
-* demux/decode worker(s)
-* audio worker or sink thread as required by implementation
+* video demux/decode worker
+* independent audio demux/decode worker (own `AVFormatContext`)
+
+### Independent audio worker
+
+Audio is decoded on its **own** demuxer/thread, separate from the video
+demux/decode worker. Some files cannot use D3D11VA/NVDEC hardware decode — e.g.
+true H.264 **Baseline** profile at 4K60, which the hardware rejects — and fall
+back to software video decode that runs *below* realtime. A single worker
+demuxing both streams in file order then produces audio only as fast as the
+slow video, starving the WASAPI sink (choppy audio). Keeping audio on an
+independent worker protects it from video decode stalls: audio stays realtime
+while heavy/late video degrades by **dropping/lagging video frames** at the
+presenter (per §15), never by starving audio. Both workers seek in place via
+their own `DecodeControl` and stamp frames with generations for stale-drop.
 
 ### Hard rule
 
