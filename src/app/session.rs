@@ -29,7 +29,7 @@ use crate::{
     ffi::{
         d3d11::BgraFrameCapture,
         dxgi::{ModalTickTarget, NativeWindowInner, ResizeRequest},
-        ffmpeg::{self, DecodeSession, StreamStatus},
+        ffmpeg::{self, AudioDecodeSession, DecodeSession, StreamStatus},
     },
     media::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
@@ -40,6 +40,7 @@ use crate::{
     },
     platform::window::NativeWindow,
     playback::{
+        audio_diag::AudioDiag,
         clock::PlaybackClock,
         decode_control::{DecodeCommand, DecodeControl},
         generations::{
@@ -56,6 +57,19 @@ const MAX_OBSERVED_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_FRAME_STEP: Duration = Duration::from_nanos(33_333_333);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
 const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
+
+/// Decrements a live decode-worker counter on every exit path (normal, error,
+/// or panic), so a blocking teardown can wait for the worker to fully release
+/// its resources. Used by the audio worker; the video worker has an equivalent
+/// inline guard.
+struct WorkerExitGuard(Arc<AtomicU32>);
+
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        let remaining = self.0.fetch_sub(1, Ordering::Release).saturating_sub(1);
+        crate::flog!("[audio_thread_exit] workers_remaining={}", remaining);
+    }
+}
 
 struct QueuedAudioFrame {
     frame: DecodedAudioFrame,
@@ -81,6 +95,13 @@ pub struct PlaybackSession {
     /// Persistent decode worker lifecycle (control channel, preference,
     /// live-worker count, join handle). See [`DecodeThreadHandle`].
     decode_thread: DecodeThreadHandle,
+    /// Handle to the independent audio-only decode worker. Audio is decoded on
+    /// its own thread with its own demuxer so it is never gated behind
+    /// sub-realtime video work (e.g. software-decoded 4K60), which would
+    /// otherwise starve the audio sink and cause choppy audio. Respawned per
+    /// open/seek rather than seeked in place (audio open is cheap and uses no
+    /// GPU device).
+    audio_decode_thread: DecodeThreadHandle,
     /// Worker→UI channel for video frames and all control/error events.
     event_tx: SyncSender<SessionEvent>,
     event_rx: Receiver<SessionEvent>,
@@ -132,6 +153,9 @@ pub struct PlaybackSession {
     /// recomputed several times per tick; the value is stable across those
     /// reads because no audio is submitted between them.
     cached_buffered_frames: Cell<Option<u32>>,
+    /// Opt-in audio-pipeline diagnostics (env `FASTPLAY_AUDIO_DIAG`). No-op when
+    /// disabled; never on the always-on path.
+    audio_diag: AudioDiag,
 }
 
 /// A one-shot, edge-triggered "playback just ended" latch.
@@ -186,6 +210,7 @@ impl PlaybackSession {
             current_source: None,
             decode_preference: VideoDecodePreference::Auto,
             decode_thread: DecodeThreadHandle::new(),
+            audio_decode_thread: DecodeThreadHandle::new(),
             event_tx,
             event_rx,
             audio_event_tx,
@@ -223,6 +248,7 @@ impl PlaybackSession {
             ended_signal: EndedSignal::default(),
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
+            audio_diag: AudioDiag::from_env(),
         })
     }
 
@@ -665,6 +691,7 @@ impl PlaybackSession {
     /// crash-free.
     pub fn shutdown(&mut self) {
         self.decode_thread.teardown(true);
+        self.audio_decode_thread.teardown(true);
         self.clear_video_queue();
         self.queued_audio_frames.clear();
         if let Some(sink) = self.audio_sink.as_mut() {
@@ -675,6 +702,7 @@ impl PlaybackSession {
 
     fn tick_inner(&mut self, now: Instant) -> Result<(), Box<dyn std::error::Error>> {
         self.idle_pace_requested = false;
+        self.audio_diag.note_tick_start(now);
         // Invalidate the per-tick audio-buffer cache; it is repopulated by the
         // first WASAPI query within this tick and reused thereafter.
         self.cached_buffered_frames.set(None);
@@ -735,8 +763,26 @@ impl PlaybackSession {
                 self.handle_resize(size, now)?;
             }
 
-            self.submit_due_audio(now)?;
+            if self.audio_diag.enabled() {
+                let t = Instant::now();
+                self.submit_due_audio(now)?;
+                self.audio_diag.note_submit(t.elapsed());
+                // Sample the decoded-audio backlog and WASAPI buffer right after
+                // submission (submit_due_audio populated the buffered cache).
+                let buffered = self.cached_buffered_frames.get().unwrap_or(0);
+                let started = self.audio_sink.as_ref().is_some_and(|s| s.is_started());
+                self.audio_diag
+                    .sample(self.queued_audio_frames.len(), buffered, started);
+            } else {
+                self.submit_due_audio(now)?;
+            }
             if self.advance_video_playback(now)? {
+                self.audio_diag.maybe_flush(
+                    now,
+                    self.metrics.audio_underruns(),
+                    self.metrics.presented_video_frames(),
+                    self.metrics.dropped_video_frames(),
+                );
                 return Ok(());
             }
             self.update_subtitle_overlay(now)?;
@@ -759,7 +805,12 @@ impl PlaybackSession {
                         result
                     })
             } else {
-                self.presenter.render(&view)
+                let present_timer = self.audio_diag.enabled().then(Instant::now);
+                let result = self.presenter.render(&view);
+                if let Some(t) = present_timer {
+                    self.audio_diag.note_present(t.elapsed());
+                }
+                result
             };
             match render_result {
                 Ok(crate::ffi::dxgi::PresentResult::Ok) => {
@@ -843,6 +894,12 @@ impl PlaybackSession {
             }
         }
 
+        self.audio_diag.maybe_flush(
+            now,
+            self.metrics.audio_underruns(),
+            self.metrics.presented_video_frames(),
+            self.metrics.dropped_video_frames(),
+        );
         Ok(())
     }
 
@@ -1121,17 +1178,36 @@ impl PlaybackSession {
         self.active_operation_id = Some(op_id);
         self.last_error = None;
         if self.decode_thread.serves(self.decode_preference) {
-            // Reuse the open file: tell the running thread to seek in place.
-            // Bumping seek_gen above already gates out its old in-flight frames.
-            // `serves` implies a live control; if it is somehow absent, skip
-            // rather than panic — the next operation will respawn a worker.
+            // Reuse the open file: tell the running video thread to seek in
+            // place. Bumping seek_gen above already gates out its old in-flight
+            // frames. `serves` implies a live control; if it is somehow absent,
+            // skip rather than panic — the next operation will respawn a worker.
             if let Some(control) = self.decode_thread.control() {
                 control.send_seek(absolute_target, seek_gen, op_id);
             }
         } else {
             // No thread, or the decode preference changed (HW↔SW): reopen.
             self.decode_thread.teardown(false);
-            self.spawn_decode_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
+            self.spawn_decode_thread(
+                source.clone(),
+                Some(absolute_target),
+                open_gen,
+                seek_gen,
+                op_id,
+            );
+        }
+        // Audio seeks in place on its own persistent worker (no reopen), exactly
+        // like the video worker above — so rapid scrubbing never churns the
+        // audio demuxer. Stale pre-seek audio carries the old seek_gen and is
+        // dropped by the coordinator's generation check. Respawn only if no
+        // audio worker is alive (e.g. it exited after an open/decode error).
+        if self.audio_decode_thread.control().is_some() {
+            if let Some(control) = self.audio_decode_thread.control() {
+                control.send_seek(absolute_target, seek_gen, op_id);
+            }
+        } else {
+            self.audio_decode_thread.teardown(false);
+            self.spawn_audio_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
         }
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
@@ -1157,11 +1233,13 @@ impl PlaybackSession {
         // exits promptly on the shutdown signal; recover_device waits explicitly
         // before rebuilding the device.
         self.decode_thread.teardown(false);
+        self.audio_decode_thread.teardown(false);
         self.prepare_runtime_for_operation(rebuild_audio_sink, reset_audio_expectation)?;
         self.state = next_state;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        self.spawn_decode_thread(source, start_position, open_gen, seek_gen, op_id);
+        self.spawn_decode_thread(source.clone(), start_position, open_gen, seek_gen, op_id);
+        self.spawn_audio_thread(source, start_position, open_gen, seek_gen, op_id);
         Ok(())
     }
 
@@ -1345,6 +1423,9 @@ impl PlaybackSession {
                     audio_format,
                     start_position,
                     decode_preference,
+                    // Audio is decoded by the independent audio worker (see
+                    // `spawn_audio_thread`); this worker is video-only.
+                    false,
                     io_cancel,
                     &cancelled,
                     &mut |mode, hw_fallback_count, rotation_quarter_turns| {
@@ -1531,6 +1612,174 @@ impl PlaybackSession {
         self.decode_thread.set_join(handle);
     }
 
+    /// Spawn the persistent, independent audio-only decode worker for `source`,
+    /// decoding from `start_position` and stamping frames with the given
+    /// generations.
+    ///
+    /// ## Why a separate audio worker exists
+    ///
+    /// Some files cannot use D3D11VA/NVDEC hardware decode — e.g. true H.264
+    /// **Baseline** profile at 4K60, which the hardware rejects — and fall back
+    /// to software video decode that runs *below* realtime. With a single worker
+    /// demuxing and decoding both streams sequentially, audio was produced only
+    /// as fast as the slow video, starving the WASAPI sink and causing choppy
+    /// audio. Decoding audio on its own demuxer/thread keeps the audio sink fed
+    /// at realtime regardless of video decode speed; when video can't keep up it
+    /// simply lags and the presenter drops late *video* frames (see
+    /// [`Self::advance_video_playback`]), never the audio.
+    ///
+    /// ## Lifecycle
+    ///
+    /// Mirrors the video worker: it decodes to EOF, then parks on
+    /// [`DecodeControl::wait_next`] for an in-place [`DecodeCommand::Seek`] (so
+    /// rapid scrubbing reuses the open demuxer instead of reopening the file) or
+    /// [`DecodeCommand::Shutdown`]. It uses no GPU device, so there is no
+    /// hardware fallback to coordinate. Audio-side failures degrade to silent
+    /// (no audio) rather than failing the whole playback, and still emit
+    /// `AudioStreamEnded` so end-of-playback can complete. Stale frames from a
+    /// superseded seek carry the old generations and are dropped by the
+    /// coordinator's `is_current_frame` check.
+    fn spawn_audio_thread(
+        &mut self,
+        source: Arc<MediaSource>,
+        start_position: Option<Duration>,
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+    ) {
+        let audio_sender = self.audio_event_tx.clone();
+        let audio_format = self
+            .audio_sink
+            .as_ref()
+            .map(|sink| sink.format())
+            .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
+        let control = Arc::new(DecodeControl::new());
+        // Preference is irrelevant for audio (no hardware path); the handle is
+        // tracked so the coordinator can send in-place seeks and shutdown.
+        let worker_count = self
+            .audio_decode_thread
+            .prepare_spawn(control.clone(), VideoDecodePreference::Auto);
+
+        let handle = thread::spawn(move || {
+            let _guard = WorkerExitGuard(worker_count);
+
+            // (seek_gen, op_id) the worker currently decodes for; updated on each
+            // seek command so produced frames carry the right stamps.
+            let gen_cell = Cell::new((seek_gen, op_id));
+            // The command sequence the worker is currently serving.
+            let serving = Cell::new(0u64);
+            // A newer command arrived (or shutdown): abort the in-flight decode.
+            let cancelled = || control.seq() != serving.get() || control.is_shutdown();
+            let worker_send =
+                |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
+                    let mut event = event;
+                    let mut full_retries: u32 = 0;
+                    loop {
+                        match tx.try_send(event) {
+                            Ok(()) => return Ok(()),
+                            Err(TrySendError::Full(returned)) => {
+                                if cancelled() {
+                                    return Err(WORKER_CANCELLED.to_string());
+                                }
+                                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
+                                full_retries = full_retries.saturating_add(1);
+                                thread::sleep(Duration::from_millis(sleep_ms));
+                                event = returned;
+                            }
+                            Err(TrySendError::Disconnected(_)) => {
+                                return Err(WORKER_CANCELLED.to_string());
+                            }
+                        }
+                    }
+                };
+
+            let io_cancel: Box<dyn Fn() -> bool> = {
+                let control = control.clone();
+                Box::new(move || control.is_shutdown())
+            };
+
+            let mut session = match unsafe {
+                AudioDecodeSession::open(
+                    &source,
+                    audio_format,
+                    start_position,
+                    io_cancel,
+                    &cancelled,
+                )
+            } {
+                // No audio stream, or cancelled during open: nothing to do.
+                Ok(None) => return,
+                Ok(Some(session)) => session,
+                Err(error) => {
+                    if !control.is_shutdown() {
+                        flog!("[audio_worker] open failed (continuing without audio): {error}");
+                    }
+                    return;
+                }
+            };
+
+            let mut on_audio =
+                |frame| worker_send(SessionEvent::AudioFrameReady(frame), &audio_sender);
+
+            // Persistent decode loop: decode to EOF, then block for the next
+            // seek command (or shutdown). A seek arriving mid-decode trips
+            // `cancelled`, aborting `run_to_eof` so the new target is applied via
+            // an in-place `seek` without reopening the file.
+            loop {
+                let (cur_seek_gen, cur_op_id) = gen_cell.get();
+                let result = unsafe {
+                    session.run_to_eof(open_gen, cur_seek_gen, cur_op_id, &cancelled, &mut on_audio)
+                };
+                if control.is_shutdown() {
+                    break;
+                }
+                // Announce end-of-audio so the coordinator's end-of-playback
+                // check can complete — but only if no newer command superseded
+                // this run. A mid-stream decode error degrades to "audio stopped
+                // here" rather than failing video.
+                let announce_end = match result {
+                    Ok(StreamStatus::Completed(_)) => true,
+                    Ok(StreamStatus::Cancelled) => false,
+                    Err(ref error) if error == WORKER_CANCELLED => false,
+                    Err(error) => {
+                        flog!("[audio_worker] decode error (audio stopped): {error}");
+                        true
+                    }
+                };
+                if announce_end && control.seq() == serving.get() {
+                    let (seek_gen, op_id) = gen_cell.get();
+                    let _ = worker_send(
+                        SessionEvent::AudioStreamEnded {
+                            open_gen,
+                            seek_gen,
+                            op_id,
+                        },
+                        &audio_sender,
+                    );
+                }
+
+                let (command, new_seq) = control.wait_next();
+                match command {
+                    DecodeCommand::Shutdown => break,
+                    DecodeCommand::Seek {
+                        target,
+                        seek_gen,
+                        op_id,
+                    } => {
+                        serving.set(new_seq);
+                        gen_cell.set((seek_gen, op_id));
+                        if let Err(error) = unsafe { session.seek(target) } {
+                            if !control.is_shutdown() {
+                                flog!("[audio_worker] seek failed (audio stopped): {error}");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.audio_decode_thread.set_join(handle);
+    }
+
     fn handle_resize(
         &mut self,
         size: ResizeRequest,
@@ -1590,6 +1839,7 @@ impl PlaybackSession {
                 if written == 0 {
                     break;
                 }
+                self.audio_diag.add_frames_written(written);
 
                 if first_written_pts.is_none() {
                     let offset = Duration::from_secs_f64(
@@ -1641,6 +1891,8 @@ impl PlaybackSession {
             && !self.can_finish_with_buffered(0)?
         {
             self.metrics.note_audio_underrun();
+            self.audio_diag
+                .note_underrun(self.queued_audio_frames.len(), buffered);
             // Audio drained dry. Capture the current position *before* clearing
             // the anchor, then hand the master clock to a video clock seeded at
             // that position. Without this, master_clock_position falls through
@@ -2229,6 +2481,7 @@ impl PlaybackSession {
 
     fn fail_open(&mut self, error: String) {
         self.decode_thread.teardown(false);
+        self.audio_decode_thread.teardown(false);
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
@@ -2239,6 +2492,7 @@ impl PlaybackSession {
 
     fn fail_playback(&mut self, error: String) {
         self.decode_thread.teardown(false);
+        self.audio_decode_thread.teardown(false);
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
