@@ -1,8 +1,8 @@
 # <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
 
-FastPlay is a keyboard-first Windows video player for fast local playback, smooth scrubbing, and ergonomic control across monitors.
+FastPlay is a fast, lightweight native Windows video player focused on local playback, responsive seeking, hardware-accelerated decode, and simple controls.
 
-It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
+It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, smooth scrubbing, clean playback, responsive controls, and a tighter Windows-native experience.
 
 **[Download FastPlay v0.4.1 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.1/fastplay-0.4.1-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
 
@@ -33,6 +33,12 @@ Where FastPlay differs is scope and intent:
 | Render path | D3D11-first, GPU-resident | Multiple backends | DirectShow / madVR etc. |
 
 Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. Reach for FastPlay when you want a snappy, no-friction window for the local file in front of you.
+
+## Benchmarks
+
+FastPlay is built for fast local playback: low open-to-first-frame latency and responsive seeking. It records in-app playback metrics (open-to-frame latency, seek latency, dropped frames), and the benchmark corpus and scripts live under [`bench/`](bench/).
+
+Measured cross-player comparisons are still pending, so FastPlay does not claim to be the "fastest" video player — that requires published benchmark data. Tracking page: [FastPlay benchmarks](https://calvinsturm.github.io/FastPlay/benchmarks/).
 
 ## Controls
 
