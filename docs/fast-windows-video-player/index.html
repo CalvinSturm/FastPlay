@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fast Windows Video Player - FastPlay</title>
+    <meta name="description" content="FastPlay is a fast Windows video player for local playback, with quick startup, responsive seeking, hardware-accelerated decode, and a lightweight native interface.">
+    <meta name="author" content="Calvin Sturm">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://calvinsturm.github.io/FastPlay/fast-windows-video-player/">
+
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Fast Windows Video Player - FastPlay">
+    <meta property="og:description" content="A fast Windows video player for local playback, with quick startup, responsive seeking, and hardware-accelerated decode.">
+    <meta property="og:url" content="https://calvinsturm.github.io/FastPlay/fast-windows-video-player/">
+    <meta property="og:site_name" content="FastPlay">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Fast Windows Video Player - FastPlay">
+    <meta name="twitter:description" content="A fast Windows video player for local playback, with quick startup, responsive seeking, and hardware-accelerated decode.">
+
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "FastPlay",
+        "applicationCategory": "MultimediaApplication",
+        "operatingSystem": "Windows 10, Windows 11",
+        "description": "FastPlay is a fast Windows video player for local playback, with quick startup, responsive seeking, hardware-accelerated decode, and simple controls.",
+        "softwareVersion": "0.4.1",
+        "author": { "@type": "Person", "name": "Calvin Sturm" },
+        "license": "https://opensource.org/licenses/MIT",
+        "programmingLanguage": "Rust",
+        "codeRepository": "https://github.com/CalvinSturm/FastPlay",
+        "downloadUrl": "https://github.com/CalvinSturm/FastPlay/releases/latest",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+    }
+    </script>
+
+    <link rel="stylesheet" href="../site.css">
+</head>
+<body>
+
+<nav>
+    <div class="container">
+        <a class="nav-brand" href="../">FastPlay</a>
+        <ul class="nav-links">
+            <li><a href="../">Home</a></li>
+            <li><a href="../benchmarks/">Benchmarks</a></li>
+            <li><a href="https://github.com/CalvinSturm/FastPlay">GitHub</a></li>
+        </ul>
+    </div>
+</nav>
+
+<header class="hero">
+    <div class="container">
+        <h1>Fast Windows video player for <span>local playback</span></h1>
+        <p class="lead">FastPlay is a fast, lightweight native Windows video player built for local playback, smooth scrubbing, hardware-accelerated decode, and responsive controls.</p>
+        <div class="actions">
+            <a class="btn btn-primary" href="https://github.com/CalvinSturm/FastPlay/releases/latest">Download FastPlay for Windows</a>
+            <a class="btn btn-secondary" href="https://github.com/CalvinSturm/FastPlay">View Source on GitHub</a>
+        </div>
+    </div>
+</header>
+
+<section class="content">
+    <div class="container">
+        <h2>A faster way to open and watch local files</h2>
+        <p>Most of the time you open a video player, you are not managing a library or transcoding a stream. You are opening one local file and watching it. FastPlay is built around that single moment: how fast the file opens, how quickly the first frame appears, whether it resumes where you left off, and how cleanly it scrubs.</p>
+        <p>It is a fast Windows media player focused on local files, designed to open local videos quickly and seek responsively, with hardware-accelerated playback and a software fallback.</p>
+
+        <h3>What makes it fast</h3>
+        <ul class="bullets">
+            <li>Native Windows playback built in Rust</li>
+            <li>FFmpeg demux and decode for common local formats</li>
+            <li>D3D11 hardware decode with GPU-resident DXGI presentation</li>
+            <li>Responsive seeking with stale-work dropping during scrubs</li>
+            <li>WASAPI audio with an independent audio decode worker</li>
+            <li>Bounded queues and an explicit state machine, no plugin maze</li>
+        </ul>
+
+        <div class="note">FastPlay is designed for fast local playback. &ldquo;Fastest video player&rdquo; claims require measured comparisons &mdash; see the <a href="../benchmarks/">FastPlay benchmarks</a> page.</div>
+
+        <h3>Explore more</h3>
+        <p class="intent-links">
+            <a href="../play-videos-fast/">Play videos fast on Windows</a> &middot;
+            <a href="../lightweight-video-player/">Lightweight video player for Windows</a> &middot;
+            <a href="../vlc-alternative/">VLC alternative for Windows</a> &middot;
+            <a href="../">FastPlay home</a>
+        </p>
+    </div>
+</section>
+
+<footer>
+    <div class="container">
+        <p>FastPlay by <a href="https://github.com/CalvinSturm">Calvin Sturm</a> &middot; <a href="https://github.com/CalvinSturm/FastPlay">Source on GitHub</a> &middot; MIT License</p>
+    </div>
+</footer>
+
+</body>
+</html>

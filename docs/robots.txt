@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://calvinsturm.github.io/FastPlay/sitemap.xml
