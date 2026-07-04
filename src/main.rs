@@ -21,6 +21,7 @@ mod logging;
 mod app;
 mod audio;
 mod ffi;
+mod license;
 mod media;
 mod platform;
 mod playback;
@@ -32,8 +33,12 @@ use std::time::{Duration, Instant};
 use app::commands::SessionCommand;
 use app::play_queue::PlayQueue;
 use app::recent::RecentFiles;
+use app::review_markers::{
+    default_export_directory, format_marker_timestamp_ms, MarkerExportFormat, ReviewMarkers,
+};
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
+use license::LicenseState;
 use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
 use platform::input::InputEvent;
 use platform::open_dialog::show_open_file_dialog;
@@ -95,16 +100,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let window = NativeWindow::create("FastPlay", 1280, 720)?;
     let mut session = PlaybackSession::new(window)?;
     let mut timeline_ui = TimelineUiState::new();
+    let license = LicenseState::detect();
 
     ffi::dxgi::install_modal_tick(&mut session);
 
     // Shared backend for the Recent overlay and resume-on-open.
     let mut recent = RecentFiles::load();
+    let mut review_markers = ReviewMarkers::load();
     // Path of the currently-open file, so its progress can be saved when we
     // switch files or exit. `None` until the first file opens.
     let mut current: Option<PathBuf> = None;
     // Recent overlay selection; `Some(index)` while the overlay is open.
     let mut recent_selected: Option<usize> = None;
+    // Marker overlay selection; `Some(index)` while the overlay is open.
+    let mut marker_selected: Option<usize> = None;
     // The play queue. Owned here, beside `RecentFiles`; `PlaybackSession` stays a
     // single-file coordinator and is unaware of it. Empty until the first open.
     let mut play_queue: PlayQueue = PlayQueue::from_paths(Vec::<PathBuf>::new());
@@ -144,9 +153,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 continue;
             }
+            if marker_selected.is_some() {
+                handle_marker_overlay_input(
+                    &input,
+                    &license,
+                    &mut session,
+                    &mut review_markers,
+                    &mut marker_selected,
+                    now,
+                )?;
+                continue;
+            }
             if matches!(input, InputEvent::ToggleRecentOverlay) {
                 recent_selected = Some(0);
                 show_recent_overlay(&mut session, &recent, 0)?;
+                continue;
+            }
+            if matches!(input, InputEvent::ToggleMarkerOverlay) {
+                toggle_marker_overlay(
+                    &license,
+                    &mut session,
+                    &review_markers,
+                    &mut marker_selected,
+                )?;
+                continue;
+            }
+            if matches!(input, InputEvent::AddMarker) {
+                add_marker_at_current_position(
+                    &license,
+                    &mut session,
+                    &mut review_markers,
+                    &marker_selected,
+                    now,
+                )?;
                 continue;
             }
 
@@ -331,6 +370,140 @@ fn show_recent_overlay(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rows = recent_rows(recent);
     session.show_recent_overlay(&rows, selected)
+}
+
+const PRO_REVIEW_UPSELL: &str =
+    "FastPlay Pro unlocks review tools: saved queues, timestamp markers, marker notes, exports, and batch screenshots. Playback stays free.";
+
+fn marker_rows(markers: &ReviewMarkers, current: Option<&Path>) -> Vec<(String, String)> {
+    let Some(path) = current else {
+        return Vec::new();
+    };
+    markers
+        .markers_for(path)
+        .iter()
+        .enumerate()
+        .map(|(index, marker)| {
+            let label = marker
+                .note
+                .as_deref()
+                .filter(|note| !note.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Marker {}", index + 1));
+            (label, format_marker_timestamp_ms(marker.timestamp_ms))
+        })
+        .collect()
+}
+
+fn show_marker_overlay(
+    session: &mut PlaybackSession,
+    markers: &ReviewMarkers,
+    selected: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let rows = marker_rows(markers, session.current_media_path());
+    let selected = if rows.is_empty() {
+        0
+    } else {
+        selected.min(rows.len() - 1)
+    };
+    session.show_marker_overlay(&rows, selected)?;
+    Ok(selected)
+}
+
+fn toggle_marker_overlay(
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    markers: &ReviewMarkers,
+    selected: &mut Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !license.can_save_markers() {
+        session.show_status_message(PRO_REVIEW_UPSELL);
+        return Ok(());
+    }
+    if session.current_media_path().is_none() {
+        session.show_status_message("Open a file to use review markers");
+        return Ok(());
+    }
+    let next = show_marker_overlay(session, markers, selected.unwrap_or(0))?;
+    *selected = Some(next);
+    Ok(())
+}
+
+fn add_marker_at_current_position(
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    markers: &mut ReviewMarkers,
+    marker_selected: &Option<usize>,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !license.can_save_markers() {
+        session.show_status_message(PRO_REVIEW_UPSELL);
+        return Ok(());
+    }
+    let Some(path) = session.current_media_path().map(Path::to_path_buf) else {
+        session.show_status_message("Open a file to add a marker");
+        return Ok(());
+    };
+    let timestamp_ms = session.snapshot(now).position.as_millis() as u64;
+    markers.add_marker(&path, timestamp_ms);
+    markers.save();
+    session.show_status_message(&format!(
+        "Marker added {}",
+        format_marker_timestamp_ms(timestamp_ms)
+    ));
+    if let Some(selected) = marker_selected {
+        let _ = show_marker_overlay(session, markers, *selected)?;
+    }
+    Ok(())
+}
+
+fn export_current_markers(
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    markers: &ReviewMarkers,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !license.can_export_markers() {
+        session.show_status_message(PRO_REVIEW_UPSELL);
+        return Ok(());
+    }
+    let Some(path) = session.current_media_path().map(Path::to_path_buf) else {
+        session.show_status_message("Open a file to export markers");
+        return Ok(());
+    };
+    if markers.markers_for(&path).is_empty() {
+        session.show_status_message("No markers to export");
+        return Ok(());
+    }
+    let directory = default_export_directory()?;
+    let txt = markers.export_for_file(&path, &directory, MarkerExportFormat::Txt)?;
+    let csv = markers.export_for_file(&path, &directory, MarkerExportFormat::Csv)?;
+    flog!(
+        "markers_exported txt={} csv={}",
+        txt.display(),
+        csv.display()
+    );
+    session.show_status_message("Markers exported to Pictures\\FastPlay");
+    Ok(())
+}
+
+fn batch_marker_screenshots(
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    markers: &ReviewMarkers,
+) {
+    if !license.can_batch_export_marker_screenshots() {
+        session.show_status_message(PRO_REVIEW_UPSELL);
+        return;
+    }
+    let Some(path) = session.current_media_path() else {
+        session.show_status_message("Open a file to batch export marker screenshots");
+        return;
+    };
+    if markers.markers_for(path).is_empty() {
+        session.show_status_message("No markers to capture");
+        return;
+    }
+    session.show_status_message("Batch marker screenshots are not available yet");
 }
 
 /// Save the current file's playback position into the recent history. No-op
@@ -678,6 +851,65 @@ fn handle_recent_overlay_input(
             refresh_after_remove(session, recent, selected, sel)?;
         }
         // Any other key is swallowed while the overlay is modal.
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_marker_overlay_input(
+    input: &InputEvent,
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    markers: &mut ReviewMarkers,
+    selected: &mut Option<usize>,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sel = selected.unwrap_or(0);
+    match input {
+        InputEvent::ToggleMarkerOverlay | InputEvent::EscapeKey => {
+            session.clear_marker_overlay();
+            *selected = None;
+        }
+        InputEvent::NavigateUp => {
+            let s = sel.saturating_sub(1);
+            *selected = Some(show_marker_overlay(session, markers, s)?);
+        }
+        InputEvent::NavigateDown => {
+            let len = marker_rows(markers, session.current_media_path()).len();
+            let s = if len == 0 { 0 } else { (sel + 1).min(len - 1) };
+            *selected = Some(show_marker_overlay(session, markers, s)?);
+        }
+        InputEvent::Confirm => {
+            if let Some(path) = session.current_media_path() {
+                if let Some(marker) = markers.markers_for(path).get(sel) {
+                    let target = Duration::from_millis(marker.timestamp_ms);
+                    session.apply_command(SessionCommand::Seek(SeekTarget::new(target)), now)?;
+                }
+            }
+        }
+        InputEvent::RemoveSelected => {
+            if !license.can_save_markers() {
+                session.show_status_message(PRO_REVIEW_UPSELL);
+                return Ok(());
+            }
+            if let Some(path) = session.current_media_path().map(Path::to_path_buf) {
+                if markers.remove_for_file_index(&path, sel) {
+                    markers.save();
+                    let s = show_marker_overlay(session, markers, sel)?;
+                    *selected = Some(s);
+                    session.show_status_message("Marker removed");
+                }
+            }
+        }
+        InputEvent::AddMarker => {
+            add_marker_at_current_position(license, session, markers, selected, now)?;
+        }
+        InputEvent::ExportMarkers => {
+            export_current_markers(license, session, markers)?;
+        }
+        InputEvent::BatchMarkerScreenshots => {
+            batch_marker_screenshots(license, session, markers);
+        }
         _ => {}
     }
     Ok(())

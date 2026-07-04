@@ -9,6 +9,8 @@ pub mod media_ext;
 pub mod overlay;
 pub mod play_queue;
 pub mod recent;
+pub mod review_markers;
+pub mod review_queue;
 pub mod session;
 pub mod settings;
 pub mod state;
