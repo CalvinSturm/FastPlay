@@ -16,6 +16,8 @@ pub struct SavedReviewQueues {
     queues: Vec<SavedReviewQueue>,
 }
 
+pub const MAX_REVIEW_QUEUE_NAME_CHARS: usize = 80;
+
 fn storage_path() -> Option<PathBuf> {
     let appdata = std::env::var_os("APPDATA")?;
     Some(
@@ -56,9 +58,11 @@ impl SavedReviewQueues {
         &self.queues
     }
 
-    pub fn upsert(&mut self, name: impl Into<String>, items: Vec<PathBuf>) {
-        let name = name.into();
-        if name.trim().is_empty() || items.is_empty() {
+    pub fn upsert(&mut self, name: impl AsRef<str>, items: Vec<PathBuf>) {
+        let Some(name) = normalize_queue_name(name.as_ref()) else {
+            return;
+        };
+        if items.is_empty() {
             return;
         }
         if let Some(existing) = self
@@ -71,6 +75,14 @@ impl SavedReviewQueues {
             return;
         }
         self.queues.push(SavedReviewQueue { name, items });
+    }
+
+    pub fn remove_index(&mut self, index: usize) -> bool {
+        if index >= self.queues.len() {
+            return false;
+        }
+        self.queues.remove(index);
+        true
     }
 
     pub fn get(&self, name: &str) -> Option<&SavedReviewQueue> {
@@ -144,6 +156,20 @@ impl SavedReviewQueues {
     }
 }
 
+pub fn bounded_queue_name(name: &str) -> String {
+    name.chars().take(MAX_REVIEW_QUEUE_NAME_CHARS).collect()
+}
+
+fn normalize_queue_name(name: &str) -> Option<String> {
+    let bounded = bounded_queue_name(name);
+    let trimmed = bounded.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn escape_field(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -214,6 +240,30 @@ mod tests {
         assert_eq!(queues.queues().len(), 1);
         assert_eq!(queues.queues()[0].name, "review");
         assert_eq!(queues.queues()[0].items, vec![PathBuf::from("b.mp4")]);
+    }
+
+    #[test]
+    fn queue_name_is_bounded() {
+        let mut queues = SavedReviewQueues::default();
+        queues.upsert(
+            "x".repeat(MAX_REVIEW_QUEUE_NAME_CHARS + 20),
+            vec![PathBuf::from("a.mp4")],
+        );
+        assert_eq!(
+            queues.queues()[0].name.chars().count(),
+            MAX_REVIEW_QUEUE_NAME_CHARS
+        );
+    }
+
+    #[test]
+    fn remove_index_deletes_selected_queue() {
+        let mut queues = SavedReviewQueues::default();
+        queues.upsert("a", vec![PathBuf::from("a.mp4")]);
+        queues.upsert("b", vec![PathBuf::from("b.mp4")]);
+        assert!(queues.remove_index(0));
+        assert_eq!(queues.queues().len(), 1);
+        assert_eq!(queues.queues()[0].name, "b");
+        assert!(!queues.remove_index(99));
     }
 
     #[test]

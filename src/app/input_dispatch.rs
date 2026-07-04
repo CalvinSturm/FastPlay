@@ -72,8 +72,12 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         // Review marker workflow is owned by the event loop beside Recent/queue state.
         | InputEvent::AddMarker
         | InputEvent::ToggleMarkerOverlay
+        | InputEvent::EditMarkerNote
         | InputEvent::ExportMarkers
         | InputEvent::BatchMarkerScreenshots
+        | InputEvent::SaveReviewQueue
+        | InputEvent::ToggleReviewQueueOverlay
+        | InputEvent::TextChar(_)
         | InputEvent::NavigateUp
         | InputEvent::NavigateDown
         | InputEvent::Confirm
@@ -211,7 +215,11 @@ mod tests {
         assert_eq!(command_for(&InputEvent::QueueNext), None);
         assert_eq!(command_for(&InputEvent::AddMarker), None);
         assert_eq!(command_for(&InputEvent::ToggleMarkerOverlay), None);
+        assert_eq!(command_for(&InputEvent::EditMarkerNote), None);
         assert_eq!(command_for(&InputEvent::ExportMarkers), None);
         assert_eq!(command_for(&InputEvent::BatchMarkerScreenshots), None);
+        assert_eq!(command_for(&InputEvent::SaveReviewQueue), None);
+        assert_eq!(command_for(&InputEvent::ToggleReviewQueueOverlay), None);
+        assert_eq!(command_for(&InputEvent::TextChar('x')), None);
     }
 }

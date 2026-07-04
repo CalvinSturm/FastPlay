@@ -84,12 +84,35 @@ impl Presenter {
         &mut self,
         rows: &[(String, String)],
         selected: usize,
+        footer: &str,
         viewport_width: u32,
         viewport_height: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.recent_overlay =
-            self.device
-                .create_marker_overlay(rows, selected, viewport_width, viewport_height)?;
+        self.recent_overlay = self.device.create_marker_overlay(
+            rows,
+            selected,
+            footer,
+            viewport_width,
+            viewport_height,
+        )?;
+        Ok(())
+    }
+
+    pub fn show_review_queue_overlay(
+        &mut self,
+        rows: &[(String, String)],
+        selected: usize,
+        footer: &str,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.recent_overlay = self.device.create_review_queue_overlay(
+            rows,
+            selected,
+            footer,
+            viewport_width,
+            viewport_height,
+        )?;
         Ok(())
     }
 

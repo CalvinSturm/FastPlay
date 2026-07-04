@@ -38,6 +38,10 @@ impl LicenseState {
         self.tier == LicenseTier::Pro
     }
 
+    pub fn can_edit_marker_notes(&self) -> bool {
+        self.tier == LicenseTier::Pro
+    }
+
     pub fn can_export_markers(&self) -> bool {
         self.tier == LicenseTier::Pro
     }
@@ -48,6 +52,14 @@ impl LicenseState {
 
     #[allow(dead_code)]
     pub fn can_save_review_queues(&self) -> bool {
+        self.tier == LicenseTier::Pro
+    }
+
+    pub fn can_load_review_queues(&self) -> bool {
+        self.tier == LicenseTier::Pro
+    }
+
+    pub fn can_delete_review_queues(&self) -> bool {
         self.tier == LicenseTier::Pro
     }
 }
@@ -61,9 +73,12 @@ mod tests {
         let license = LicenseState::from_dev_override_value(None);
         assert_eq!(license.tier, LicenseTier::Free);
         assert!(!license.can_save_markers());
+        assert!(!license.can_edit_marker_notes());
         assert!(!license.can_export_markers());
         assert!(!license.can_batch_export_marker_screenshots());
         assert!(!license.can_save_review_queues());
+        assert!(!license.can_load_review_queues());
+        assert!(!license.can_delete_review_queues());
     }
 
     #[test]
@@ -72,8 +87,11 @@ mod tests {
         assert_eq!(license.tier, LicenseTier::Pro);
         assert!(license.status_label.contains("development override"));
         assert!(license.can_save_markers());
+        assert!(license.can_edit_marker_notes());
         assert!(license.can_export_markers());
         assert!(license.can_batch_export_marker_screenshots());
         assert!(license.can_save_review_queues());
+        assert!(license.can_load_review_queues());
+        assert!(license.can_delete_review_queues());
     }
 }

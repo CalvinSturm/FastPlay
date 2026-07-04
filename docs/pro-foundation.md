@@ -23,13 +23,31 @@ Markers are persisted under `%APPDATA%\FastPlay\review_markers.tsv`. Each marker
 
 - media path
 - timestamp in milliseconds
-- optional note field
+- optional note field, bounded to 240 characters
 
-The TSV fields are escaped so notes can later contain tabs, newlines, quotes, or commas without adding a JSON dependency. Marker exports are written to the same default area as screenshots: `%USERPROFILE%\Pictures\FastPlay` when available.
+The TSV fields are escaped so notes can contain tabs, newlines, quotes, or commas without adding a JSON dependency. Marker exports are written to the same default area as screenshots: `%USERPROFILE%\Pictures\FastPlay` when available.
+
+Marker notes are edited from the marker overlay: `Ctrl+M`, select a marker, `N`, type the note, `Enter` to save, or `Esc` to cancel. Free mode shows the Pro review-tools copy and does not save notes.
 
 ## Review queue storage
 
-Saved review queue storage is introduced as a foundation under `%APPDATA%\FastPlay\review_queues.tsv`. The current PR does not add a full saved-queue UI. When a saved queue is materialized, missing media files should be skipped gracefully.
+Saved review queues live under `%APPDATA%\FastPlay\review_queues.tsv`. The UI is intentionally minimal:
+
+- `Ctrl+Shift+S`: save the current queue as a named review queue
+- `Ctrl+Shift+Q`: open the saved review queue overlay
+- arrow keys: select a saved queue
+- `Enter`: load the selected queue
+- `Delete`: delete the selected queue
+- `Esc`: close the overlay
+
+`Ctrl+Shift+O` remains the existing Recent Files overlay, so review queues use `Ctrl+Shift+Q` instead. Loading a saved queue skips missing files gracefully and reports how many were skipped. This is saved queue workflow, not a media library.
+
+## Deferred Pro work
+
+Still deferred:
+
+- Lemon Squeezy activation
+- reliable batch screenshots from marker timestamps
 
 ## Adding Pro features
 

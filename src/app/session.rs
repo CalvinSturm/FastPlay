@@ -349,14 +349,34 @@ impl PlaybackSession {
         &mut self,
         rows: &[(String, String)],
         selected: usize,
+        footer: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
-        self.presenter.show_marker_overlay(rows, selected, vw, vh)?;
+        self.presenter
+            .show_marker_overlay(rows, selected, footer, vw, vh)?;
         self.present_needed = true;
         Ok(())
     }
 
     pub fn clear_marker_overlay(&mut self) {
+        self.presenter.clear_recent_overlay();
+        self.present_needed = true;
+    }
+
+    pub fn show_review_queue_overlay(
+        &mut self,
+        rows: &[(String, String)],
+        selected: usize,
+        footer: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
+        self.presenter
+            .show_review_queue_overlay(rows, selected, footer, vw, vh)?;
+        self.present_needed = true;
+        Ok(())
+    }
+
+    pub fn clear_review_queue_overlay(&mut self) {
         self.presenter.clear_recent_overlay();
         self.present_needed = true;
     }

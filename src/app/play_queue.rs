@@ -76,6 +76,19 @@ impl PlayQueue {
         Self { items, cursor: 0 }
     }
 
+    /// A queue built from an already-user-ordered list, preserving order while
+    /// still filtering unsupported files and case-insensitive duplicates. Used
+    /// for saved review queues, where the saved order is the user's intent.
+    pub fn from_ordered_paths<I: IntoIterator<Item = PathBuf>>(paths: I) -> Self {
+        let mut seen = HashSet::new();
+        let items = paths
+            .into_iter()
+            .filter(|path| is_supported_media(path))
+            .filter(|path| seen.insert(dedup_key(path)))
+            .collect();
+        Self { items, cursor: 0 }
+    }
+
     /// A queue built from the supported media files directly inside `dir`
     /// (non-recursive). A missing or unreadable folder yields an empty queue.
     pub fn from_folder(dir: &Path) -> Self {
@@ -325,6 +338,17 @@ mod tests {
             names(&q),
             vec!["Episode 1.mp4", "Episode 2.mp4", "Episode 10.mp4"]
         );
+    }
+
+    #[test]
+    fn from_ordered_paths_preserves_user_order() {
+        let q = PlayQueue::from_ordered_paths(vec![
+            p(r"C:\v\Episode 10.mp4"),
+            p(r"C:\v\Episode 2.mp4"),
+            p(r"C:\v\ignore.txt"),
+            p(r"C:\v\Episode 10.mp4"),
+        ]);
+        assert_eq!(names(&q), vec!["Episode 10.mp4", "Episode 2.mp4"]);
     }
 
     #[test]
