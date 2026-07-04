@@ -12,7 +12,9 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
-        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
+        Foundation::{
+            BOOL, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM,
+        },
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
@@ -29,10 +31,12 @@ use windows::{
         },
         System::{
             Com::{IDataObject, FORMATETC},
+            DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
             LibraryLoader::GetModuleHandleW,
+            Memory::{GlobalLock, GlobalUnlock},
             Ole::{
                 IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
-                RevokeDragDrop, DROPEFFECT, DROPEFFECT_COPY,
+                RevokeDragDrop, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY,
             },
             SystemServices::MODIFIERKEYS_FLAGS,
         },
@@ -78,6 +82,7 @@ extern "system" {
 }
 const SM_CXDRAG: i32 = 68;
 const SM_CYDRAG: i32 = 69;
+const MAX_CLIPBOARD_TEXT_CHARS: usize = 4096;
 
 const MAX_MESSAGES_PER_PUMP: usize = 64;
 const MODAL_TICK_TIMER_ID: usize = 1;
@@ -105,6 +110,37 @@ fn clamp_client_size_to_min(width: u32, height: u32) -> (u32, u32) {
         (width as f64 * scale).round() as u32,
         (height as f64 * scale).round() as u32,
     )
+}
+
+struct ClipboardCloseGuard;
+
+impl Drop for ClipboardCloseGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseClipboard();
+        }
+    }
+}
+
+unsafe fn clipboard_unicode_text(hwnd: HWND) -> Option<String> {
+    OpenClipboard(hwnd).ok()?;
+    let _guard = ClipboardCloseGuard;
+    let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
+    if handle.0.is_null() {
+        return None;
+    }
+    let hglobal = HGLOBAL(handle.0);
+    let ptr = GlobalLock(hglobal) as *const u16;
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < MAX_CLIPBOARD_TEXT_CHARS && *ptr.add(len) != 0 {
+        len += 1;
+    }
+    let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+    let _ = GlobalUnlock(hglobal);
+    Some(text)
 }
 
 #[derive(Debug)]
@@ -1300,6 +1336,13 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::StepFrameForward);
                     }
+                    // Ctrl+Shift+D -> deactivate FastPlay Pro license.
+                    0x44 if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::DeactivateLicense);
+                    }
                     0x42 if ctrl_held => {
                         state
                             .input_events
@@ -1333,6 +1376,13 @@ unsafe extern "system" fn window_proc(
                             state.input_events.borrow_mut().push(InputEvent::SetInPoint);
                         }
                     }
+                    // Ctrl+Shift+L -> enter/activate a FastPlay Pro license key.
+                    0x4C if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::BeginLicenseActivation);
+                    }
                     // Ctrl+Shift+O → recent files, Ctrl+O → open file dialog,
                     // Shift+O → clear out-point, O → set out-point
                     0x4F if ctrl_held => {
@@ -1361,11 +1411,34 @@ unsafe extern "system" fn window_proc(
                                 .push(InputEvent::SetOutPoint);
                         }
                     }
+                    // Ctrl+Shift+P -> open the FastPlay Pro purchase page.
+                    0x50 if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::OpenProPurchasePage);
+                    }
                     0x52 => {
                         state
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::ToggleLoopRange);
+                    }
+                    // Ctrl+Shift+V -> validate saved FastPlay Pro license.
+                    0x56 if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ValidateLicense);
+                    }
+                    // Ctrl+V -> paste clipboard text into the active text prompt.
+                    0x56 if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        if let Some(text) = clipboard_unicode_text(hwnd) {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::PasteText(text));
+                        }
                     }
                     0x45 if ctrl_held => {
                         state

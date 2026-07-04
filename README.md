@@ -26,11 +26,11 @@ Implemented in the Pro Preview foundation:
 - marker persistence in local app data
 - marker export to `.txt` and `.csv`
 - saved review queue save/load/delete UI
-- centralized Free/Pro capability checks with a development-only override
+- Lemon Squeezy license activation, validation, and deactivation
+- centralized Free/Pro capability checks with persisted license state and a development-only override
 
 Not yet implemented:
 
-- Lemon Squeezy activation
 - reliable batch screenshots from markers
 
 FastPlay Pro launch pricing target: $19 one-time. Standard target: $29 one-time. These are planning targets, not a subscription.
@@ -82,6 +82,10 @@ Measured cross-player comparisons are still pending, so FastPlay does not claim 
 | `Ctrl+M` | Marker overlay (↑↓ select · Enter seek · N edit note · Del remove · E export · B batch placeholder · Esc close) |
 | `Ctrl+Shift+S` | Save current queue as a review queue (Pro Preview / development override) |
 | `Ctrl+Shift+Q` | Review queue overlay (↑↓ select · Enter load · Del delete · Esc close) |
+| `Ctrl+Shift+L` | Enter and activate a FastPlay Pro license key |
+| `Ctrl+V` | Paste into the active text prompt |
+| `Ctrl+Shift+V` | Validate saved FastPlay Pro license |
+| `Ctrl+Shift+D` | Deactivate saved FastPlay Pro license |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
 | `Shift+I` | Clear in-point |
@@ -157,6 +161,7 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 - marker removal from the focused marker overlay
 - marker export for the current file as `.txt` and `.csv`
 - saved review queue save, load, and delete UI
+- Lemon Squeezy license activation with local app-data license metadata
 - Free-mode Pro copy that does not block normal playback
 - development-only Pro override via `FASTPLAY_PRO_DEV=1`
 
