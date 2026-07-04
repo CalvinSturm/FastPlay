@@ -1258,6 +1258,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         &self,
         rows: &[(String, String)],
         selected: usize,
+        footer: &str,
         viewport_width: u32,
         viewport_height: u32,
     ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
@@ -1266,7 +1267,29 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             selected,
             "Review Markers",
             "No markers for this file",
-            "Enter Seek   \u{2191}\u{2193} Select   Del Remove   E Export   B Batch   Esc Close",
+            footer,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        self.create_list_overlay_from_bitmap(bitmap, viewport_width, viewport_height)
+    }
+
+    pub(crate) fn create_review_queue_overlay(
+        &self,
+        rows: &[(String, String)],
+        selected: usize,
+        footer: &str,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
+        let Some(bitmap) = render_list_bitmap(
+            rows,
+            selected,
+            "Review Queues",
+            "No saved review queues",
+            footer,
         )?
         else {
             return Ok(None);
@@ -2247,7 +2270,10 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
         ("M", "Add Pro marker"),
-        ("Ctrl+M", "Pro marker overlay"),
+        ("Ctrl+M", "Pro markers"),
+        ("N", "Edit marker note"),
+        ("Ctrl+Shift+S", "Save Pro queue"),
+        ("Ctrl+Shift+Q", "Pro queues"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
         ("Shift+I / O", "Clear in / out point"),

@@ -21,18 +21,17 @@ FastPlay Pro is the review-workflow layer for creators, editors, QA testers, and
 Implemented in the Pro Preview foundation:
 
 - timestamp markers for the current media file
+- marker note editing from the keyboard
 - marker overlay with keyboard selection, seek, and removal
 - marker persistence in local app data
 - marker export to `.txt` and `.csv`
-- saved review queue storage foundation for a future UI
+- saved review queue save/load/delete UI
 - centralized Free/Pro capability checks with a development-only override
 
 Not yet implemented:
 
 - Lemon Squeezy activation
-- marker note editing UI
 - reliable batch screenshots from markers
-- saved review queue UI
 
 FastPlay Pro launch pricing target: $19 one-time. Standard target: $29 one-time. These are planning targets, not a subscription.
 
@@ -80,7 +79,9 @@ Measured cross-player comparisons are still pending, so FastPlay does not claim 
 | `PageUp` / `PageDown` | Previous / next file in the play queue |
 | `Ctrl+S` | Save screenshot |
 | `M` | Add timestamp marker (Pro Preview / development override) |
-| `Ctrl+M` | Marker overlay (↑↓ select · Enter seek · Del remove · E export · B batch placeholder · Esc close) |
+| `Ctrl+M` | Marker overlay (↑↓ select · Enter seek · N edit note · Del remove · E export · B batch placeholder · Esc close) |
+| `Ctrl+Shift+S` | Save current queue as a review queue (Pro Preview / development override) |
+| `Ctrl+Shift+Q` | Review queue overlay (↑↓ select · Enter load · Del delete · Esc close) |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
 | `Shift+I` | Clear in-point |
@@ -152,8 +153,10 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 ### Pro Preview review workflow
 - local timestamp marker persistence for the current media file
 - keyboard marker overlay for marker review and seeking
+- bounded marker note editing from the marker overlay
 - marker removal from the focused marker overlay
 - marker export for the current file as `.txt` and `.csv`
+- saved review queue save, load, and delete UI
 - Free-mode Pro copy that does not block normal playback
 - development-only Pro override via `FASTPLAY_PRO_DEV=1`
 

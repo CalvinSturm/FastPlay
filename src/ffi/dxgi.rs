@@ -1269,6 +1269,7 @@ unsafe extern "system" fn window_proc(
                         as u16
                         & 0x8000)
                         != 0;
+                let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
 
                 match wparam.0 as u32 {
                     // Ctrl+H → toggle borderless fullscreen
@@ -1278,12 +1279,19 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::ToggleBorderlessFullscreen);
                     }
-                    // Ctrl+S → save screenshot
+                    // Ctrl+Shift+S -> save current review queue; Ctrl+S -> save screenshot.
                     0x53 if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::SaveScreenshot);
+                        if shift_held {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::SaveReviewQueue);
+                        } else {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::SaveScreenshot);
+                        }
                     }
                     // Ctrl+F / Ctrl+B → step one frame forward/backward
                     0x46 if ctrl_held => {
@@ -1316,7 +1324,6 @@ unsafe extern "system" fn window_proc(
                         // Ctrl+I — reserved / no-op (was clear in-point, now Shift+I)
                     }
                     0x49 => {
-                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                         if shift_held {
                             state
                                 .input_events
@@ -1329,7 +1336,6 @@ unsafe extern "system" fn window_proc(
                     // Ctrl+Shift+O → recent files, Ctrl+O → open file dialog,
                     // Shift+O → clear out-point, O → set out-point
                     0x4F if ctrl_held => {
-                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                         if shift_held {
                             state
                                 .input_events
@@ -1343,7 +1349,6 @@ unsafe extern "system" fn window_proc(
                         }
                     }
                     0x4F => {
-                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                         if shift_held {
                             state
                                 .input_events
@@ -1385,16 +1390,30 @@ unsafe extern "system" fn window_proc(
                     0x4D if (lparam.0 as u32 >> 30) & 1 == 0 => {
                         state.input_events.borrow_mut().push(InputEvent::AddMarker);
                     }
+                    // N while marker overlay is focused -> edit selected marker note.
+                    0x4E if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::EditMarkerNote);
+                    }
                     // Ctrl+W → fit window to video (no black padding)
                     0x57 if ctrl_held => {
                         state.input_events.borrow_mut().push(InputEvent::FitWindow);
                     }
-                    // Ctrl+Q → half the video's native resolution
+                    // Ctrl+Shift+Q -> review queues; Ctrl+Q -> half native resolution.
                     0x51 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::HalfSizeWindow);
+                        if shift_held {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::ToggleReviewQueueOverlay);
+                        } else {
+                            state
+                                .input_events
+                                .borrow_mut()
+                                .push(InputEvent::HalfSizeWindow);
+                        }
                     }
                     // Ctrl+0 → reset view
                     0x30 if ctrl_held => {
@@ -1559,13 +1578,21 @@ unsafe extern "system" fn window_proc(
         }
         WM_CHAR => {
             if let Some(state) = window_state(hwnd) {
-                if wparam.0 as u32 == ' ' as u32 {
-                    state
-                        .input_events
-                        .borrow_mut()
-                        .push(InputEvent::TogglePause);
-                    return LRESULT(0);
+                if let Some(ch) = char::from_u32(wparam.0 as u32) {
+                    if ch == ' ' {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::TogglePause);
+                    }
+                    if !ch.is_control() {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::TextChar(ch));
+                    }
                 }
+                return LRESULT(0);
             }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }

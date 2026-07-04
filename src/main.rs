@@ -34,8 +34,10 @@ use app::commands::SessionCommand;
 use app::play_queue::PlayQueue;
 use app::recent::RecentFiles;
 use app::review_markers::{
-    default_export_directory, format_marker_timestamp_ms, MarkerExportFormat, ReviewMarkers,
+    bounded_note_text, default_export_directory, format_marker_timestamp_ms, MarkerExportFormat,
+    ReviewMarkers, MAX_MARKER_NOTE_CHARS,
 };
+use app::review_queue::{bounded_queue_name, SavedReviewQueues, MAX_REVIEW_QUEUE_NAME_CHARS};
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
 use license::LicenseState;
@@ -107,6 +109,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Shared backend for the Recent overlay and resume-on-open.
     let mut recent = RecentFiles::load();
     let mut review_markers = ReviewMarkers::load();
+    let mut review_queues = SavedReviewQueues::load();
     // Path of the currently-open file, so its progress can be saved when we
     // switch files or exit. `None` until the first file opens.
     let mut current: Option<PathBuf> = None;
@@ -114,6 +117,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut recent_selected: Option<usize> = None;
     // Marker overlay selection; `Some(index)` while the overlay is open.
     let mut marker_selected: Option<usize> = None;
+    // Review queue overlay selection; `Some(index)` while the overlay is open.
+    let mut review_queue_selected: Option<usize> = None;
+    let mut active_review_queue_name: Option<String> = None;
+    let mut text_edit: Option<TextEditState> = None;
     // The play queue. Owned here, beside `RecentFiles`; `PlaybackSession` stays a
     // single-file coordinator and is unaware of it. Empty until the first open.
     let mut play_queue: PlayQueue = PlayQueue::from_paths(Vec::<PathBuf>::new());
@@ -139,6 +146,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         session.window().take_input_events(&mut input_events);
         for input in input_events.drain(..) {
+            if text_edit.is_some() {
+                handle_text_edit_input(
+                    &input,
+                    &mut text_edit,
+                    &mut session,
+                    &mut review_markers,
+                    &mut review_queues,
+                    &mut marker_selected,
+                    &mut review_queue_selected,
+                    &mut active_review_queue_name,
+                    &play_queue,
+                )?;
+                continue;
+            }
             // The Recent overlay is modal: while open it captures navigation and
             // confirm/remove keys (and swallows playback keys).
             if recent_selected.is_some() {
@@ -149,6 +170,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mut recent_selected,
                     &mut current,
                     &mut play_queue,
+                    &mut active_review_queue_name,
                     now,
                 )?;
                 continue;
@@ -160,6 +182,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mut session,
                     &mut review_markers,
                     &mut marker_selected,
+                    &mut text_edit,
+                    now,
+                )?;
+                continue;
+            }
+            if review_queue_selected.is_some() {
+                handle_review_queue_overlay_input(
+                    &input,
+                    &license,
+                    &mut session,
+                    &mut recent,
+                    &mut current,
+                    &mut play_queue,
+                    &mut review_queues,
+                    &mut review_queue_selected,
+                    &mut active_review_queue_name,
                     now,
                 )?;
                 continue;
@@ -185,6 +223,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mut review_markers,
                     &marker_selected,
                     now,
+                )?;
+                continue;
+            }
+            if matches!(input, InputEvent::SaveReviewQueue) {
+                begin_save_review_queue(
+                    &license,
+                    &mut session,
+                    &mut text_edit,
+                    &play_queue,
+                    active_review_queue_name.as_deref(),
+                );
+                continue;
+            }
+            if matches!(input, InputEvent::ToggleReviewQueueOverlay) {
+                toggle_review_queue_overlay(
+                    &license,
+                    &mut session,
+                    &review_queues,
+                    &mut review_queue_selected,
+                    active_review_queue_name.as_deref(),
                 )?;
                 continue;
             }
@@ -244,6 +302,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         paths,
                         now,
                     )?;
+                    active_review_queue_name = None;
                 }
                 InputEvent::OpenFileDialog => {
                     let hwnd = session.window().raw_window().hwnd();
@@ -256,6 +315,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             MediaSource::new(path),
                             now,
                         )?;
+                        active_review_queue_name = None;
                     }
                 }
                 InputEvent::QueuePrevious => {
@@ -375,6 +435,80 @@ fn show_recent_overlay(
 const PRO_REVIEW_UPSELL: &str =
     "FastPlay Pro unlocks review tools: saved queues, timestamp markers, marker notes, exports, and batch screenshots. Playback stays free.";
 
+enum TextEditState {
+    MarkerNote {
+        marker_index: usize,
+        buffer: String,
+        ignore_first_char: Option<char>,
+    },
+    ReviewQueueName {
+        buffer: String,
+    },
+}
+
+impl TextEditState {
+    fn push_char(&mut self, ch: char) {
+        match self {
+            TextEditState::MarkerNote {
+                buffer,
+                ignore_first_char,
+                ..
+            } => {
+                if ignore_first_char
+                    .take()
+                    .is_some_and(|ignored| ignored.eq_ignore_ascii_case(&ch))
+                {
+                    return;
+                }
+                if buffer.chars().count() < MAX_MARKER_NOTE_CHARS {
+                    buffer.push(ch);
+                }
+            }
+            TextEditState::ReviewQueueName { buffer } => {
+                if buffer.chars().count() < MAX_REVIEW_QUEUE_NAME_CHARS {
+                    buffer.push(ch);
+                }
+            }
+        }
+    }
+
+    fn pop_char(&mut self) {
+        match self {
+            TextEditState::MarkerNote {
+                buffer,
+                ignore_first_char,
+                ..
+            } => {
+                *ignore_first_char = None;
+                buffer.pop();
+            }
+            TextEditState::ReviewQueueName { buffer } => {
+                buffer.pop();
+            }
+        }
+    }
+
+    fn clear_pending_shortcut_char(&mut self) {
+        if let TextEditState::MarkerNote {
+            ignore_first_char, ..
+        } = self
+        {
+            *ignore_first_char = None;
+        }
+    }
+
+    fn prompt(&self) -> String {
+        match self {
+            TextEditState::MarkerNote { buffer, .. } => {
+                format!("Note: {buffer}_")
+            }
+            TextEditState::ReviewQueueName { buffer } => {
+                format!("Queue name: {buffer}_")
+            }
+        }
+    }
+}
+
 fn marker_rows(markers: &ReviewMarkers, current: Option<&Path>) -> Vec<(String, String)> {
     let Some(path) = current else {
         return Vec::new();
@@ -406,8 +540,45 @@ fn show_marker_overlay(
     } else {
         selected.min(rows.len() - 1)
     };
-    session.show_marker_overlay(&rows, selected)?;
+    let footer = marker_overlay_footer(markers, session.current_media_path(), selected);
+    session.show_marker_overlay(&rows, selected, &footer)?;
     Ok(selected)
+}
+
+fn marker_overlay_footer(
+    markers: &ReviewMarkers,
+    current: Option<&Path>,
+    selected: usize,
+) -> String {
+    const EMPTY: &str = "M Add marker   Esc Close";
+    let Some(path) = current else {
+        return EMPTY.to_string();
+    };
+    let file_markers = markers.markers_for(path);
+    if file_markers.is_empty() {
+        return EMPTY.to_string();
+    }
+    let count = file_markers.len();
+    let marker = file_markers[selected.min(count - 1)];
+    let note = marker
+        .note
+        .as_deref()
+        .filter(|note| !note.trim().is_empty())
+        .unwrap_or("No note");
+    format!(
+        "{count} marker{} | {} | {} | N Note  E Export  B Batch  Esc",
+        if count == 1 { "" } else { "s" },
+        format_marker_timestamp_ms(marker.timestamp_ms),
+        truncate_for_status(note, 54)
+    )
+}
+
+fn truncate_for_status(value: &str, max_chars: usize) -> String {
+    let mut out: String = value.chars().take(max_chars).collect();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
 
 fn toggle_marker_overlay(
@@ -504,6 +675,241 @@ fn batch_marker_screenshots(
         return;
     }
     session.show_status_message("Batch marker screenshots are not available yet");
+}
+
+fn review_queue_rows(queues: &SavedReviewQueues) -> Vec<(String, String)> {
+    queues
+        .queues()
+        .iter()
+        .map(|queue| {
+            let count = queue.items.len();
+            (
+                queue.name.clone(),
+                format!("{count} file{}", if count == 1 { "" } else { "s" }),
+            )
+        })
+        .collect()
+}
+
+fn show_review_queue_overlay(
+    session: &mut PlaybackSession,
+    queues: &SavedReviewQueues,
+    selected: usize,
+    active_name: Option<&str>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let rows = review_queue_rows(queues);
+    let selected = if rows.is_empty() {
+        0
+    } else {
+        selected.min(rows.len() - 1)
+    };
+    let footer = match active_name {
+        Some(name) => format!(
+            "Enter Load   Del Delete   Esc Close   Current: {}",
+            truncate_for_status(name, 32)
+        ),
+        None => "Enter Load   Del Delete   Esc Close".to_string(),
+    };
+    session.show_review_queue_overlay(&rows, selected, &footer)?;
+    Ok(selected)
+}
+
+fn toggle_review_queue_overlay(
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    queues: &SavedReviewQueues,
+    selected: &mut Option<usize>,
+    active_name: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !license.can_load_review_queues() {
+        session.show_status_message(PRO_REVIEW_UPSELL);
+        return Ok(());
+    }
+    let next = show_review_queue_overlay(session, queues, selected.unwrap_or(0), active_name)?;
+    *selected = Some(next);
+    Ok(())
+}
+
+fn begin_save_review_queue(
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    text_edit: &mut Option<TextEditState>,
+    play_queue: &PlayQueue,
+    active_name: Option<&str>,
+) {
+    if !license.can_save_review_queues() {
+        session.show_status_message(PRO_REVIEW_UPSELL);
+        return;
+    }
+    if play_queue.is_empty() {
+        session.show_status_message("No queue to save");
+        return;
+    }
+    let buffer = active_name
+        .map(str::to_string)
+        .or_else(|| {
+            play_queue.current().map(|path| {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| file_label(path))
+            })
+        })
+        .unwrap_or_else(|| "Review queue".to_string());
+    *text_edit = Some(TextEditState::ReviewQueueName { buffer });
+    if let Some(edit) = text_edit.as_ref() {
+        session.show_status_message(&edit.prompt());
+    }
+}
+
+fn handle_text_edit_input(
+    input: &InputEvent,
+    text_edit: &mut Option<TextEditState>,
+    session: &mut PlaybackSession,
+    markers: &mut ReviewMarkers,
+    queues: &mut SavedReviewQueues,
+    marker_selected: &mut Option<usize>,
+    review_queue_selected: &mut Option<usize>,
+    active_review_queue_name: &mut Option<String>,
+    play_queue: &PlayQueue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match input {
+        InputEvent::TextChar(ch) => {
+            if let Some(edit) = text_edit.as_mut() {
+                edit.push_char(*ch);
+                session.show_status_message(&edit.prompt());
+            }
+        }
+        InputEvent::BackspaceKey => {
+            if let Some(edit) = text_edit.as_mut() {
+                edit.pop_char();
+                session.show_status_message(&edit.prompt());
+            }
+        }
+        InputEvent::Confirm => {
+            if let Some(edit) = text_edit.take() {
+                finish_text_edit(
+                    edit,
+                    session,
+                    markers,
+                    queues,
+                    marker_selected,
+                    review_queue_selected,
+                    active_review_queue_name,
+                    play_queue,
+                )?;
+            }
+        }
+        InputEvent::EscapeKey => {
+            if let Some(edit) = text_edit.take() {
+                cancel_text_edit(edit, session, markers, marker_selected)?;
+            }
+        }
+        _ => {
+            if let Some(edit) = text_edit.as_mut() {
+                edit.clear_pending_shortcut_char();
+                session.show_status_message(&edit.prompt());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn finish_text_edit(
+    edit: TextEditState,
+    session: &mut PlaybackSession,
+    markers: &mut ReviewMarkers,
+    queues: &mut SavedReviewQueues,
+    marker_selected: &mut Option<usize>,
+    review_queue_selected: &mut Option<usize>,
+    active_review_queue_name: &mut Option<String>,
+    play_queue: &PlayQueue,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match edit {
+        TextEditState::MarkerNote {
+            marker_index,
+            buffer,
+            ..
+        } => {
+            let Some(path) = session.current_media_path().map(Path::to_path_buf) else {
+                session.show_status_message("Open a file to edit marker notes");
+                return Ok(());
+            };
+            if markers.set_note_for_file_index(&path, marker_index, &buffer) {
+                markers.save();
+                *marker_selected = Some(show_marker_overlay(session, markers, marker_index)?);
+                session.show_status_message("Marker note saved");
+            }
+        }
+        TextEditState::ReviewQueueName { buffer } => {
+            save_named_review_queue(
+                session,
+                queues,
+                active_review_queue_name,
+                play_queue,
+                &buffer,
+            );
+            if let Some(selected) = *review_queue_selected {
+                *review_queue_selected = Some(show_review_queue_overlay(
+                    session,
+                    queues,
+                    selected,
+                    active_review_queue_name.as_deref(),
+                )?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cancel_text_edit(
+    edit: TextEditState,
+    session: &mut PlaybackSession,
+    markers: &ReviewMarkers,
+    marker_selected: &mut Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match edit {
+        TextEditState::MarkerNote { marker_index, .. } => {
+            *marker_selected = Some(show_marker_overlay(session, markers, marker_index)?);
+            session.show_status_message("Marker note edit canceled");
+        }
+        TextEditState::ReviewQueueName { .. } => {
+            session.show_status_message("Review queue save canceled");
+        }
+    }
+    Ok(())
+}
+
+fn save_named_review_queue(
+    session: &mut PlaybackSession,
+    queues: &mut SavedReviewQueues,
+    active_review_queue_name: &mut Option<String>,
+    play_queue: &PlayQueue,
+    name: &str,
+) {
+    let name = name.trim();
+    if name.is_empty() {
+        session.show_status_message("Review queue name required");
+        return;
+    }
+    let items = play_queue.items().to_vec();
+    if items.is_empty() {
+        session.show_status_message("No queue to save");
+        return;
+    }
+    queues.upsert(name, items);
+    queues.save();
+    let lookup_name = bounded_queue_name(name);
+    let lookup_name = lookup_name.trim();
+    let saved_name = queues
+        .get(lookup_name)
+        .map(|queue| queue.name.clone())
+        .unwrap_or_else(|| lookup_name.to_string());
+    *active_review_queue_name = Some(saved_name.clone());
+    session.show_status_message(&format!(
+        "Saved review queue: {}",
+        truncate_for_status(&saved_name, 48)
+    ));
 }
 
 /// Save the current file's playback position into the recent history. No-op
@@ -804,6 +1210,7 @@ fn handle_recent_overlay_input(
     selected: &mut Option<usize>,
     current: &mut Option<PathBuf>,
     play_queue: &mut PlayQueue,
+    active_review_queue_name: &mut Option<String>,
     now: Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sel = selected.unwrap_or(0);
@@ -837,6 +1244,7 @@ fn handle_recent_overlay_input(
                         MediaSource::new(path),
                         now,
                     )?;
+                    *active_review_queue_name = None;
                 } else {
                     // The file moved/was deleted: drop it and keep browsing.
                     recent.remove_index(sel);
@@ -862,6 +1270,7 @@ fn handle_marker_overlay_input(
     session: &mut PlaybackSession,
     markers: &mut ReviewMarkers,
     selected: &mut Option<usize>,
+    text_edit: &mut Option<TextEditState>,
     now: Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sel = selected.unwrap_or(0);
@@ -904,6 +1313,9 @@ fn handle_marker_overlay_input(
         InputEvent::AddMarker => {
             add_marker_at_current_position(license, session, markers, selected, now)?;
         }
+        InputEvent::EditMarkerNote => {
+            begin_marker_note_edit(license, session, markers, selected, text_edit)?;
+        }
         InputEvent::ExportMarkers => {
             export_current_markers(license, session, markers)?;
         }
@@ -911,6 +1323,150 @@ fn handle_marker_overlay_input(
             batch_marker_screenshots(license, session, markers);
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn begin_marker_note_edit(
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    markers: &ReviewMarkers,
+    selected: &Option<usize>,
+    text_edit: &mut Option<TextEditState>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !license.can_edit_marker_notes() {
+        session.show_status_message(PRO_REVIEW_UPSELL);
+        return Ok(());
+    }
+    let Some(path) = session.current_media_path() else {
+        session.show_status_message("Open a file to edit marker notes");
+        return Ok(());
+    };
+    let marker_index = selected.unwrap_or(0);
+    let Some(marker) = markers.markers_for(path).get(marker_index).copied() else {
+        session.show_status_message("No marker selected");
+        return Ok(());
+    };
+    *text_edit = Some(TextEditState::MarkerNote {
+        marker_index,
+        buffer: bounded_note_text(marker.note.as_deref().unwrap_or("")),
+        ignore_first_char: Some('n'),
+    });
+    if let Some(edit) = text_edit.as_ref() {
+        session.show_status_message(&edit.prompt());
+    }
+    Ok(())
+}
+
+fn handle_review_queue_overlay_input(
+    input: &InputEvent,
+    license: &LicenseState,
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    queues: &mut SavedReviewQueues,
+    selected: &mut Option<usize>,
+    active_review_queue_name: &mut Option<String>,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sel = selected.unwrap_or(0);
+    match input {
+        InputEvent::ToggleReviewQueueOverlay | InputEvent::EscapeKey => {
+            session.clear_review_queue_overlay();
+            *selected = None;
+        }
+        InputEvent::NavigateUp => {
+            let s = sel.saturating_sub(1);
+            *selected = Some(show_review_queue_overlay(
+                session,
+                queues,
+                s,
+                active_review_queue_name.as_deref(),
+            )?);
+        }
+        InputEvent::NavigateDown => {
+            let len = queues.queues().len();
+            let s = if len == 0 { 0 } else { (sel + 1).min(len - 1) };
+            *selected = Some(show_review_queue_overlay(
+                session,
+                queues,
+                s,
+                active_review_queue_name.as_deref(),
+            )?);
+        }
+        InputEvent::Confirm => {
+            if !license.can_load_review_queues() {
+                session.show_status_message(PRO_REVIEW_UPSELL);
+                return Ok(());
+            }
+            load_selected_review_queue(
+                session,
+                recent,
+                current,
+                play_queue,
+                queues,
+                selected,
+                active_review_queue_name,
+                sel,
+                now,
+            )?;
+        }
+        InputEvent::RemoveSelected => {
+            if !license.can_delete_review_queues() {
+                session.show_status_message(PRO_REVIEW_UPSELL);
+                return Ok(());
+            }
+            let removed_name = queues.queues().get(sel).map(|queue| queue.name.clone());
+            if queues.remove_index(sel) {
+                if removed_name.as_deref() == active_review_queue_name.as_deref() {
+                    *active_review_queue_name = None;
+                }
+                queues.save();
+                let next = show_review_queue_overlay(
+                    session,
+                    queues,
+                    sel,
+                    active_review_queue_name.as_deref(),
+                )?;
+                *selected = Some(next);
+                session.show_status_message("Review queue deleted");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn load_selected_review_queue(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    queues: &SavedReviewQueues,
+    selected: &mut Option<usize>,
+    active_review_queue_name: &mut Option<String>,
+    index: usize,
+    now: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(saved) = queues.queues().get(index).cloned() else {
+        return Ok(());
+    };
+    let existing = SavedReviewQueues::existing_items(&saved);
+    let skipped = saved.items.len().saturating_sub(existing.len());
+    let queue = PlayQueue::from_ordered_paths(existing);
+    if queue.is_empty() {
+        session.show_status_message("No existing files in saved queue");
+        return Ok(());
+    }
+    session.clear_review_queue_overlay();
+    *selected = None;
+    open_queue(session, recent, current, play_queue, queue, now)?;
+    *active_review_queue_name = Some(saved.name);
+    if skipped == 0 {
+        session.show_status_message("Loaded review queue");
+    } else {
+        session.show_status_message(&format!("Loaded queue, skipped {skipped} missing files"));
     }
     Ok(())
 }

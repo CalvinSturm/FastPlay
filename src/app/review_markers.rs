@@ -23,6 +23,8 @@ pub enum MarkerExportFormat {
     Csv,
 }
 
+pub const MAX_MARKER_NOTE_CHARS: usize = 240;
+
 fn key_for(path: &Path) -> String {
     path.to_string_lossy().to_ascii_lowercase()
 }
@@ -104,19 +106,23 @@ impl ReviewMarkers {
     }
 
     pub fn remove_for_file_index(&mut self, media_path: &Path, selected: usize) -> bool {
-        let key = key_for(media_path);
-        let mut matches: Vec<(usize, u64)> = self
-            .markers
-            .iter()
-            .enumerate()
-            .filter(|(_, marker)| key_for(&marker.media_path) == key)
-            .map(|(index, marker)| (index, marker.timestamp_ms))
-            .collect();
-        matches.sort_by_key(|(_, timestamp_ms)| *timestamp_ms);
-        let Some((index, _)) = matches.get(selected).copied() else {
+        let Some(index) = self.storage_index_for_file_index(media_path, selected) else {
             return false;
         };
         self.markers.remove(index);
+        true
+    }
+
+    pub fn set_note_for_file_index(
+        &mut self,
+        media_path: &Path,
+        selected: usize,
+        note: &str,
+    ) -> bool {
+        let Some(index) = self.storage_index_for_file_index(media_path, selected) else {
+            return false;
+        };
+        self.markers[index].note = normalize_note(note);
         true
     }
 
@@ -161,6 +167,33 @@ impl ReviewMarkers {
                 .cmp(&key_for(&b.media_path))
                 .then(a.timestamp_ms.cmp(&b.timestamp_ms))
         });
+    }
+
+    fn storage_index_for_file_index(&self, media_path: &Path, selected: usize) -> Option<usize> {
+        let key = key_for(media_path);
+        let mut matches: Vec<(usize, u64)> = self
+            .markers
+            .iter()
+            .enumerate()
+            .filter(|(_, marker)| key_for(&marker.media_path) == key)
+            .map(|(index, marker)| (index, marker.timestamp_ms))
+            .collect();
+        matches.sort_by_key(|(_, timestamp_ms)| *timestamp_ms);
+        matches.get(selected).map(|(index, _)| *index)
+    }
+}
+
+pub fn bounded_note_text(note: &str) -> String {
+    note.chars().take(MAX_MARKER_NOTE_CHARS).collect()
+}
+
+fn normalize_note(note: &str) -> Option<String> {
+    let bounded = bounded_note_text(note);
+    let trimmed = bounded.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -359,6 +392,67 @@ mod tests {
             .map(|marker| marker.timestamp_ms)
             .collect();
         assert_eq!(got, vec![1_000, 3_000]);
+    }
+
+    #[test]
+    fn marker_note_is_bounded_and_persisted() {
+        let path = unique_temp_file("bounded_note");
+        let media = Path::new("clip.mp4");
+        let mut markers = ReviewMarkers::default();
+        markers.add_marker(media, 1_000);
+        let long_note = "x".repeat(MAX_MARKER_NOTE_CHARS + 20);
+        assert!(markers.set_note_for_file_index(media, 0, &long_note));
+        assert_eq!(
+            markers.markers_for(media)[0]
+                .note
+                .as_ref()
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_MARKER_NOTE_CHARS
+        );
+
+        markers.save_to_path(&path).unwrap();
+        let loaded = ReviewMarkers::load_from_path(&path).unwrap();
+        assert_eq!(
+            loaded.markers_for(media)[0]
+                .note
+                .as_ref()
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_MARKER_NOTE_CHARS
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn blank_marker_note_clears_note() {
+        let media = Path::new("clip.mp4");
+        let mut markers = ReviewMarkers::default();
+        markers.add_marker(media, 1_000);
+        assert!(markers.set_note_for_file_index(media, 0, "needs review"));
+        assert!(markers.set_note_for_file_index(media, 0, "   "));
+        assert_eq!(markers.markers_for(media)[0].note, None);
+    }
+
+    #[test]
+    fn export_txt_includes_marker_notes() {
+        let dir = std::env::temp_dir().join(format!(
+            "fastplay_review_markers_txt_export_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let media = Path::new(r"C:\Videos\clip.mp4");
+        let mut markers = ReviewMarkers::default();
+        markers.add_marker(media, 1_234);
+        markers.set_note_for_file_index(media, 0, "tighten this cut");
+        let out = markers
+            .export_for_file(media, &dir, MarkerExportFormat::Txt)
+            .unwrap();
+        let contents = std::fs::read_to_string(&out).unwrap();
+        assert!(contents.contains("0:01.234\ttighten this cut"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
