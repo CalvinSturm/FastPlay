@@ -6,14 +6,23 @@ FastPlay Pro is an app-level review workflow layer. It must not gate normal loca
 
 `src/license.rs` owns the tier and feature capability checks. Feature code should call methods such as `can_save_markers()` or `can_export_markers()` instead of scattering tier comparisons.
 
-Current activation is intentionally minimal:
+Current activation is intentionally app-local:
 
 - default tier: FastPlay Free
 - development-only override: `FASTPLAY_PRO_DEV=1`
-- no license secrets are stored
-- no telemetry, account creation, DRM, or server dependency
+- Lemon Squeezy license activate, validate, and deactivate calls
+- local license metadata under `%APPDATA%\FastPlay\license.tsv`
+- no telemetry, account creation, DRM, or server dependency for normal playback
 
-The Lemon Squeezy activation PR should replace or extend the tier source while preserving the centralized capability methods.
+`license.tsv` stores the license key and instance id needed by Lemon Squeezy for later validation and deactivation. This is local app metadata, not secure secret storage, and FastPlay does not present it as DRM.
+
+License controls are intentionally keyboard-first and non-blocking to normal playback:
+
+- `Ctrl+Shift+L`: enter and activate a license key
+- `Ctrl+Shift+V`: validate the saved license
+- `Ctrl+Shift+D`: deactivate the saved license
+
+Startup validation runs in a background thread when a stored license exists so the player does not block the playback open path on a network request. Pro capability checks still flow through `LicenseState`.
 
 ## Marker storage
 
@@ -46,7 +55,6 @@ Saved review queues live under `%APPDATA%\FastPlay\review_queues.tsv`. The UI is
 
 Still deferred:
 
-- Lemon Squeezy activation
 - reliable batch screenshots from marker timestamps
 
 ## Adding Pro features

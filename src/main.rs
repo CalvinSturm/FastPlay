@@ -27,8 +27,11 @@ mod platform;
 mod playback;
 mod render;
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, TryRecvError},
+    time::{Duration, Instant},
+};
 
 use app::commands::SessionCommand;
 use app::play_queue::PlayQueue;
@@ -40,7 +43,10 @@ use app::review_markers::{
 use app::review_queue::{bounded_queue_name, SavedReviewQueues, MAX_REVIEW_QUEUE_NAME_CHARS};
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
-use license::LicenseState;
+use license::{
+    activate_license_key, deactivate_stored_license, validate_stored_license, LicenseSource,
+    LicenseState, FASTPLAY_PRO_BUY_URL,
+};
 use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
 use platform::input::InputEvent;
 use platform::open_dialog::show_open_file_dialog;
@@ -102,7 +108,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let window = NativeWindow::create("FastPlay", 1280, 720)?;
     let mut session = PlaybackSession::new(window)?;
     let mut timeline_ui = TimelineUiState::new();
-    let license = LicenseState::detect();
+    let mut license = LicenseState::detect();
+    let mut license_validation_rx = maybe_start_license_validation(&license);
 
     ffi::dxgi::install_modal_tick(&mut session);
 
@@ -157,6 +164,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mut review_queue_selected,
                     &mut active_review_queue_name,
                     &play_queue,
+                    &mut license,
                 )?;
                 continue;
             }
@@ -244,6 +252,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mut review_queue_selected,
                     active_review_queue_name.as_deref(),
                 )?;
+                continue;
+            }
+            if matches!(input, InputEvent::BeginLicenseActivation) {
+                begin_license_activation(&mut session, &mut text_edit);
+                continue;
+            }
+            if matches!(input, InputEvent::OpenProPurchasePage) {
+                open_pro_purchase_page(&mut session);
+                continue;
+            }
+            if matches!(input, InputEvent::ValidateLicense) {
+                license_validation_rx = Some(start_license_validation());
+                session.show_status_message("Validating FastPlay Pro license...");
+                continue;
+            }
+            if matches!(input, InputEvent::DeactivateLicense) {
+                deactivate_license(&mut session, &mut license);
                 continue;
             }
 
@@ -345,6 +370,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         timeline_ui.update(&mut session, now)?;
+        poll_license_validation(&mut session, &mut license, &mut license_validation_rx);
         session.tick(now)?;
         // A natural end-of-file (no loop/auto-replay/out-point) latches the
         // ended signal exactly once; auto-advance to the next queued item.
@@ -434,6 +460,7 @@ fn show_recent_overlay(
 
 const PRO_REVIEW_UPSELL: &str =
     "FastPlay Pro unlocks review tools: saved queues, timestamp markers, marker notes, exports, and batch screenshots. Playback stays free.";
+const MAX_LICENSE_KEY_CHARS: usize = 160;
 
 enum TextEditState {
     MarkerNote {
@@ -443,6 +470,10 @@ enum TextEditState {
     },
     ReviewQueueName {
         buffer: String,
+    },
+    LicenseKey {
+        buffer: String,
+        ignore_first_char: Option<char>,
     },
 }
 
@@ -469,6 +500,26 @@ impl TextEditState {
                     buffer.push(ch);
                 }
             }
+            TextEditState::LicenseKey {
+                buffer,
+                ignore_first_char,
+            } => {
+                if ignore_first_char
+                    .take()
+                    .is_some_and(|ignored| ignored.eq_ignore_ascii_case(&ch))
+                {
+                    return;
+                }
+                if buffer.chars().count() < MAX_LICENSE_KEY_CHARS {
+                    buffer.push(ch);
+                }
+            }
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        for ch in text.chars().filter(|ch| !ch.is_control()) {
+            self.push_char(ch);
         }
     }
 
@@ -485,15 +536,27 @@ impl TextEditState {
             TextEditState::ReviewQueueName { buffer } => {
                 buffer.pop();
             }
+            TextEditState::LicenseKey {
+                buffer,
+                ignore_first_char,
+            } => {
+                *ignore_first_char = None;
+                buffer.pop();
+            }
         }
     }
 
     fn clear_pending_shortcut_char(&mut self) {
-        if let TextEditState::MarkerNote {
-            ignore_first_char, ..
-        } = self
-        {
-            *ignore_first_char = None;
+        match self {
+            TextEditState::MarkerNote {
+                ignore_first_char, ..
+            }
+            | TextEditState::LicenseKey {
+                ignore_first_char, ..
+            } => {
+                *ignore_first_char = None;
+            }
+            TextEditState::ReviewQueueName { .. } => {}
         }
     }
 
@@ -505,7 +568,91 @@ impl TextEditState {
             TextEditState::ReviewQueueName { buffer } => {
                 format!("Queue name: {buffer}_")
             }
+            TextEditState::LicenseKey { buffer, .. } => {
+                let count = buffer.chars().count();
+                if count == 0 {
+                    "License key: _".to_string()
+                } else {
+                    format!("License key: {}_", "*".repeat(count.min(32)))
+                }
+            }
         }
+    }
+}
+
+type LicenseValidationRx = Receiver<Result<LicenseState, String>>;
+
+fn maybe_start_license_validation(license: &LicenseState) -> Option<LicenseValidationRx> {
+    if license.should_validate_on_startup() {
+        Some(start_license_validation())
+    } else {
+        None
+    }
+}
+
+fn start_license_validation() -> LicenseValidationRx {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(validate_stored_license());
+    });
+    rx
+}
+
+fn poll_license_validation(
+    session: &mut PlaybackSession,
+    license: &mut LicenseState,
+    rx: &mut Option<LicenseValidationRx>,
+) {
+    let Some(receiver) = rx else {
+        return;
+    };
+    match receiver.try_recv() {
+        Ok(Ok(next)) => {
+            *license = next;
+            session.show_status_message(&license.status_label);
+            *rx = None;
+        }
+        Ok(Err(error)) => {
+            *license = LicenseState::detect();
+            session.show_status_message(&format!("License validation failed: {error}"));
+            *rx = None;
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => {
+            *rx = None;
+        }
+    }
+}
+
+fn begin_license_activation(session: &mut PlaybackSession, text_edit: &mut Option<TextEditState>) {
+    *text_edit = Some(TextEditState::LicenseKey {
+        buffer: String::new(),
+        ignore_first_char: Some('l'),
+    });
+    session.show_status_message("License key: _");
+}
+
+fn open_pro_purchase_page(session: &mut PlaybackSession) {
+    match ffi::shell::open_url(FASTPLAY_PRO_BUY_URL) {
+        Ok(()) => session.show_status_message("Opening FastPlay Pro purchase page"),
+        Err(error) => session.show_status_message(&format!(
+            "Could not open browser: {error}. Buy Pro: {FASTPLAY_PRO_BUY_URL}"
+        )),
+    }
+}
+
+fn deactivate_license(session: &mut PlaybackSession, license: &mut LicenseState) {
+    match deactivate_stored_license() {
+        Ok(next) => {
+            *license = next;
+            if license.source == LicenseSource::DevelopmentOverride {
+                session
+                    .show_status_message("License deactivated; development override still active");
+            } else {
+                session.show_status_message("FastPlay Pro deactivated");
+            }
+        }
+        Err(error) => session.show_status_message(&format!("Deactivate failed: {error}")),
     }
 }
 
@@ -772,11 +919,18 @@ fn handle_text_edit_input(
     review_queue_selected: &mut Option<usize>,
     active_review_queue_name: &mut Option<String>,
     play_queue: &PlayQueue,
+    license: &mut LicenseState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match input {
         InputEvent::TextChar(ch) => {
             if let Some(edit) = text_edit.as_mut() {
                 edit.push_char(*ch);
+                session.show_status_message(&edit.prompt());
+            }
+        }
+        InputEvent::PasteText(text) => {
+            if let Some(edit) = text_edit.as_mut() {
+                edit.push_text(text);
                 session.show_status_message(&edit.prompt());
             }
         }
@@ -797,6 +951,7 @@ fn handle_text_edit_input(
                     review_queue_selected,
                     active_review_queue_name,
                     play_queue,
+                    license,
                 )?;
             }
         }
@@ -824,6 +979,7 @@ fn finish_text_edit(
     review_queue_selected: &mut Option<usize>,
     active_review_queue_name: &mut Option<String>,
     play_queue: &PlayQueue,
+    license: &mut LicenseState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match edit {
         TextEditState::MarkerNote {
@@ -858,6 +1014,21 @@ fn finish_text_edit(
                 )?);
             }
         }
+        TextEditState::LicenseKey { buffer, .. } => match activate_license_key(&buffer) {
+            Ok(result) => {
+                *license = result.state;
+                if let Some(email) = result.customer_email {
+                    session.show_status_message(&format!("FastPlay Pro activated for {email}"));
+                } else {
+                    session.show_status_message("FastPlay Pro activated");
+                }
+            }
+            Err(error) => {
+                session.show_status_message(&format!(
+                    "Activation failed: {error}. Buy Pro: {FASTPLAY_PRO_BUY_URL}"
+                ));
+            }
+        },
     }
     Ok(())
 }
@@ -875,6 +1046,9 @@ fn cancel_text_edit(
         }
         TextEditState::ReviewQueueName { .. } => {
             session.show_status_message("Review queue save canceled");
+        }
+        TextEditState::LicenseKey { .. } => {
+            session.show_status_message("License activation canceled");
         }
     }
     Ok(())

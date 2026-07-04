@@ -2269,6 +2269,10 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("Ctrl+Shift+O", "Recent files"),
         ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
+        ("Pro buy", "Ctrl+Shift+P opens purchase page"),
+        ("Pro code", "Ctrl+Shift+L opens license key entry"),
+        ("Pro paste", "Ctrl+V, then Enter to activate"),
+        ("Pro check/off", "Ctrl+Shift+V / Ctrl+Shift+D"),
         ("M", "Add Pro marker"),
         ("Ctrl+M", "Pro markers"),
         ("N", "Edit marker note"),
@@ -2298,8 +2302,8 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
     const HEADER_H: i32 = 24;
     const SEP: i32 = 8;
     const LINE_H: i32 = 20;
-    const COL_DESC_X: i32 = PAD_X + 118; // where description column begins
-    const BW: u32 = 390;
+    const COL_DESC_X: i32 = PAD_X + 148; // where description column begins
+    const BW: u32 = 560;
     let bh = (PAD_Y + HEADER_H + SEP + ROWS.len() as i32 * LINE_H + PAD_Y) as u32;
 
     unsafe {
@@ -2428,7 +2432,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
                 px[0] = 22;
                 px[1] = 20;
                 px[2] = 18;
-                px[3] = 218;
+                px[3] = 246;
             }
         }
 
@@ -2446,7 +2450,6 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
                 [255, 255, 255, 60],
             );
         }
-
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
         debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());

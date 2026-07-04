@@ -77,7 +77,12 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         | InputEvent::BatchMarkerScreenshots
         | InputEvent::SaveReviewQueue
         | InputEvent::ToggleReviewQueueOverlay
+        | InputEvent::BeginLicenseActivation
+        | InputEvent::OpenProPurchasePage
+        | InputEvent::ValidateLicense
+        | InputEvent::DeactivateLicense
         | InputEvent::TextChar(_)
+        | InputEvent::PasteText(_)
         | InputEvent::NavigateUp
         | InputEvent::NavigateDown
         | InputEvent::Confirm
@@ -220,6 +225,11 @@ mod tests {
         assert_eq!(command_for(&InputEvent::BatchMarkerScreenshots), None);
         assert_eq!(command_for(&InputEvent::SaveReviewQueue), None);
         assert_eq!(command_for(&InputEvent::ToggleReviewQueueOverlay), None);
+        assert_eq!(command_for(&InputEvent::BeginLicenseActivation), None);
+        assert_eq!(command_for(&InputEvent::OpenProPurchasePage), None);
+        assert_eq!(command_for(&InputEvent::ValidateLicense), None);
+        assert_eq!(command_for(&InputEvent::DeactivateLicense), None);
         assert_eq!(command_for(&InputEvent::TextChar('x')), None);
+        assert_eq!(command_for(&InputEvent::PasteText("x".to_string())), None);
     }
 }
