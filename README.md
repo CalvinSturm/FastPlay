@@ -8,7 +8,7 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
-<img width="550" height="480" alt="ezgif-1084bbf2cf26c3f5" src="https://github.com/user-attachments/assets/79667f65-6150-46d8-bb7c-a5024b53d2d1" />
+<img width="800" height="450" alt="FastPlay playing a local video with timeline scrubbing controls" src="docs/assets/fastplay-demo.gif" />
 
 ## FastPlay Free and FastPlay Pro
 
