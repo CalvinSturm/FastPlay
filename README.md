@@ -10,6 +10,32 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 
 <img width="550" height="480" alt="ezgif-1084bbf2cf26c3f5" src="https://github.com/user-attachments/assets/79667f65-6150-46d8-bb7c-a5024b53d2d1" />
 
+## FastPlay Free and FastPlay Pro
+
+FastPlay Free remains focused on fast local playback: opening local files quickly, smooth seeking, queue playback, resume, keyboard controls, screenshots, subtitles, in/out range, and loop range.
+
+FastPlay Pro is the review-workflow layer for creators, editors, QA testers, and power users. The paid wedge is not paid playback; it is saving time while reviewing footage.
+
+### Pro Preview v0.5.0 foundation
+
+Implemented in the Pro Preview foundation:
+
+- timestamp markers for the current media file
+- marker overlay with keyboard selection, seek, and removal
+- marker persistence in local app data
+- marker export to `.txt` and `.csv`
+- saved review queue storage foundation for a future UI
+- centralized Free/Pro capability checks with a development-only override
+
+Not yet implemented:
+
+- Lemon Squeezy activation
+- marker note editing UI
+- reliable batch screenshots from markers
+- saved review queue UI
+
+FastPlay Pro launch pricing target: $19 one-time. Standard target: $29 one-time. These are planning targets, not a subscription.
+
 ## Why FastPlay exists
 
 Most of the time you open a video player, you are not managing a library or transcoding a stream. You are opening one local file and watching it. FastPlay is built around that single moment: how fast the file opens, how quickly the first frame appears, whether it resumes where you left off, and how cleanly it scrubs and gets out of the way.
@@ -53,6 +79,8 @@ Measured cross-player comparisons are still pending, so FastPlay does not claim 
 | `Ctrl+Shift+O` | Recent files overlay (↑↓ select · Enter open · Del remove · Esc close) |
 | `PageUp` / `PageDown` | Previous / next file in the play queue |
 | `Ctrl+S` | Save screenshot |
+| `M` | Add timestamp marker (Pro Preview / development override) |
+| `Ctrl+M` | Marker overlay (↑↓ select · Enter seek · Del remove · E export · B batch placeholder · Esc close) |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
 | `Shift+I` | Clear in-point |
@@ -120,6 +148,14 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 - half native resolution window sizing
 - volume control with on-screen overlay
 - hold-to-show keybind reference overlay
+
+### Pro Preview review workflow
+- local timestamp marker persistence for the current media file
+- keyboard marker overlay for marker review and seeking
+- marker removal from the focused marker overlay
+- marker export for the current file as `.txt` and `.csv`
+- Free-mode Pro copy that does not block normal playback
+- development-only Pro override via `FASTPLAY_PRO_DEV=1`
 
 ### Subtitles
 - external `.srt` subtitle overlay
@@ -253,6 +289,8 @@ The subtitle sidecar will be auto-loaded if present.
 - GPU alpha composition during present
 
 For the full implementation charter, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+For the Pro review-workflow capability and storage boundary, see [`docs/pro-foundation.md`](./docs/pro-foundation.md).
 
 ## Project structure
 

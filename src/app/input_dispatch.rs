@@ -69,6 +69,11 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         | InputEvent::QueueNext
         // Recent-files overlay events are handled by the event loop.
         | InputEvent::ToggleRecentOverlay
+        // Review marker workflow is owned by the event loop beside Recent/queue state.
+        | InputEvent::AddMarker
+        | InputEvent::ToggleMarkerOverlay
+        | InputEvent::ExportMarkers
+        | InputEvent::BatchMarkerScreenshots
         | InputEvent::NavigateUp
         | InputEvent::NavigateDown
         | InputEvent::Confirm
@@ -204,5 +209,9 @@ mod tests {
         assert_eq!(command_for(&InputEvent::OpenFileDialog), None);
         assert_eq!(command_for(&InputEvent::QueuePrevious), None);
         assert_eq!(command_for(&InputEvent::QueueNext), None);
+        assert_eq!(command_for(&InputEvent::AddMarker), None);
+        assert_eq!(command_for(&InputEvent::ToggleMarkerOverlay), None);
+        assert_eq!(command_for(&InputEvent::ExportMarkers), None);
+        assert_eq!(command_for(&InputEvent::BatchMarkerScreenshots), None);
     }
 }

@@ -1298,6 +1298,13 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::StepFrameBackward);
                     }
+                    // B while marker overlay is focused -> batch marker screenshots.
+                    0x42 if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::BatchMarkerScreenshots);
+                    }
                     0x52 if ctrl_held => {
                         state
                             .input_events
@@ -1360,6 +1367,23 @@ unsafe extern "system" fn window_proc(
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::RotateCounterClockwise);
+                    }
+                    // E while marker overlay is focused -> export current-file markers.
+                    0x45 if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ExportMarkers);
+                    }
+                    // Ctrl+M -> marker overlay; M -> add marker.
+                    0x4D if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::ToggleMarkerOverlay);
+                    }
+                    0x4D if (lparam.0 as u32 >> 30) & 1 == 0 => {
+                        state.input_events.borrow_mut().push(InputEvent::AddMarker);
                     }
                     // Ctrl+W → fit window to video (no black padding)
                     0x57 if ctrl_held => {

@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     collections::VecDeque,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
@@ -278,6 +278,10 @@ impl PlaybackSession {
         self.media_duration
     }
 
+    pub fn current_media_path(&self) -> Option<&Path> {
+        self.current_source.as_ref().map(|source| source.path())
+    }
+
     pub fn auto_replay(&self) -> bool {
         self.clip_range.auto_replay()
     }
@@ -337,6 +341,22 @@ impl PlaybackSession {
     }
 
     pub fn clear_recent_overlay(&mut self) {
+        self.presenter.clear_recent_overlay();
+        self.present_needed = true;
+    }
+
+    pub fn show_marker_overlay(
+        &mut self,
+        rows: &[(String, String)],
+        selected: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
+        self.presenter.show_marker_overlay(rows, selected, vw, vh)?;
+        self.present_needed = true;
+        Ok(())
+    }
+
+    pub fn clear_marker_overlay(&mut self) {
         self.presenter.clear_recent_overlay();
         self.present_needed = true;
     }

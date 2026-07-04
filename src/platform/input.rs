@@ -47,6 +47,10 @@ pub enum InputEvent {
     OpenFileDialog,
     // Recent-files overlay (handled by the event loop, not the coordinator).
     ToggleRecentOverlay,
+    AddMarker,
+    ToggleMarkerOverlay,
+    ExportMarkers,
+    BatchMarkerScreenshots,
     NavigateUp,
     NavigateDown,
     Confirm,
