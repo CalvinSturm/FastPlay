@@ -398,6 +398,19 @@ impl PlaybackSession {
         self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
     }
 
+    /// Keep the current status message on screen past its normal timeout.
+    /// Called once per event-loop tick while a text-entry prompt is active, so
+    /// the prompt never expires mid-edit; if the overlay slot was cleared by
+    /// something else (e.g. a media reopen), the prompt is shown again. This
+    /// only re-arms the timer in the common case — it does not re-render.
+    pub fn keep_status_message_visible(&mut self, text: &str) {
+        if self.overlay.volume_overlay_until.is_some() {
+            self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
+        } else {
+            self.show_status_message(text);
+        }
+    }
+
     /// Consume the edge-triggered "playback reached its natural end" signal.
     /// Returns `true` exactly once per real transition into the ended state
     /// (natural end-of-file, with no loop/auto-replay active), and `false` on

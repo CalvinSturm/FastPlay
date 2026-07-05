@@ -369,6 +369,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
+        // Text-entry prompts (license key, marker note, queue name) render
+        // through the transient status slot, which normally times out after
+        // ~1 s. Keep the prompt visible for as long as entry mode is active so
+        // keystrokes never go into an invisible buffer.
+        if let Some(edit) = text_edit.as_ref() {
+            session.keep_status_message_visible(&edit.prompt());
+        }
         timeline_ui.update(&mut session, now)?;
         poll_license_validation(&mut session, &mut license, &mut license_validation_rx);
         session.tick(now)?;
@@ -459,7 +466,7 @@ fn show_recent_overlay(
 }
 
 const PRO_REVIEW_UPSELL: &str =
-    "FastPlay Pro unlocks review tools: saved queues, timestamp markers, marker notes, exports, and batch screenshots. Playback stays free.";
+    "FastPlay Pro unlocks review tools: saved queues, timestamp markers, marker notes, and exports. Playback stays free.";
 const MAX_LICENSE_KEY_CHARS: usize = 160;
 
 enum TextEditState {
@@ -713,7 +720,7 @@ fn marker_overlay_footer(
         .filter(|note| !note.trim().is_empty())
         .unwrap_or("No note");
     format!(
-        "{count} marker{} | {} | {} | N Note  E Export  B Batch  Esc",
+        "{count} marker{} | {} | {} | N Note  E Export  Esc",
         if count == 1 { "" } else { "s" },
         format_marker_timestamp_ms(marker.timestamp_ms),
         truncate_for_status(note, 54)
