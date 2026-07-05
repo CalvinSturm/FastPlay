@@ -2142,7 +2142,7 @@ fn render_timeline_bitmap(
 }
 
 fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
-    let text = "Drop a file to play";
+    let text = "Drop a file to play \u{00B7} Ctrl+O opens \u{00B7} Hold H for controls";
     let mut text_wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
 
     unsafe {
@@ -2269,10 +2269,11 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("Ctrl+Shift+O", "Recent files"),
         ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
-        ("Pro buy", "Ctrl+Shift+P opens purchase page"),
-        ("Pro code", "Ctrl+Shift+L opens license key entry"),
-        ("Pro paste", "Ctrl+V, then Enter to activate"),
-        ("Pro check/off", "Ctrl+Shift+V / Ctrl+Shift+D"),
+        ("Ctrl+Shift+P", "Buy FastPlay Pro"),
+        ("Ctrl+Shift+L", "Enter license key"),
+        ("Ctrl+V", "Paste into text prompt"),
+        ("Ctrl+Shift+V", "Validate license"),
+        ("Ctrl+Shift+D", "Deactivate license"),
         ("M", "Add Pro marker"),
         ("Ctrl+M", "Pro markers"),
         ("N", "Edit marker note"),
