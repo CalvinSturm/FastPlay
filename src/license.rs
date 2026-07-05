@@ -1,5 +1,5 @@
 use std::{
-    fs, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -50,6 +50,58 @@ pub struct LicenseActivationResult {
     pub customer_email: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LicenseErrorKind {
+    Local,
+    Transient,
+    Authoritative,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LicenseError {
+    kind: LicenseErrorKind,
+    message: String,
+}
+
+impl LicenseError {
+    fn local(message: impl Into<String>) -> Self {
+        Self {
+            kind: LicenseErrorKind::Local,
+            message: message.into(),
+        }
+    }
+
+    fn transient(message: impl Into<String>) -> Self {
+        Self {
+            kind: LicenseErrorKind::Transient,
+            message: message.into(),
+        }
+    }
+
+    fn authoritative(message: impl Into<String>) -> Self {
+        Self {
+            kind: LicenseErrorKind::Authoritative,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> LicenseErrorKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for LicenseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LicenseError {}
+
 impl Default for LicenseState {
     fn default() -> Self {
         Self {
@@ -99,9 +151,10 @@ impl LicenseState {
             };
         }
         if !license_status_allows_pro(&stored.license_status) {
+            let status = license_status_label(&stored.license_status);
             return Self {
                 tier: LicenseTier::Free,
-                status_label: "FastPlay Free (license inactive)".to_string(),
+                status_label: format!("FastPlay Free (license {status})"),
                 source: LicenseSource::NeedsValidation,
             };
         }
@@ -243,10 +296,18 @@ impl StoredLicense {
     }
 }
 
-pub fn activate_license_key(license_key: &str) -> Result<LicenseActivationResult, String> {
+#[allow(dead_code)]
+pub fn activate_license_key(license_key: &str) -> Result<LicenseActivationResult, LicenseError> {
+    activate_license_key_if_current(license_key, || true)
+}
+
+pub fn activate_license_key_if_current(
+    license_key: &str,
+    is_current: impl Fn() -> bool,
+) -> Result<LicenseActivationResult, LicenseError> {
     let license_key = license_key.trim();
     if license_key.is_empty() {
-        return Err("License key required".to_string());
+        return Err(LicenseError::local("License key required"));
     }
 
     let instance_name = instance_name();
@@ -258,30 +319,41 @@ pub fn activate_license_key(license_key: &str) -> Result<LicenseActivationResult
         ],
     )?;
     if response.activated != Some(true) {
-        return Err(response
-            .error
-            .unwrap_or_else(|| "License activation failed".to_string()));
-    }
-    let product_id = response
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.product_id_u64());
-    if product_id != Some(FASTPLAY_PRO_PRODUCT_ID) {
-        return Err("That license is not for FastPlay Pro".to_string());
+        return Err(LicenseError::authoritative(
+            response
+                .error
+                .unwrap_or_else(|| "License activation failed".to_string()),
+        ));
     }
     let instance_id = response
         .instance
         .as_ref()
         .map(|instance| instance.id.trim().to_string())
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| "Activation response did not include an instance id".to_string())?;
+        .ok_or_else(|| {
+            LicenseError::transient("Activation response did not include an instance id")
+        })?;
+    let product_id = response
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.product_id_u64());
+    if product_id != Some(FASTPLAY_PRO_PRODUCT_ID) {
+        best_effort_deactivate_instance(license_key, &instance_id);
+        return Err(LicenseError::authoritative(
+            "That license is not for FastPlay Pro",
+        ));
+    }
     let license_status = response
         .license_key
         .as_ref()
         .map(|key| key.status.clone())
         .unwrap_or_else(|| "active".to_string());
     if !license_status_allows_pro(&license_status) {
-        return Err(format!("License is {license_status}"));
+        best_effort_deactivate_instance(license_key, &instance_id);
+        return Err(LicenseError::authoritative(format!(
+            "License is {}",
+            license_status_label(&license_status)
+        )));
     }
 
     let customer_email = response.meta.as_ref().and_then(|meta| {
@@ -299,37 +371,64 @@ pub fn activate_license_key(license_key: &str) -> Result<LicenseActivationResult
         customer_email: customer_email.clone(),
         last_validated_unix_ms: now_unix_ms(),
     };
-    stored
-        .save()
-        .map_err(|error| format!("Activated, but could not save license: {error}"))?;
+    if !is_current() {
+        best_effort_deactivate_instance(license_key, &stored.instance_id);
+        return Err(LicenseError::transient("License operation was superseded"));
+    }
+    stored.save().map_err(|error| {
+        LicenseError::local(format!("Activated, but could not save license: {error}"))
+    })?;
     Ok(LicenseActivationResult {
         state: LicenseState::from_stored_license(&stored, now_unix_ms()),
         customer_email,
     })
 }
 
-pub fn validate_stored_license() -> Result<LicenseState, String> {
+#[allow(dead_code)]
+pub fn validate_stored_license() -> Result<LicenseState, LicenseError> {
+    validate_stored_license_if_current(|| true)
+}
+
+pub fn validate_stored_license_if_current(
+    is_current: impl Fn() -> bool,
+) -> Result<LicenseState, LicenseError> {
     let stored = StoredLicense::load()
-        .map_err(|error| format!("Could not read saved license: {error}"))?
-        .ok_or_else(|| "No saved license".to_string())?;
-    let response = post_license_form(
+        .map_err(|error| LicenseError::local(format!("Could not read saved license: {error}")))?
+        .ok_or_else(|| LicenseError::local("No saved license"))?;
+    let response = match post_license_form(
         "validate",
         &[
             ("license_key", &stored.license_key),
             ("instance_id", &stored.instance_id),
         ],
-    )?;
+    ) {
+        Ok(response) => response,
+        Err(error) if error.kind() == LicenseErrorKind::Authoritative => {
+            let status = status_from_authoritative_error(error.message());
+            return persist_stored_denial(stored, &status, None, &is_current);
+        }
+        Err(error) => return Err(error),
+    };
+    if response.valid == Some(false) {
+        return persist_validation_denial(stored, &response, "invalid", &is_current);
+    }
     if response.valid != Some(true) {
-        return Err(response
-            .error
-            .unwrap_or_else(|| "License validation failed".to_string()));
+        return Err(LicenseError::transient(response.error.unwrap_or_else(
+            || "License validation response was incomplete".to_string(),
+        )));
     }
     let product_id = response
         .meta
         .as_ref()
         .and_then(|meta| meta.product_id_u64());
-    if product_id != Some(FASTPLAY_PRO_PRODUCT_ID) {
-        return Err("Saved license is not for FastPlay Pro".to_string());
+    if let Some(product_id) = product_id {
+        if product_id != FASTPLAY_PRO_PRODUCT_ID {
+            return persist_validation_denial(stored, &response, "wrong_product", &is_current);
+        }
+    } else {
+        return Err(LicenseError::transient(
+            "License validation response did not include a product id",
+        ));
     }
     let license_status = response
         .license_key
@@ -337,7 +436,7 @@ pub fn validate_stored_license() -> Result<LicenseState, String> {
         .map(|key| key.status.clone())
         .unwrap_or_else(|| stored.license_status.clone());
     if !license_status_allows_pro(&license_status) {
-        return Err(format!("License is {license_status}"));
+        return persist_validation_denial(stored, &response, &license_status, &is_current);
     }
     let customer_email = response
         .meta
@@ -350,30 +449,73 @@ pub fn validate_stored_license() -> Result<LicenseState, String> {
         last_validated_unix_ms: now_unix_ms(),
         ..stored
     };
-    updated
-        .save()
-        .map_err(|error| format!("Validated, but could not save license: {error}"))?;
+    if !is_current() {
+        return Err(LicenseError::transient("License operation was superseded"));
+    }
+    updated.save().map_err(|error| {
+        LicenseError::local(format!("Validated, but could not save license: {error}"))
+    })?;
     Ok(LicenseState::from_stored_license(&updated, now_unix_ms()))
 }
 
-pub fn deactivate_stored_license() -> Result<LicenseState, String> {
+#[allow(dead_code)]
+pub fn deactivate_stored_license() -> Result<LicenseState, LicenseError> {
+    deactivate_stored_license_if_current(|| true)
+}
+
+pub fn deactivate_stored_license_if_current(
+    is_current: impl Fn() -> bool,
+) -> Result<LicenseState, LicenseError> {
     let stored = StoredLicense::load()
-        .map_err(|error| format!("Could not read saved license: {error}"))?
-        .ok_or_else(|| "No saved license to deactivate".to_string())?;
-    let response = post_license_form(
+        .map_err(|error| LicenseError::local(format!("Could not read saved license: {error}")))?
+        .ok_or_else(|| LicenseError::local("No saved license to deactivate"))?;
+    let response = match post_license_form(
         "deactivate",
         &[
             ("license_key", &stored.license_key),
             ("instance_id", &stored.instance_id),
         ],
-    )?;
+    ) {
+        Ok(response) => response,
+        Err(error)
+            if error.kind() == LicenseErrorKind::Authoritative
+                && deactivation_error_allows_local_clear(error.message()) =>
+        {
+            if !is_current() {
+                return Err(LicenseError::transient("License operation was superseded"));
+            }
+            clear_stored_license().map_err(|clear_error| {
+                LicenseError::local(format!(
+                    "Activation is already gone, but could not clear local license: {clear_error}"
+                ))
+            })?;
+            return Ok(LicenseState::detect());
+        }
+        Err(error) => return Err(error),
+    };
     if response.deactivated != Some(true) {
-        return Err(response
+        let message = response
             .error
-            .unwrap_or_else(|| "License deactivation failed".to_string()));
+            .unwrap_or_else(|| "License deactivation failed".to_string());
+        if deactivation_error_allows_local_clear(&message) {
+            if !is_current() {
+                return Err(LicenseError::transient("License operation was superseded"));
+            }
+            clear_stored_license().map_err(|clear_error| {
+                LicenseError::local(format!(
+                    "Activation is already gone, but could not clear local license: {clear_error}"
+                ))
+            })?;
+            return Ok(LicenseState::detect());
+        }
+        return Err(LicenseError::authoritative(message));
     }
-    clear_stored_license()
-        .map_err(|error| format!("Deactivated, but could not clear license: {error}"))?;
+    if !is_current() {
+        return Err(LicenseError::transient("License operation was superseded"));
+    }
+    clear_stored_license().map_err(|error| {
+        LicenseError::local(format!("Deactivated, but could not clear license: {error}"))
+    })?;
     Ok(LicenseState::detect())
 }
 
@@ -388,10 +530,99 @@ pub fn clear_stored_license() -> io::Result<()> {
     }
 }
 
+fn persist_validation_denial(
+    stored: StoredLicense,
+    response: &LicenseApiResponse,
+    fallback_status: &str,
+    is_current: &impl Fn() -> bool,
+) -> Result<LicenseState, LicenseError> {
+    let status = response
+        .license_key
+        .as_ref()
+        .map(|key| key.status.as_str())
+        .unwrap_or(fallback_status);
+    let customer_email = response
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.customer_email.clone());
+    persist_stored_denial(stored, status, customer_email, is_current)
+}
+
+fn persist_stored_denial(
+    stored: StoredLicense,
+    status: &str,
+    customer_email: Option<String>,
+    is_current: &impl Fn() -> bool,
+) -> Result<LicenseState, LicenseError> {
+    let updated = denied_stored_license(stored, status, customer_email, now_unix_ms());
+    if !is_current() {
+        return Err(LicenseError::transient("License operation was superseded"));
+    }
+    updated.save().map_err(|error| {
+        LicenseError::local(format!(
+            "License is {}, but could not update local license: {error}",
+            license_status_label(status)
+        ))
+    })?;
+    Ok(LicenseState::from_stored_license(&updated, now_unix_ms()))
+}
+
+fn denied_stored_license(
+    stored: StoredLicense,
+    status: &str,
+    customer_email: Option<String>,
+    now_ms: u64,
+) -> StoredLicense {
+    let customer_email = customer_email.or(stored.customer_email);
+    StoredLicense {
+        license_status: normalized_denied_status(status),
+        customer_email,
+        last_validated_unix_ms: now_ms,
+        ..stored
+    }
+}
+
+fn status_from_authoritative_error(message: &str) -> String {
+    let message = message.to_ascii_lowercase();
+    for status in ["disabled", "expired", "refunded", "revoked", "invalid"] {
+        if message.contains(status) {
+            return status.to_string();
+        }
+    }
+    "invalid".to_string()
+}
+
+fn normalized_denied_status(status: &str) -> String {
+    let status = status.trim();
+    if status.is_empty() {
+        "invalid".to_string()
+    } else {
+        let normalized = status
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ' '))
+            .take(40)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if normalized.is_empty() {
+            "invalid".to_string()
+        } else {
+            normalized
+        }
+    }
+}
+
+fn best_effort_deactivate_instance(license_key: &str, instance_id: &str) {
+    let _ = post_license_form(
+        "deactivate",
+        &[("license_key", license_key), ("instance_id", instance_id)],
+    );
+}
+
 fn post_license_form(
     endpoint: &str,
     fields: &[(&str, &str)],
-) -> Result<LicenseApiResponse, String> {
+) -> Result<LicenseApiResponse, LicenseError> {
     let url = format!("{LICENSE_API_BASE}/{endpoint}");
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(8))
@@ -404,24 +635,61 @@ fn post_license_form(
         .set("Content-Type", "application/x-www-form-urlencoded")
         .send_form(fields)
         .map_err(format_ureq_error)?;
-    response
-        .into_json::<LicenseApiResponse>()
-        .map_err(|error| format!("Could not parse license response: {error}"))
+    response.into_json::<LicenseApiResponse>().map_err(|error| {
+        LicenseError::transient(format!("Could not parse license response: {error}"))
+    })
 }
 
-fn format_ureq_error(error: ureq::Error) -> String {
+fn format_ureq_error(error: ureq::Error) -> LicenseError {
     match error {
-        ureq::Error::Status(_, response) => response
-            .into_json::<LicenseApiResponse>()
-            .ok()
-            .and_then(|body| body.error)
-            .unwrap_or_else(|| "License server returned an error".to_string()),
-        ureq::Error::Transport(error) => format!("Could not reach license server: {error}"),
+        ureq::Error::Status(status, response) => {
+            let message = response
+                .into_json::<LicenseApiResponse>()
+                .ok()
+                .and_then(|body| body.error)
+                .unwrap_or_else(|| "License server returned an error".to_string());
+            if status >= 500 {
+                LicenseError::transient(message)
+            } else {
+                LicenseError::authoritative(message)
+            }
+        }
+        ureq::Error::Transport(error) => {
+            LicenseError::transient(format!("Could not reach license server: {error}"))
+        }
     }
 }
 
 fn license_status_allows_pro(status: &str) -> bool {
     matches!(status, "active" | "inactive")
+}
+
+fn license_status_label(status: &str) -> String {
+    let status = status.trim();
+    if status.is_empty() {
+        return "invalid".to_string();
+    }
+    status
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ' '))
+        .take(40)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn deactivation_error_allows_local_clear(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "already deactivated",
+        "already been deactivated",
+        "activation not found",
+        "instance not found",
+        "activation does not exist",
+        "instance does not exist",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn instance_name() -> String {
@@ -533,6 +801,26 @@ mod tests {
         }
     }
 
+    fn validation_response(
+        status: Option<&str>,
+        customer_email: Option<&str>,
+    ) -> LicenseApiResponse {
+        LicenseApiResponse {
+            activated: None,
+            valid: Some(false),
+            deactivated: None,
+            error: Some("License is no longer valid".to_string()),
+            license_key: status.map(|status| ApiLicenseKey {
+                status: status.to_string(),
+            }),
+            instance: None,
+            meta: Some(ApiMeta {
+                product_id: Some(serde_json::Value::Number(FASTPLAY_PRO_PRODUCT_ID.into())),
+                customer_email: customer_email.map(str::to_string),
+            }),
+        }
+    }
+
     #[test]
     fn defaults_to_free() {
         let license = LicenseState::detect_with(None, None, 1_000);
@@ -611,6 +899,64 @@ mod tests {
         let serialized = stored.serialize();
         let parsed = StoredLicense::parse(&serialized).unwrap();
         assert_eq!(parsed, stored);
+    }
+
+    #[test]
+    fn denied_validation_response_downgrades_stored_license_to_free() {
+        let stored = sample_stored(1_000);
+        let response = validation_response(Some("disabled"), Some("new@example.com"));
+        let updated = denied_stored_license(
+            stored,
+            "disabled",
+            response.meta.and_then(|meta| meta.customer_email),
+            2_000,
+        );
+
+        assert_eq!(updated.license_key, "key\\with\ttab");
+        assert_eq!(updated.instance_id, "instance");
+        assert_eq!(updated.product_id, FASTPLAY_PRO_PRODUCT_ID);
+        assert_eq!(updated.license_status, "disabled");
+        assert_eq!(updated.customer_email.as_deref(), Some("new@example.com"));
+        assert_eq!(updated.last_validated_unix_ms, 2_000);
+
+        let license = LicenseState::detect_with(None, Some(updated), 2_000);
+        assert_eq!(license.tier, LicenseTier::Free);
+        assert_eq!(license.source, LicenseSource::NeedsValidation);
+        assert_eq!(license.status_label, "FastPlay Free (license disabled)");
+    }
+
+    #[test]
+    fn denied_validation_without_status_stores_invalid_status() {
+        let stored = sample_stored(1_000);
+        let response = validation_response(None, None);
+        let updated = denied_stored_license(
+            stored,
+            "invalid",
+            response.meta.and_then(|meta| meta.customer_email),
+            2_000,
+        );
+
+        assert_eq!(updated.license_status, "invalid");
+        assert_eq!(updated.customer_email.as_deref(), Some("test@example.com"));
+        let license = LicenseState::detect_with(None, Some(updated), 2_000);
+        assert_eq!(license.tier, LicenseTier::Free);
+        assert_eq!(license.status_label, "FastPlay Free (license invalid)");
+    }
+
+    #[test]
+    fn deactivation_local_clear_is_allowed_only_for_already_gone_messages() {
+        assert!(deactivation_error_allows_local_clear(
+            "Activation not found for this instance"
+        ));
+        assert!(deactivation_error_allows_local_clear(
+            "This instance has already been deactivated"
+        ));
+        assert!(!deactivation_error_allows_local_clear(
+            "License server returned an error"
+        ));
+        assert!(!deactivation_error_allows_local_clear(
+            "License key is invalid"
+        ));
     }
 
     #[test]

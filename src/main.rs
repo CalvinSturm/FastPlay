@@ -29,7 +29,11 @@ mod render;
 
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender, TryRecvError},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -44,7 +48,8 @@ use app::review_queue::{bounded_queue_name, SavedReviewQueues, MAX_REVIEW_QUEUE_
 use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
 use license::{
-    activate_license_key, deactivate_stored_license, validate_stored_license, LicenseSource,
+    activate_license_key_if_current, deactivate_stored_license_if_current,
+    validate_stored_license_if_current, LicenseActivationResult, LicenseError, LicenseSource,
     LicenseState, FASTPLAY_PRO_BUY_URL,
 };
 use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
@@ -57,6 +62,7 @@ use platform::window::NativeWindow;
 /// stay responsive (~10 wakeups/sec is negligible CPU), long enough that an
 /// idle player does not busy-spin.
 const IDLE_MESSAGE_WAIT_MS: u32 = 100;
+const DEACTIVATE_CONFIRMATION_WINDOW: Duration = Duration::from_secs(4);
 
 fn main() {
     // ── Vectored Exception Handler ─────────────────────────────────────
@@ -109,7 +115,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = PlaybackSession::new(window)?;
     let mut timeline_ui = TimelineUiState::new();
     let mut license = LicenseState::detect();
-    let mut license_validation_rx = maybe_start_license_validation(&license);
+    let (license_tx, license_rx) = mpsc::channel();
+    let mut next_license_op_id = 1;
+    let active_license_op_id = Arc::new(AtomicU64::new(0));
+    let mut deactivation_confirmation = DeactivationConfirmation::new();
+    if license.should_validate_on_startup() {
+        let op_id = begin_license_operation(&mut next_license_op_id, &active_license_op_id);
+        start_license_validation(
+            license_tx.clone(),
+            active_license_op_id.clone(),
+            op_id,
+            LicenseOperation::StartupValidation,
+        );
+    }
 
     ffi::dxgi::install_modal_tick(&mut session);
 
@@ -164,7 +182,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &mut review_queue_selected,
                     &mut active_review_queue_name,
                     &play_queue,
-                    &mut license,
+                    &license_tx,
+                    &mut next_license_op_id,
+                    &active_license_op_id,
                 )?;
                 continue;
             }
@@ -255,20 +275,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             if matches!(input, InputEvent::BeginLicenseActivation) {
+                deactivation_confirmation.cancel();
+                cancel_pending_license_operation(&mut next_license_op_id, &active_license_op_id);
                 begin_license_activation(&mut session, &mut text_edit);
                 continue;
             }
             if matches!(input, InputEvent::OpenProPurchasePage) {
+                deactivation_confirmation.cancel();
                 open_pro_purchase_page(&mut session);
                 continue;
             }
             if matches!(input, InputEvent::ValidateLicense) {
-                license_validation_rx = Some(start_license_validation());
+                deactivation_confirmation.cancel();
+                let op_id = begin_license_operation(&mut next_license_op_id, &active_license_op_id);
+                start_license_validation(
+                    license_tx.clone(),
+                    active_license_op_id.clone(),
+                    op_id,
+                    LicenseOperation::ManualValidation,
+                );
                 session.show_status_message("Validating FastPlay Pro license...");
                 continue;
             }
             if matches!(input, InputEvent::DeactivateLicense) {
-                deactivate_license(&mut session, &mut license);
+                handle_deactivate_license_input(
+                    &mut session,
+                    &mut deactivation_confirmation,
+                    now,
+                    license_tx.clone(),
+                    &mut next_license_op_id,
+                    &active_license_op_id,
+                );
                 continue;
             }
 
@@ -377,7 +414,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.keep_status_message_visible(&edit.prompt());
         }
         timeline_ui.update(&mut session, now)?;
-        poll_license_validation(&mut session, &mut license, &mut license_validation_rx);
+        poll_license_workers(
+            &mut session,
+            &mut license,
+            &license_rx,
+            &active_license_op_id,
+        );
         session.tick(now)?;
         // A natural end-of-file (no loop/auto-replay/out-point) latches the
         // ended signal exactly once; auto-advance to the next queued item.
@@ -587,46 +629,172 @@ impl TextEditState {
     }
 }
 
-type LicenseValidationRx = Receiver<Result<LicenseState, String>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LicenseOperation {
+    StartupValidation,
+    ManualValidation,
+    Activation,
+    Deactivation,
+}
 
-fn maybe_start_license_validation(license: &LicenseState) -> Option<LicenseValidationRx> {
-    if license.should_validate_on_startup() {
-        Some(start_license_validation())
-    } else {
-        None
+enum LicenseWorkerSuccess {
+    State(LicenseState),
+    Activation(LicenseActivationResult),
+}
+
+struct LicenseWorkerResult {
+    op_id: u64,
+    operation: LicenseOperation,
+    result: Result<LicenseWorkerSuccess, LicenseError>,
+}
+
+struct DeactivationConfirmation {
+    until: Option<Instant>,
+}
+
+impl DeactivationConfirmation {
+    fn new() -> Self {
+        Self { until: None }
+    }
+
+    fn confirm_or_arm(&mut self, now: Instant) -> bool {
+        if self.until.is_some_and(|until| now <= until) {
+            self.until = None;
+            true
+        } else {
+            self.until = Some(now + DEACTIVATE_CONFIRMATION_WINDOW);
+            false
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.until = None;
     }
 }
 
-fn start_license_validation() -> LicenseValidationRx {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(validate_stored_license());
-    });
-    rx
+fn begin_license_operation(next_op_id: &mut u64, active_op_id: &Arc<AtomicU64>) -> u64 {
+    let op_id = *next_op_id;
+    *next_op_id = next_op_id.checked_add(1).unwrap_or(1);
+    active_op_id.store(op_id, Ordering::Release);
+    op_id
 }
 
-fn poll_license_validation(
+fn cancel_pending_license_operation(next_op_id: &mut u64, active_op_id: &Arc<AtomicU64>) {
+    let _ = begin_license_operation(next_op_id, active_op_id);
+    active_op_id.store(0, Ordering::Release);
+}
+
+fn start_license_validation(
+    tx: Sender<LicenseWorkerResult>,
+    active_op_id: Arc<AtomicU64>,
+    op_id: u64,
+    operation: LicenseOperation,
+) {
+    std::thread::spawn(move || {
+        let result =
+            validate_stored_license_if_current(|| active_op_id.load(Ordering::Acquire) == op_id)
+                .map(LicenseWorkerSuccess::State);
+        let _ = tx.send(LicenseWorkerResult {
+            op_id,
+            operation,
+            result,
+        });
+    });
+}
+
+fn start_license_activation(
+    tx: Sender<LicenseWorkerResult>,
+    active_op_id: Arc<AtomicU64>,
+    op_id: u64,
+    license_key: String,
+) {
+    std::thread::spawn(move || {
+        let result = activate_license_key_if_current(&license_key, || {
+            active_op_id.load(Ordering::Acquire) == op_id
+        })
+        .map(LicenseWorkerSuccess::Activation);
+        let _ = tx.send(LicenseWorkerResult {
+            op_id,
+            operation: LicenseOperation::Activation,
+            result,
+        });
+    });
+}
+
+fn start_license_deactivation(
+    tx: Sender<LicenseWorkerResult>,
+    active_op_id: Arc<AtomicU64>,
+    op_id: u64,
+) {
+    std::thread::spawn(move || {
+        let result =
+            deactivate_stored_license_if_current(|| active_op_id.load(Ordering::Acquire) == op_id)
+                .map(LicenseWorkerSuccess::State);
+        let _ = tx.send(LicenseWorkerResult {
+            op_id,
+            operation: LicenseOperation::Deactivation,
+            result,
+        });
+    });
+}
+
+fn poll_license_workers(
     session: &mut PlaybackSession,
     license: &mut LicenseState,
-    rx: &mut Option<LicenseValidationRx>,
+    rx: &Receiver<LicenseWorkerResult>,
+    active_op_id: &Arc<AtomicU64>,
 ) {
-    let Some(receiver) = rx else {
-        return;
-    };
-    match receiver.try_recv() {
-        Ok(Ok(next)) => {
+    loop {
+        match rx.try_recv() {
+            Ok(result) => {
+                if result.op_id != active_op_id.load(Ordering::Acquire) {
+                    continue;
+                }
+                active_op_id.store(0, Ordering::Release);
+                apply_license_worker_result(session, license, result);
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn apply_license_worker_result(
+    session: &mut PlaybackSession,
+    license: &mut LicenseState,
+    result: LicenseWorkerResult,
+) {
+    match result.result {
+        Ok(LicenseWorkerSuccess::State(next)) => {
             *license = next;
-            session.show_status_message(&license.status_label);
-            *rx = None;
+            if result.operation == LicenseOperation::Deactivation {
+                if license.source == LicenseSource::DevelopmentOverride {
+                    session.show_status_message(
+                        "License deactivated; development override still active",
+                    );
+                } else {
+                    session.show_status_message("FastPlay Pro deactivated");
+                }
+            } else {
+                session.show_status_message(&license.status_label);
+            }
         }
-        Ok(Err(error)) => {
-            *license = LicenseState::detect();
-            session.show_status_message(&format!("License validation failed: {error}"));
-            *rx = None;
+        Ok(LicenseWorkerSuccess::Activation(result)) => {
+            *license = result.state;
+            if let Some(email) = result.customer_email {
+                session.show_status_message(&format!("FastPlay Pro activated for {email}"));
+            } else {
+                session.show_status_message("FastPlay Pro activated");
+            }
         }
-        Err(TryRecvError::Empty) => {}
-        Err(TryRecvError::Disconnected) => {
-            *rx = None;
+        Err(error) => {
+            let prefix = match result.operation {
+                LicenseOperation::StartupValidation | LicenseOperation::ManualValidation => {
+                    "License validation failed"
+                }
+                LicenseOperation::Activation => "Activation failed",
+                LicenseOperation::Deactivation => "Deactivate failed",
+            };
+            session.show_status_message(&format!("{prefix}: {error}"));
         }
     }
 }
@@ -648,19 +816,21 @@ fn open_pro_purchase_page(session: &mut PlaybackSession) {
     }
 }
 
-fn deactivate_license(session: &mut PlaybackSession, license: &mut LicenseState) {
-    match deactivate_stored_license() {
-        Ok(next) => {
-            *license = next;
-            if license.source == LicenseSource::DevelopmentOverride {
-                session
-                    .show_status_message("License deactivated; development override still active");
-            } else {
-                session.show_status_message("FastPlay Pro deactivated");
-            }
-        }
-        Err(error) => session.show_status_message(&format!("Deactivate failed: {error}")),
+fn handle_deactivate_license_input(
+    session: &mut PlaybackSession,
+    confirmation: &mut DeactivationConfirmation,
+    now: Instant,
+    tx: Sender<LicenseWorkerResult>,
+    next_op_id: &mut u64,
+    active_op_id: &Arc<AtomicU64>,
+) {
+    if !confirmation.confirm_or_arm(now) {
+        session.show_status_message("Press Ctrl+Shift+D again to deactivate FastPlay Pro.");
+        return;
     }
+    let op_id = begin_license_operation(next_op_id, active_op_id);
+    start_license_deactivation(tx, active_op_id.clone(), op_id);
+    session.show_status_message("Deactivating FastPlay Pro...");
 }
 
 fn marker_rows(markers: &ReviewMarkers, current: Option<&Path>) -> Vec<(String, String)> {
@@ -926,7 +1096,9 @@ fn handle_text_edit_input(
     review_queue_selected: &mut Option<usize>,
     active_review_queue_name: &mut Option<String>,
     play_queue: &PlayQueue,
-    license: &mut LicenseState,
+    license_tx: &Sender<LicenseWorkerResult>,
+    next_license_op_id: &mut u64,
+    active_license_op_id: &Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match input {
         InputEvent::TextChar(ch) => {
@@ -958,7 +1130,9 @@ fn handle_text_edit_input(
                     review_queue_selected,
                     active_review_queue_name,
                     play_queue,
-                    license,
+                    license_tx,
+                    next_license_op_id,
+                    active_license_op_id,
                 )?;
             }
         }
@@ -986,7 +1160,9 @@ fn finish_text_edit(
     review_queue_selected: &mut Option<usize>,
     active_review_queue_name: &mut Option<String>,
     play_queue: &PlayQueue,
-    license: &mut LicenseState,
+    license_tx: &Sender<LicenseWorkerResult>,
+    next_license_op_id: &mut u64,
+    active_license_op_id: &Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match edit {
         TextEditState::MarkerNote {
@@ -1021,21 +1197,21 @@ fn finish_text_edit(
                 )?);
             }
         }
-        TextEditState::LicenseKey { buffer, .. } => match activate_license_key(&buffer) {
-            Ok(result) => {
-                *license = result.state;
-                if let Some(email) = result.customer_email {
-                    session.show_status_message(&format!("FastPlay Pro activated for {email}"));
-                } else {
-                    session.show_status_message("FastPlay Pro activated");
-                }
+        TextEditState::LicenseKey { buffer, .. } => {
+            let license_key = buffer.trim();
+            if license_key.is_empty() {
+                session.show_status_message("Activation failed: License key required");
+            } else {
+                let op_id = begin_license_operation(next_license_op_id, active_license_op_id);
+                start_license_activation(
+                    license_tx.clone(),
+                    active_license_op_id.clone(),
+                    op_id,
+                    license_key.to_string(),
+                );
+                session.show_status_message("Activating FastPlay Pro...");
             }
-            Err(error) => {
-                session.show_status_message(&format!(
-                    "Activation failed: {error}. Buy Pro: {FASTPLAY_PRO_BUY_URL}"
-                ));
-            }
-        },
+        }
     }
     Ok(())
 }
@@ -1737,6 +1913,28 @@ mod tests {
             "My Clip.mkv"
         );
         assert_eq!(file_label(Path::new("bare.mp4")), "bare.mp4");
+    }
+
+    #[test]
+    fn deactivation_confirmation_requires_second_press_inside_window() {
+        let now = Instant::now();
+        let mut confirmation = DeactivationConfirmation::new();
+
+        assert!(!confirmation.confirm_or_arm(now));
+        assert!(confirmation
+            .confirm_or_arm(now + DEACTIVATE_CONFIRMATION_WINDOW - Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn deactivation_confirmation_expires_and_can_be_canceled() {
+        let now = Instant::now();
+        let mut confirmation = DeactivationConfirmation::new();
+
+        assert!(!confirmation.confirm_or_arm(now));
+        assert!(!confirmation
+            .confirm_or_arm(now + DEACTIVATE_CONFIRMATION_WINDOW + Duration::from_millis(1)));
+        confirmation.cancel();
+        assert!(!confirmation.confirm_or_arm(now + Duration::from_secs(10)));
     }
 
     #[test]
