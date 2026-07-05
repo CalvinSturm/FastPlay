@@ -7,7 +7,8 @@ use std::{
 use serde::Deserialize;
 
 pub const FASTPLAY_PRO_PRODUCT_ID: u64 = 1_195_401;
-pub const FASTPLAY_PRO_BUY_URL: &str = "https://app.lemonsqueezy.com/share/1195401";
+pub const FASTPLAY_PRO_BUY_URL: &str =
+    "https://fastcast.lemonsqueezy.com/checkout/buy/f71de58c-73cc-4688-be25-b543f9f3401c";
 const LICENSE_API_BASE: &str = "https://api.lemonsqueezy.com/v1/licenses";
 const OFFLINE_GRACE_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 
