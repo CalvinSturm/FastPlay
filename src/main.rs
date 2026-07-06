@@ -31,7 +31,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, Sender, TryRecvError},
+        mpsc::{self, Receiver, Sender},
         Arc,
     },
     time::{Duration, Instant},
@@ -744,17 +744,12 @@ fn poll_license_workers(
     rx: &Receiver<LicenseWorkerResult>,
     active_op_id: &Arc<AtomicU64>,
 ) {
-    loop {
-        match rx.try_recv() {
-            Ok(result) => {
-                if result.op_id != active_op_id.load(Ordering::Acquire) {
-                    continue;
-                }
-                active_op_id.store(0, Ordering::Release);
-                apply_license_worker_result(session, license, result);
-            }
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+    while let Ok(result) = rx.try_recv() {
+        if result.op_id != active_op_id.load(Ordering::Acquire) {
+            continue;
         }
+        active_op_id.store(0, Ordering::Release);
+        apply_license_worker_result(session, license, result);
     }
 }
 
