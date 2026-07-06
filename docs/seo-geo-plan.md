@@ -75,7 +75,7 @@ explicitly what it is *not* designed for).
 
 JSON-LD `SoftwareApplication` block in the home page `<head>`:
 
-- `softwareVersion` tracks the current release (`0.4.1`).
+- `softwareVersion` tracks the current release (`0.5.0`).
 - Accurate `license` (MIT), `programmingLanguage` (Rust), `operatingSystem`
   (Windows 10/11), `offers.price` 0, `codeRepository`, `downloadUrl`,
   `screenshot`/`image`.
