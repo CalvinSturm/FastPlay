@@ -1336,13 +1336,6 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::StepFrameForward);
                     }
-                    // Ctrl+Shift+D -> deactivate FastPlay Pro license.
-                    0x44 if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::DeactivateLicense);
-                    }
                     0x42 if ctrl_held => {
                         state
                             .input_events
@@ -1376,13 +1369,6 @@ unsafe extern "system" fn window_proc(
                             state.input_events.borrow_mut().push(InputEvent::SetInPoint);
                         }
                     }
-                    // Ctrl+Shift+L -> enter/activate a FastPlay Pro license key.
-                    0x4C if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::BeginLicenseActivation);
-                    }
                     // Ctrl+Shift+O → recent files, Ctrl+O → open file dialog,
                     // Shift+O → clear out-point, O → set out-point
                     0x4F if ctrl_held => {
@@ -1411,25 +1397,11 @@ unsafe extern "system" fn window_proc(
                                 .push(InputEvent::SetOutPoint);
                         }
                     }
-                    // Ctrl+Shift+P -> open the FastPlay Pro purchase page.
-                    0x50 if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::OpenProPurchasePage);
-                    }
                     0x52 => {
                         state
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::ToggleLoopRange);
-                    }
-                    // Ctrl+Shift+V -> validate saved FastPlay Pro license.
-                    0x56 if ctrl_held && shift_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ValidateLicense);
                     }
                     // Ctrl+V -> paste clipboard text into the active text prompt.
                     0x56 if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
