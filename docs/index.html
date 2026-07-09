@@ -3,26 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FastPlay - Fast Windows Video Player for Local Playback</title>
-    <meta name="description" content="FastPlay is a fast, lightweight Windows video player for local files, smooth scrubbing, hardware-accelerated playback, and simple controls.">
-    <meta name="keywords" content="fast Windows video player, lightweight video player, local video player, VLC alternative, hardware accelerated video player, smooth scrubbing, resume playback, Rust Windows video player, D3D11, FFmpeg, open source">
+    <title>FastPlay — A Fast Windows Video Player</title>
+    <meta name="description" content="FastPlay is a free, open-source Windows video player built for fast local playback, responsive seek, per-file resume, and D3D11 hardware presentation.">
+    <meta name="keywords" content="video player, Windows video player, fast video player, media player, hardware decode, D3D11, low latency, open source, Rust, mp4 player, mkv player">
     <meta name="author" content="Calvin Sturm">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="https://calvinsturm.github.io/FastPlay/">
 
     <!-- Open Graph -->
     <meta property="og:type" content="website">
-    <meta property="og:title" content="FastPlay - Fast Windows Video Player">
-    <meta property="og:description" content="A fast, lightweight native Windows video player for local playback, responsive seeking, hardware-accelerated decode, and simple controls.">
+    <meta property="og:title" content="FastPlay — A Fast Windows Video Player">
+    <meta property="og:description" content="Free, open-source Windows video player. Fast local playback, responsive seek, play queue, and GPU-resident presentation.">
     <meta property="og:url" content="https://calvinsturm.github.io/FastPlay/">
     <meta property="og:site_name" content="FastPlay">
-    <meta property="og:image" content="https://calvinsturm.github.io/FastPlay/assets/fastplay-demo.gif">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="FastPlay - Fast Windows Video Player">
-    <meta name="twitter:description" content="A fast, lightweight native Windows video player for local playback, responsive seeking, hardware-accelerated decode, and simple controls.">
-    <meta name="twitter:image" content="https://calvinsturm.github.io/FastPlay/assets/fastplay-demo.gif">
+    <meta name="twitter:title" content="FastPlay — A Fast Windows Video Player">
+    <meta name="twitter:description" content="Free, open-source Windows video player. Fast local playback, responsive seek, play queue, and GPU-resident presentation.">
 
     <!-- Structured Data -->
     <script type="application/ld+json">
@@ -33,16 +31,12 @@
         "operatingSystem": "Windows 10, Windows 11",
         "applicationCategory": "MultimediaApplication",
         "applicationSubCategory": "Video Player",
-        "description": "FastPlay is a fast, lightweight native Windows video player for local playback, responsive seeking, hardware-accelerated decode, and simple controls.",
-        "softwareVersion": "0.4.1",
+        "description": "A fast, free, open-source Windows video player with hardware-accelerated decode, responsive seek, per-file resume, a lightweight play queue, and GPU-resident presentation.",
+        "softwareVersion": "0.4.0",
         "license": "https://opensource.org/licenses/MIT",
         "url": "https://calvinsturm.github.io/FastPlay/",
         "downloadUrl": "https://github.com/CalvinSturm/FastPlay/releases/latest",
-        "codeRepository": "https://github.com/CalvinSturm/FastPlay",
-        "programmingLanguage": "Rust",
-        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.4.1.md",
-        "screenshot": "https://calvinsturm.github.io/FastPlay/assets/fastplay-demo.gif",
-        "image": "https://calvinsturm.github.io/FastPlay/assets/fastplay-demo.gif",
+        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.4.0.md",
         "author": {
             "@type": "Person",
             "name": "Calvin Sturm",
@@ -55,72 +49,6 @@
         },
         "fileFormat": ["video/mp4", "video/x-matroska", "video/quicktime", "video/x-msvideo", "video/webm"],
         "softwareRequirements": "Windows 10 or later, 64-bit"
-    }
-    </script>
-
-    <!-- FAQ Structured Data (mirrors the visible FAQ section below) -->
-    <script type="application/ld+json">
-    {
-        "@context": "https://schema.org",
-        "@type": "FAQPage",
-        "mainEntity": [
-            {
-                "@type": "Question",
-                "name": "What is FastPlay?",
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text": "FastPlay is a fast, lightweight native Windows video player built for local video playback, responsive seeking, hardware-accelerated decode, and simple controls."
-                }
-            },
-            {
-                "@type": "Question",
-                "name": "Is FastPlay a VLC alternative?",
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text": "FastPlay can be used as a lightweight VLC alternative for Windows users who mainly want simple local file playback, fast startup, smooth scrubbing, and responsive controls. VLC is still better for advanced streaming, disc playback, filters, plugins, and cross-platform use."
-                }
-            },
-            {
-                "@type": "Question",
-                "name": "What platforms does FastPlay support?",
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text": "FastPlay is built for Windows 10 and later, 64-bit."
-                }
-            },
-            {
-                "@type": "Question",
-                "name": "Is FastPlay free?",
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text": "Yes. FastPlay is free and open source under the MIT License."
-                }
-            },
-            {
-                "@type": "Question",
-                "name": "What makes FastPlay fast?",
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text": "FastPlay is built around native Windows playback, FFmpeg demux and decode, D3D11 hardware decode, DXGI presentation, bounded queues, stale-work dropping during seek, and WASAPI audio."
-                }
-            },
-            {
-                "@type": "Question",
-                "name": "Does FastPlay support subtitles?",
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text": "FastPlay supports external sidecar .srt subtitle files placed next to the media file. Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal."
-                }
-            },
-            {
-                "@type": "Question",
-                "name": "Is FastPlay the fastest video player?",
-                "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text": "FastPlay is designed for fast local playback, but \"fastest\" claims require measured benchmark data. Benchmark comparisons for startup, seek, resume, memory, and playback are still pending."
-                }
-            }
-        ]
     }
     </script>
 
@@ -519,153 +447,6 @@
             color: var(--text);
         }
 
-        /* Prose blocks (at a glance, audience) */
-        .prose {
-            max-width: 760px;
-            margin: 0 auto;
-        }
-
-        .prose p {
-            color: var(--text-muted);
-            font-size: 16px;
-            margin-bottom: 16px;
-        }
-
-        /* Two-column audience comparison */
-        .audience-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 20px;
-        }
-
-        .audience-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 28px;
-        }
-
-        .audience-card h3 {
-            font-size: 18px;
-            font-weight: 600;
-            margin-bottom: 16px;
-            letter-spacing: -0.01em;
-        }
-
-        .audience-card ul {
-            list-style: none;
-            display: grid;
-            gap: 10px;
-        }
-
-        .audience-card li {
-            color: var(--text-muted);
-            font-size: 14px;
-            padding-left: 22px;
-            position: relative;
-        }
-
-        .audience-card li::before {
-            content: "→";
-            position: absolute;
-            left: 0;
-            color: var(--accent);
-        }
-
-        /* Facts table */
-        .facts-wrapper {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            overflow: hidden;
-            max-width: 760px;
-            margin: 0 auto;
-        }
-
-        .facts-table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        .facts-table th,
-        .facts-table td {
-            text-align: left;
-            padding: 12px 20px;
-            font-size: 14px;
-            border-bottom: 1px solid var(--border);
-            vertical-align: top;
-        }
-
-        .facts-table tr:last-child th,
-        .facts-table tr:last-child td {
-            border-bottom: none;
-        }
-
-        .facts-table th {
-            color: var(--text-muted);
-            font-weight: 500;
-            width: 36%;
-            white-space: nowrap;
-        }
-
-        .facts-table td {
-            color: var(--text);
-        }
-
-        /* FAQ */
-        .faq-list {
-            max-width: 760px;
-            margin: 0 auto;
-            display: grid;
-            gap: 16px;
-        }
-
-        .faq-item {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 24px 28px;
-        }
-
-        .faq-item h3 {
-            font-size: 16px;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }
-
-        .faq-item p {
-            color: var(--text-muted);
-            font-size: 14px;
-        }
-
-        .faq-item a {
-            color: var(--accent);
-            text-decoration: none;
-        }
-
-        .faq-item a:hover {
-            text-decoration: underline;
-        }
-
-        /* Inline intent links row */
-        .intent-links {
-            max-width: 760px;
-            margin: 32px auto 0;
-            text-align: center;
-            font-size: 14px;
-            color: var(--text-muted);
-            line-height: 2;
-        }
-
-        .intent-links a {
-            color: var(--accent);
-            text-decoration: none;
-        }
-
-        .intent-links a:hover {
-            text-decoration: underline;
-        }
-
         /* Responsive */
         @media (max-width: 640px) {
             section { padding: 60px 0; }
@@ -695,11 +476,10 @@
     <div class="container">
         <a class="nav-brand" href="#">FastPlay</a>
         <ul class="nav-links">
-            <li><a href="#release">v0.4.1</a></li>
+            <li><a href="#release">v0.4.0</a></li>
             <li><a href="#features">Features</a></li>
             <li><a href="#architecture">Architecture</a></li>
-            <li><a href="#vlc">vs VLC</a></li>
-            <li><a href="#faq">FAQ</a></li>
+            <li><a href="#controls">Controls</a></li>
             <li><a href="https://github.com/CalvinSturm/FastPlay">GitHub</a></li>
         </ul>
     </div>
@@ -707,17 +487,17 @@
 
 <header class="hero">
     <div class="container">
-        <h1>A <span>fast</span> Windows video player for local files</h1>
-        <p>FastPlay is a lightweight native Windows video player built to open local videos quickly, seek responsively, use hardware-accelerated decode, and stay out of the way.</p>
+        <h1>A <span>faster</span> Windows video player</h1>
+        <p>Open local files quickly. Scrub without friction. Resume where you left off. Hardware-accelerated decode with GPU-resident D3D11 presentation.</p>
         <div class="hero-actions">
-            <a class="btn btn-primary" href="https://github.com/CalvinSturm/FastPlay/releases/latest">Download FastPlay for Windows</a>
-            <a class="btn btn-secondary" href="https://github.com/CalvinSturm/FastPlay">View Source on GitHub</a>
+            <a class="btn btn-primary" href="https://github.com/CalvinSturm/FastPlay/releases/latest">Download for Windows</a>
+            <a class="btn btn-secondary" href="https://github.com/CalvinSturm/FastPlay">View Source</a>
         </div>
-        <span class="version-badge">v0.4.1 &middot; Windows 10+ &middot; MIT License</span>
+        <span class="version-badge">v0.4.0 &middot; Windows 10+ &middot; MIT License</span>
         <span class="hero-note">Windows x64 local playback. No streaming, media library, or plugin system.</span>
 
         <div class="demo">
-            <img src="assets/fastplay-demo.gif" width="800" height="450" alt="FastPlay fast Windows video player playing a local video file with timeline scrubbing controls.">
+            <img src="https://github.com/user-attachments/assets/ac8ae5f1-b4e3-42ca-b21e-c20c1c5de5c0" alt="FastPlay playback demo">
         </div>
     </div>
 </header>
@@ -725,33 +505,14 @@
 <section id="release">
     <div class="container">
         <div class="release-panel">
-            <h2>New in v0.4.1: Playback Robustness</h2>
-            <p>FastPlay v0.4.1 focuses on stability and playback robustness: safer shutdown behavior and better audio continuity when heavy files fall back to software video decoding.</p>
+            <h2>New in v0.4.0: lightweight queue and folder playback</h2>
+            <p>Drop multiple files or a folder, step through the queue with PageUp and PageDown, and let FastPlay auto-advance when the current file naturally ends. The queue is session-only and stays deliberately outside media-library territory.</p>
             <ul class="release-list">
-                <li><strong>Close reliability</strong>Fixed an intermittent crash or freeze during window close by avoiding fragile in-process GPU teardown.</li>
-                <li><strong>Realtime audio</strong>Moved audio decode to an independent worker so slow software video decode does not starve WASAPI audio.</li>
-                <li><strong>Diagnostics</strong>Added env-gated audio diagnostics for underruns, queue depth, and WASAPI behavior.</li>
+                <li><strong>Multi-file drops</strong>Build an in-memory queue from selected files or a non-recursive folder drop.</li>
+                <li><strong>Manual next / previous</strong>Use PageDown and PageUp to move through the current queue without wrapping.</li>
+                <li><strong>Natural auto-advance</strong>Move to the next file at end-of-file while respecting loops, replay, and in/out ranges.</li>
             </ul>
         </div>
-    </div>
-</section>
-
-<section id="overview">
-    <div class="container">
-        <div class="section-heading">
-            <h2>FastPlay at a glance</h2>
-        </div>
-        <div class="prose">
-            <p>FastPlay is a native Windows video player built for local playback. It focuses on fast startup, responsive seeking, smooth playback, hardware-accelerated decode, and simple controls.</p>
-            <p>FastPlay is not trying to replace every advanced VLC feature. It is focused on a simpler, faster local playback experience for Windows users.</p>
-        </div>
-        <p class="intent-links">
-            <a href="fast-windows-video-player/">Fast Windows video player</a> &middot;
-            <a href="play-videos-fast/">Play videos fast on Windows</a> &middot;
-            <a href="lightweight-video-player/">Lightweight video player for Windows</a> &middot;
-            <a href="vlc-alternative/">VLC alternative for Windows</a> &middot;
-            <a href="benchmarks/">FastPlay benchmarks</a>
-        </p>
     </div>
 </section>
 
@@ -826,7 +587,7 @@
     <div class="container">
         <div class="section-heading">
             <h2>Format support</h2>
-            <p>FFmpeg-backed demux and decode support for common local video formats.</p>
+            <p>FFmpeg-backed demux and decode. Plays what you throw at it.</p>
         </div>
         <div class="format-tags">
             <span class="format-tag">.mp4</span>
@@ -840,67 +601,6 @@
             <span class="format-tag">.flac</span>
             <span class="format-tag">.wav</span>
             <span class="format-tag">.srt subtitles</span>
-        </div>
-    </div>
-</section>
-
-<section id="vlc">
-    <div class="container">
-        <div class="section-heading">
-            <h2>Who FastPlay is for</h2>
-            <p>FastPlay is a focused tool. Here is where it fits, and where VLC is still the better choice.</p>
-        </div>
-        <div class="audience-grid">
-            <div class="audience-card">
-                <h3>FastPlay is a good fit if you want</h3>
-                <ul>
-                    <li>A fast Windows video player for local files</li>
-                    <li>A lightweight media player without a media-library workflow</li>
-                    <li>Smooth scrubbing and responsive seek behavior</li>
-                    <li>Resume-friendly everyday playback</li>
-                    <li>Hardware-accelerated playback on Windows</li>
-                    <li>Simple controls without plugin or settings clutter</li>
-                </ul>
-            </div>
-            <div class="audience-card">
-                <h3>VLC is still better if you need</h3>
-                <ul>
-                    <li>Advanced codec tools</li>
-                    <li>Network streams</li>
-                    <li>Disc playback</li>
-                    <li>Filters and plugins</li>
-                    <li>Cross-platform support</li>
-                    <li>Deep media troubleshooting tools</li>
-                </ul>
-            </div>
-        </div>
-        <p class="intent-links">
-            Read more: <a href="vlc-alternative/">FastPlay as a VLC alternative for Windows</a>
-        </p>
-    </div>
-</section>
-
-<section id="facts">
-    <div class="container">
-        <div class="section-heading">
-            <h2>FastPlay facts</h2>
-            <p>A quick reference for the essentials.</p>
-        </div>
-        <div class="facts-wrapper">
-            <table class="facts-table">
-                <tbody>
-                    <tr><th>Product</th><td>FastPlay</td></tr>
-                    <tr><th>Developer</th><td>Calvin Sturm</td></tr>
-                    <tr><th>Category</th><td>Windows video player</td></tr>
-                    <tr><th>Platform</th><td>Windows 10 and later, 64-bit</td></tr>
-                    <tr><th>License</th><td>MIT License (free and open source)</td></tr>
-                    <tr><th>Primary use</th><td>Local video playback</td></tr>
-                    <tr><th>Main benefits</th><td>Fast startup, responsive seeking, hardware-accelerated decode, simple controls</td></tr>
-                    <tr><th>Technology</th><td>Rust, FFmpeg, D3D11, DXGI, WASAPI</td></tr>
-                    <tr><th>Best for</th><td>Users who want a fast lightweight Windows video player for local files</td></tr>
-                    <tr><th>Not designed for</th><td>Advanced network streaming, disc playback, broadcast workflows, or replacing every VLC power-user feature</td></tr>
-                </tbody>
-            </table>
         </div>
     </div>
 </section>
@@ -948,44 +648,6 @@
     </div>
 </section>
 
-<section id="faq">
-    <div class="container">
-        <div class="section-heading">
-            <h2>Frequently asked questions</h2>
-        </div>
-        <div class="faq-list">
-            <article class="faq-item">
-                <h3>What is FastPlay?</h3>
-                <p>FastPlay is a fast, lightweight native Windows video player built for local video playback, responsive seeking, hardware-accelerated decode, and simple controls.</p>
-            </article>
-            <article class="faq-item">
-                <h3>Is FastPlay a VLC alternative?</h3>
-                <p>FastPlay can be used as a lightweight <a href="vlc-alternative/">VLC alternative for Windows</a> users who mainly want simple local file playback, fast startup, smooth scrubbing, and responsive controls. VLC is still better for advanced streaming, disc playback, filters, plugins, and cross-platform use.</p>
-            </article>
-            <article class="faq-item">
-                <h3>What platforms does FastPlay support?</h3>
-                <p>FastPlay is built for Windows 10 and later, 64-bit.</p>
-            </article>
-            <article class="faq-item">
-                <h3>Is FastPlay free?</h3>
-                <p>Yes. FastPlay is free and open source under the MIT License.</p>
-            </article>
-            <article class="faq-item">
-                <h3>What makes FastPlay fast?</h3>
-                <p>FastPlay is built around native Windows playback, FFmpeg demux/decode, D3D11 hardware decode, DXGI presentation, bounded queues, stale-work dropping during seek, and WASAPI audio.</p>
-            </article>
-            <article class="faq-item">
-                <h3>Does FastPlay support subtitles?</h3>
-                <p>FastPlay supports external sidecar <code>.srt</code> subtitle files placed next to the media file. Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal.</p>
-            </article>
-            <article class="faq-item">
-                <h3>Is FastPlay the fastest video player?</h3>
-                <p>FastPlay is designed for fast local playback, but &ldquo;fastest&rdquo; claims require benchmark data. See the <a href="benchmarks/">FastPlay benchmarks</a> page for the planned startup, seek, resume, memory, and playback comparisons.</p>
-            </article>
-        </div>
-    </div>
-</section>
-
 <section class="cta">
     <div class="container">
         <h2>Try FastPlay</h2>
@@ -999,14 +661,7 @@
 
 <footer>
     <div class="container">
-        <p class="intent-links">
-            <a href="fast-windows-video-player/">Fast Windows video player</a> &middot;
-            <a href="play-videos-fast/">Play videos fast on Windows</a> &middot;
-            <a href="lightweight-video-player/">Lightweight video player for Windows</a> &middot;
-            <a href="vlc-alternative/">VLC alternative for Windows</a> &middot;
-            <a href="benchmarks/">FastPlay benchmarks</a>
-        </p>
-        <p style="margin-top:20px;">FastPlay by <a href="https://github.com/CalvinSturm">Calvin Sturm</a> &middot; <a href="https://github.com/CalvinSturm/FastPlay">Source on GitHub</a> &middot; MIT License</p>
+        <p>FastPlay by <a href="https://github.com/CalvinSturm">Calvin Sturm</a> &middot; <a href="https://github.com/CalvinSturm/FastPlay">Source on GitHub</a> &middot; MIT License</p>
     </div>
 </footer>
 

@@ -1,6 +1,6 @@
 # Roadmap
 
-Status: 2026-07-09 · FastPlay v0.4.1
+Status: 2026-06-26 · FastPlay v0.4.0
 
 Practical, prioritized plan for maintaining FastPlay before new features land.
 This complements (does not replace) `ARCHITECTURE.md`, which stays the locked

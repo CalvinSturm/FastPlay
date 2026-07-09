@@ -12,9 +12,7 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
-        Foundation::{
-            BOOL, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM,
-        },
+        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{
@@ -31,12 +29,10 @@ use windows::{
         },
         System::{
             Com::{IDataObject, FORMATETC},
-            DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
             LibraryLoader::GetModuleHandleW,
-            Memory::{GlobalLock, GlobalUnlock},
             Ole::{
                 IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
-                RevokeDragDrop, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY,
+                RevokeDragDrop, DROPEFFECT, DROPEFFECT_COPY,
             },
             SystemServices::MODIFIERKEYS_FLAGS,
         },
@@ -82,7 +78,6 @@ extern "system" {
 }
 const SM_CXDRAG: i32 = 68;
 const SM_CYDRAG: i32 = 69;
-const MAX_CLIPBOARD_TEXT_CHARS: usize = 4096;
 
 const MAX_MESSAGES_PER_PUMP: usize = 64;
 const MODAL_TICK_TIMER_ID: usize = 1;
@@ -110,37 +105,6 @@ fn clamp_client_size_to_min(width: u32, height: u32) -> (u32, u32) {
         (width as f64 * scale).round() as u32,
         (height as f64 * scale).round() as u32,
     )
-}
-
-struct ClipboardCloseGuard;
-
-impl Drop for ClipboardCloseGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseClipboard();
-        }
-    }
-}
-
-unsafe fn clipboard_unicode_text(hwnd: HWND) -> Option<String> {
-    OpenClipboard(hwnd).ok()?;
-    let _guard = ClipboardCloseGuard;
-    let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
-    if handle.0.is_null() {
-        return None;
-    }
-    let hglobal = HGLOBAL(handle.0);
-    let ptr = GlobalLock(hglobal) as *const u16;
-    if ptr.is_null() {
-        return None;
-    }
-    let mut len = 0usize;
-    while len < MAX_CLIPBOARD_TEXT_CHARS && *ptr.add(len) != 0 {
-        len += 1;
-    }
-    let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-    let _ = GlobalUnlock(hglobal);
-    Some(text)
 }
 
 #[derive(Debug)]
@@ -1305,7 +1269,6 @@ unsafe extern "system" fn window_proc(
                         as u16
                         & 0x8000)
                         != 0;
-                let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
 
                 match wparam.0 as u32 {
                     // Ctrl+H → toggle borderless fullscreen
@@ -1315,19 +1278,12 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::ToggleBorderlessFullscreen);
                     }
-                    // Ctrl+Shift+S -> save current review queue; Ctrl+S -> save screenshot.
+                    // Ctrl+S → save screenshot
                     0x53 if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        if shift_held {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::SaveReviewQueue);
-                        } else {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::SaveScreenshot);
-                        }
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::SaveScreenshot);
                     }
                     // Ctrl+F / Ctrl+B → step one frame forward/backward
                     0x46 if ctrl_held => {
@@ -1342,13 +1298,6 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::StepFrameBackward);
                     }
-                    // B while marker overlay is focused -> batch marker screenshots.
-                    0x42 if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::BatchMarkerScreenshots);
-                    }
                     0x52 if ctrl_held => {
                         state
                             .input_events
@@ -1360,6 +1309,7 @@ unsafe extern "system" fn window_proc(
                         // Ctrl+I — reserved / no-op (was clear in-point, now Shift+I)
                     }
                     0x49 => {
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                         if shift_held {
                             state
                                 .input_events
@@ -1372,6 +1322,7 @@ unsafe extern "system" fn window_proc(
                     // Ctrl+Shift+O → recent files, Ctrl+O → open file dialog,
                     // Shift+O → clear out-point, O → set out-point
                     0x4F if ctrl_held => {
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                         if shift_held {
                             state
                                 .input_events
@@ -1385,6 +1336,7 @@ unsafe extern "system" fn window_proc(
                         }
                     }
                     0x4F => {
+                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                         if shift_held {
                             state
                                 .input_events
@@ -1403,62 +1355,22 @@ unsafe extern "system" fn window_proc(
                             .borrow_mut()
                             .push(InputEvent::ToggleLoopRange);
                     }
-                    // Ctrl+V -> paste clipboard text into the active text prompt.
-                    0x56 if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        if let Some(text) = clipboard_unicode_text(hwnd) {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::PasteText(text));
-                        }
-                    }
                     0x45 if ctrl_held => {
                         state
                             .input_events
                             .borrow_mut()
                             .push(InputEvent::RotateCounterClockwise);
                     }
-                    // E while marker overlay is focused -> export current-file markers.
-                    0x45 if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ExportMarkers);
-                    }
-                    // Ctrl+M -> marker overlay; M -> add marker.
-                    0x4D if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ToggleMarkerOverlay);
-                    }
-                    0x4D if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state.input_events.borrow_mut().push(InputEvent::AddMarker);
-                    }
-                    // N while marker overlay is focused -> edit selected marker note.
-                    0x4E if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::EditMarkerNote);
-                    }
                     // Ctrl+W → fit window to video (no black padding)
                     0x57 if ctrl_held => {
                         state.input_events.borrow_mut().push(InputEvent::FitWindow);
                     }
-                    // Ctrl+Shift+Q -> review queues; Ctrl+Q -> half native resolution.
+                    // Ctrl+Q → half the video's native resolution
                     0x51 if ctrl_held => {
-                        if shift_held {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::ToggleReviewQueueOverlay);
-                        } else {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::HalfSizeWindow);
-                        }
+                        state
+                            .input_events
+                            .borrow_mut()
+                            .push(InputEvent::HalfSizeWindow);
                     }
                     // Ctrl+0 → reset view
                     0x30 if ctrl_held => {
@@ -1623,21 +1535,13 @@ unsafe extern "system" fn window_proc(
         }
         WM_CHAR => {
             if let Some(state) = window_state(hwnd) {
-                if let Some(ch) = char::from_u32(wparam.0 as u32) {
-                    if ch == ' ' {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::TogglePause);
-                    }
-                    if !ch.is_control() {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::TextChar(ch));
-                    }
+                if wparam.0 as u32 == ' ' as u32 {
+                    state
+                        .input_events
+                        .borrow_mut()
+                        .push(InputEvent::TogglePause);
+                    return LRESULT(0);
                 }
-                return LRESULT(0);
             }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }

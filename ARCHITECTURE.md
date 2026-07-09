@@ -964,7 +964,7 @@ If not, it waits.
 
 **Architecture locked. Milestones M0–M6 complete.**
 
-Current release: v0.4.1
+Current release: v0.3.0
 
 Implemented:
 * single-crate Rust implementation with the module boundaries shown in §5
@@ -980,10 +980,6 @@ Implemented:
 * borderless fullscreen, zoom/pan, rotation, resize/device recovery
 * timeline scrub overlay with cancel
 * recent-files overlay and per-file resume playback position
-* lightweight in-memory play queue with folder drop, next/previous navigation,
-  and natural end-of-file auto-advance
-* independent audio decode worker to keep audio realtime when video fallback is
-  decode-bound
 * file associations and MSI installer
 * local p50/p95 benchmark harness with JSON/CSV output
 * playback speed control
