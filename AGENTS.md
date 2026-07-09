@@ -13,7 +13,6 @@ Read `ARCHITECTURE.md` before making changes. Treat it as the source of truth fo
 - Prefer minimal, high-confidence changes over broad rewrites.
 - Preserve existing module boundaries unless the task explicitly requires a change.
 - Keep the repository as a single Rust crate unless explicitly told otherwise.
-- FastPlay is intended to remain free for end users. Do not add subscriptions, paid feature gates, account systems, telemetry monetization, DRM, or license checks unless explicitly requested.
 
 ## Safety and API boundaries
 

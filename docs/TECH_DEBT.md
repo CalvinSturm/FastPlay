@@ -49,7 +49,7 @@ logic into focused modules.
 
 ## 2. Known maintainability risks
 
-### R1 — `PlaybackSession` width — **substantially reduced**
+### R1 — `PlaybackSession` width — **substantially paid down**
 
 v0.3.0 extracted viewport, clip-range, overlay, audio coordination, video
 queueing, input dispatch, and decode-thread lifecycle into named modules owned
