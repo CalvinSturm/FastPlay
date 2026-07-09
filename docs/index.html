@@ -34,13 +34,13 @@
         "applicationCategory": "MultimediaApplication",
         "applicationSubCategory": "Video Player",
         "description": "FastPlay is a fast, lightweight native Windows video player for local playback, responsive seeking, hardware-accelerated decode, and simple controls.",
-        "softwareVersion": "0.5.0",
+        "softwareVersion": "0.4.1",
         "license": "https://opensource.org/licenses/MIT",
         "url": "https://calvinsturm.github.io/FastPlay/",
         "downloadUrl": "https://github.com/CalvinSturm/FastPlay/releases/latest",
         "codeRepository": "https://github.com/CalvinSturm/FastPlay",
         "programmingLanguage": "Rust",
-        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.5.0.md",
+        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.4.1.md",
         "screenshot": "https://calvinsturm.github.io/FastPlay/assets/fastplay-demo.gif",
         "image": "https://calvinsturm.github.io/FastPlay/assets/fastplay-demo.gif",
         "author": {
@@ -695,7 +695,7 @@
     <div class="container">
         <a class="nav-brand" href="#">FastPlay</a>
         <ul class="nav-links">
-            <li><a href="#release">v0.5.0</a></li>
+            <li><a href="#release">v0.4.1</a></li>
             <li><a href="#features">Features</a></li>
             <li><a href="#architecture">Architecture</a></li>
             <li><a href="#vlc">vs VLC</a></li>
@@ -713,7 +713,7 @@
             <a class="btn btn-primary" href="https://github.com/CalvinSturm/FastPlay/releases/latest">Download FastPlay for Windows</a>
             <a class="btn btn-secondary" href="https://github.com/CalvinSturm/FastPlay">View Source on GitHub</a>
         </div>
-        <span class="version-badge">v0.5.0 &middot; Windows 10+ &middot; MIT License</span>
+        <span class="version-badge">v0.4.1 &middot; Windows 10+ &middot; MIT License</span>
         <span class="hero-note">Windows x64 local playback. No streaming, media library, or plugin system.</span>
 
         <div class="demo">
@@ -725,12 +725,12 @@
 <section id="release">
     <div class="container">
         <div class="release-panel">
-            <h2>New in v0.5.0: Pro Preview Foundation</h2>
-            <p>FastPlay now has the licensing and review-workflow base needed for paid creator tooling. Normal local playback remains free, and batch screenshots from markers are still deferred.</p>
+            <h2>New in v0.4.1: Playback Robustness</h2>
+            <p>FastPlay v0.4.1 focuses on stability and playback robustness: safer shutdown behavior and better audio continuity when heavy files fall back to software video decoding.</p>
             <ul class="release-list">
-                <li><strong>Marker notes</strong>Add timestamp markers, edit notes, persist them locally, and export the current file's markers to text or CSV.</li>
-                <li><strong>Saved review queues</strong>Save, load, and delete review queues without turning FastPlay into a media library.</li>
-                <li><strong>FastPlay Pro activation</strong>Activate, validate, and deactivate Lemon Squeezy Pro licenses while keeping normal playback free.</li>
+                <li><strong>Close reliability</strong>Fixed an intermittent crash or freeze during window close by avoiding fragile in-process GPU teardown.</li>
+                <li><strong>Realtime audio</strong>Moved audio decode to an independent worker so slow software video decode does not starve WASAPI audio.</li>
+                <li><strong>Diagnostics</strong>Added env-gated audio diagnostics for underruns, queue depth, and WASAPI behavior.</li>
             </ul>
         </div>
     </div>

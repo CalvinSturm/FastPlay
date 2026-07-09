@@ -4,36 +4,13 @@ FastPlay is a fast, lightweight native Windows video player focused on local pla
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, smooth scrubbing, clean playback, responsive controls, and a tighter Windows-native experience.
 
-**[Download FastPlay v0.5.0 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.5.0/fastplay-0.5.0-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
+**[Download FastPlay v0.4.1 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.1/fastplay-0.4.1-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
 <img width="800" height="450" alt="FastPlay playing a local video with timeline scrubbing controls" src="docs/assets/fastplay-demo.gif" />
 
-## FastPlay Free and FastPlay Pro
-
-FastPlay Free remains focused on fast local playback: opening local files quickly, smooth seeking, queue playback, resume, keyboard controls, screenshots, subtitles, in/out range, and loop range.
-
-FastPlay Pro is the review-workflow layer for creators, editors, QA testers, and power users. The paid wedge is not paid playback; it is saving time while reviewing footage.
-
-### Pro Preview v0.5.0 foundation
-
-Implemented in the Pro Preview foundation:
-
-- timestamp markers for the current media file
-- marker note editing from the keyboard
-- marker overlay with keyboard selection, seek, and removal
-- marker persistence in local app data
-- marker export to `.txt` and `.csv`
-- saved review queue save/load/delete UI
-- Lemon Squeezy license activation, validation, and deactivation
-- centralized Free/Pro capability checks with persisted license state and a development-only override
-
-Not yet implemented:
-
-- reliable batch screenshots from markers
-
-FastPlay Pro launch pricing target: $19 one-time. Standard target: $29 one-time. These are planning targets, not a subscription.
+FastPlay is intended to remain free for end users. It does not require an account, subscription, license key, telemetry opt-in, or network service for normal local playback.
 
 ## Why FastPlay exists
 
@@ -78,14 +55,6 @@ Measured cross-player comparisons are still pending, so FastPlay does not claim 
 | `Ctrl+Shift+O` | Recent files overlay (↑↓ select · Enter open · Del remove · Esc close) |
 | `PageUp` / `PageDown` | Previous / next file in the play queue |
 | `Ctrl+S` | Save screenshot |
-| `M` | Add timestamp marker (Pro Preview / development override) |
-| `Ctrl+M` | Marker overlay (↑↓ select · Enter seek · N edit note · Del remove · E export · B batch placeholder · Esc close) |
-| `Ctrl+Shift+S` | Save current queue as a review queue (Pro Preview / development override) |
-| `Ctrl+Shift+Q` | Review queue overlay (↑↓ select · Enter load · Del delete · Esc close) |
-| `Ctrl+Shift+L` | Enter and activate a FastPlay Pro license key |
-| `Ctrl+V` | Paste into the active text prompt |
-| `Ctrl+Shift+V` | Validate saved FastPlay Pro license |
-| `Ctrl+Shift+D` | Deactivate saved FastPlay Pro license |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
 | `Shift+I` | Clear in-point |
@@ -153,17 +122,6 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 - half native resolution window sizing
 - volume control with on-screen overlay
 - hold-to-show keybind reference overlay
-
-### Pro Preview review workflow
-- local timestamp marker persistence for the current media file
-- keyboard marker overlay for marker review and seeking
-- bounded marker note editing from the marker overlay
-- marker removal from the focused marker overlay
-- marker export for the current file as `.txt` and `.csv`
-- saved review queue save, load, and delete UI
-- Lemon Squeezy license activation with local app-data license metadata
-- Free-mode Pro copy that does not block normal playback
-- development-only Pro override via `FASTPLAY_PRO_DEV=1`
 
 ### Subtitles
 - external `.srt` subtitle overlay
@@ -297,8 +255,6 @@ The subtitle sidecar will be auto-loaded if present.
 - GPU alpha composition during present
 
 For the full implementation charter, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
-
-For the Pro review-workflow capability and storage boundary, see [`docs/pro-foundation.md`](./docs/pro-foundation.md).
 
 ## Project structure
 
