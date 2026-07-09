@@ -1240,70 +1240,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         viewport_width: u32,
         viewport_height: u32,
     ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
-        let Some(bitmap) = render_list_bitmap(
-            rows,
-            selected,
-            "Recent Files",
-            "No recent files",
-            "Enter Open   \u{2191}\u{2193} Select   Del Remove   Esc Close",
-        )?
-        else {
+        let Some(bitmap) = render_recent_bitmap(rows, selected)? else {
             return Ok(None);
         };
 
-        self.create_list_overlay_from_bitmap(bitmap, viewport_width, viewport_height)
-    }
-
-    pub(crate) fn create_marker_overlay(
-        &self,
-        rows: &[(String, String)],
-        selected: usize,
-        footer: &str,
-        viewport_width: u32,
-        viewport_height: u32,
-    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
-        let Some(bitmap) = render_list_bitmap(
-            rows,
-            selected,
-            "Review Markers",
-            "No markers for this file",
-            footer,
-        )?
-        else {
-            return Ok(None);
-        };
-
-        self.create_list_overlay_from_bitmap(bitmap, viewport_width, viewport_height)
-    }
-
-    pub(crate) fn create_review_queue_overlay(
-        &self,
-        rows: &[(String, String)],
-        selected: usize,
-        footer: &str,
-        viewport_width: u32,
-        viewport_height: u32,
-    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
-        let Some(bitmap) = render_list_bitmap(
-            rows,
-            selected,
-            "Review Queues",
-            "No saved review queues",
-            footer,
-        )?
-        else {
-            return Ok(None);
-        };
-
-        self.create_list_overlay_from_bitmap(bitmap, viewport_width, viewport_height)
-    }
-
-    fn create_list_overlay_from_bitmap(
-        &self,
-        bitmap: SubtitleBitmap,
-        viewport_width: u32,
-        viewport_height: u32,
-    ) -> Result<Option<SubtitleOverlay>, Box<dyn Error>> {
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: bitmap.width,
             Height: bitmap.height,
@@ -2142,7 +2082,7 @@ fn render_timeline_bitmap(
 }
 
 fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
-    let text = "Drop a file to play \u{00B7} Ctrl+O opens \u{00B7} Hold H for controls";
+    let text = "Drop a file to play";
     let mut text_wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
 
     unsafe {
@@ -2269,12 +2209,6 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("Ctrl+Shift+O", "Recent files"),
         ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
-        ("Ctrl+V", "Paste into text prompt"),
-        ("M", "Add marker"),
-        ("Ctrl+M", "Markers"),
-        ("N", "Edit marker note"),
-        ("Ctrl+Shift+S", "Save review queue"),
-        ("Ctrl+Shift+Q", "Review queues"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
         ("Shift+I / O", "Clear in / out point"),
@@ -2299,8 +2233,8 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
     const HEADER_H: i32 = 24;
     const SEP: i32 = 8;
     const LINE_H: i32 = 20;
-    const COL_DESC_X: i32 = PAD_X + 148; // where description column begins
-    const BW: u32 = 560;
+    const COL_DESC_X: i32 = PAD_X + 118; // where description column begins
+    const BW: u32 = 390;
     let bh = (PAD_Y + HEADER_H + SEP + ROWS.len() as i32 * LINE_H + PAD_Y) as u32;
 
     unsafe {
@@ -2429,7 +2363,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
                 px[0] = 22;
                 px[1] = 20;
                 px[2] = 18;
-                px[3] = 246;
+                px[3] = 218;
             }
         }
 
@@ -2447,6 +2381,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
                 [255, 255, 255, 60],
             );
         }
+
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
         debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
@@ -2461,12 +2396,9 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
     }
 }
 
-fn render_list_bitmap(
+fn render_recent_bitmap(
     rows: &[(String, String)],
     selected: usize,
-    title: &str,
-    empty_text: &str,
-    footer: &str,
 ) -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
     const PAD_X: i32 = 22;
     const PAD_Y: i32 = 16;
@@ -2539,7 +2471,7 @@ fn render_list_bitmap(
         let _ = SetTextColor(dc, COLORREF(0x00E8E8E8));
 
         // Header.
-        let mut header_wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let mut header_wide: Vec<u16> = "Recent Files".encode_utf16().chain(Some(0)).collect();
         let mut header_rect = RECT {
             left: PAD_X,
             top: PAD_Y,
@@ -2554,7 +2486,8 @@ fn render_list_bitmap(
         );
 
         if rows.is_empty() {
-            let mut empty_wide: Vec<u16> = empty_text.encode_utf16().chain(Some(0)).collect();
+            let mut empty_wide: Vec<u16> =
+                "No recent files".encode_utf16().chain(Some(0)).collect();
             let mut empty_rect = RECT {
                 left: PAD_X,
                 top: rows_top,
@@ -2608,7 +2541,11 @@ fn render_list_bitmap(
 
         // Footer hint.
         let footer_y = rows_top + row_count * LINE_H + SEP;
-        let mut footer_wide: Vec<u16> = footer.encode_utf16().chain(Some(0)).collect();
+        let mut footer_wide: Vec<u16> =
+            "Enter Open   \u{2191}\u{2193} Select   Del Remove   Esc Close"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
         let mut footer_rect = RECT {
             left: PAD_X,
             top: footer_y,

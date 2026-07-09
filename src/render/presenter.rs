@@ -78,44 +78,6 @@ impl Presenter {
         self.recent_overlay = None;
     }
 
-    /// Show the timestamp-marker overlay. It uses the same single list-overlay
-    /// slot as Recent so only one modal list is visible at a time.
-    pub fn show_marker_overlay(
-        &mut self,
-        rows: &[(String, String)],
-        selected: usize,
-        footer: &str,
-        viewport_width: u32,
-        viewport_height: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.recent_overlay = self.device.create_marker_overlay(
-            rows,
-            selected,
-            footer,
-            viewport_width,
-            viewport_height,
-        )?;
-        Ok(())
-    }
-
-    pub fn show_review_queue_overlay(
-        &mut self,
-        rows: &[(String, String)],
-        selected: usize,
-        footer: &str,
-        viewport_width: u32,
-        viewport_height: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.recent_overlay = self.device.create_review_queue_overlay(
-            rows,
-            selected,
-            footer,
-            viewport_width,
-            viewport_height,
-        )?;
-        Ok(())
-    }
-
     pub fn render(
         &mut self,
         view: &crate::render::ViewTransform,

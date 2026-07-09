@@ -1,16 +1,14 @@
 # <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
 
-FastPlay is a fast, lightweight native Windows video player focused on local playback, responsive seeking, hardware-accelerated decode, and simple controls.
+FastPlay is a keyboard-first Windows video player for fast local playback, smooth scrubbing, and ergonomic control across monitors.
 
-It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, smooth scrubbing, clean playback, responsive controls, and a tighter Windows-native experience.
+It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
 **[Download FastPlay v0.4.1 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.1/fastplay-0.4.1-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
-<img width="800" height="450" alt="FastPlay playing a local video with timeline scrubbing controls" src="docs/assets/fastplay-demo.gif" />
-
-FastPlay is intended to remain free for end users. It does not require an account, subscription, license key, telemetry opt-in, or network service for normal local playback.
+<img width="550" height="480" alt="ezgif-1084bbf2cf26c3f5" src="https://github.com/user-attachments/assets/79667f65-6150-46d8-bb7c-a5024b53d2d1" />
 
 ## Why FastPlay exists
 
@@ -35,12 +33,6 @@ Where FastPlay differs is scope and intent:
 | Render path | D3D11-first, GPU-resident | Multiple backends | DirectShow / madVR etc. |
 
 Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. Reach for FastPlay when you want a snappy, no-friction window for the local file in front of you.
-
-## Benchmarks
-
-FastPlay is built for fast local playback: low open-to-first-frame latency and responsive seeking. It records in-app playback metrics (open-to-frame latency, seek latency, dropped frames), and the benchmark corpus and scripts live under [`bench/`](bench/).
-
-Measured cross-player comparisons are still pending, so FastPlay does not claim to be the "fastest" video player — that requires published benchmark data. Tracking page: [FastPlay benchmarks](https://calvinsturm.github.io/FastPlay/benchmarks/).
 
 ## Controls
 

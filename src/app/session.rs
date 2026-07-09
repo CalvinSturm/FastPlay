@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     collections::VecDeque,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
@@ -278,10 +278,6 @@ impl PlaybackSession {
         self.media_duration
     }
 
-    pub fn current_media_path(&self) -> Option<&Path> {
-        self.current_source.as_ref().map(|source| source.path())
-    }
-
     pub fn auto_replay(&self) -> bool {
         self.clip_range.auto_replay()
     }
@@ -345,42 +341,6 @@ impl PlaybackSession {
         self.present_needed = true;
     }
 
-    pub fn show_marker_overlay(
-        &mut self,
-        rows: &[(String, String)],
-        selected: usize,
-        footer: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
-        self.presenter
-            .show_marker_overlay(rows, selected, footer, vw, vh)?;
-        self.present_needed = true;
-        Ok(())
-    }
-
-    pub fn clear_marker_overlay(&mut self) {
-        self.presenter.clear_recent_overlay();
-        self.present_needed = true;
-    }
-
-    pub fn show_review_queue_overlay(
-        &mut self,
-        rows: &[(String, String)],
-        selected: usize,
-        footer: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (vw, vh) = self.presenter.viewport_size().unwrap_or((1280, 720));
-        self.presenter
-            .show_review_queue_overlay(rows, selected, footer, vw, vh)?;
-        self.present_needed = true;
-        Ok(())
-    }
-
-    pub fn clear_review_queue_overlay(&mut self) {
-        self.presenter.clear_recent_overlay();
-        self.present_needed = true;
-    }
-
     /// Show a brief status message using the transient overlay — the same slot
     /// and auto-timeout as the volume indicator. Used by the event loop for
     /// play-queue navigation feedback. This is a render-only convenience (like
@@ -396,19 +356,6 @@ impl PlaybackSession {
             }
         }
         self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
-    }
-
-    /// Keep the current status message on screen past its normal timeout.
-    /// Called once per event-loop tick while a text-entry prompt is active, so
-    /// the prompt never expires mid-edit; if the overlay slot was cleared by
-    /// something else (e.g. a media reopen), the prompt is shown again. This
-    /// only re-arms the timer in the common case — it does not re-render.
-    pub fn keep_status_message_visible(&mut self, text: &str) {
-        if self.overlay.volume_overlay_until.is_some() {
-            self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
-        } else {
-            self.show_status_message(text);
-        }
     }
 
     /// Consume the edge-triggered "playback reached its natural end" signal.
