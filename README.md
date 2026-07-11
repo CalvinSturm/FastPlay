@@ -1,4 +1,4 @@
-# <img src="assets/icon/fastplay.ico" alt="FastPlay icon" width="36" /> FastPlay
+# <img width="36" alt="fastplay" src="https://github.com/user-attachments/assets/9da48333-2f61-4c7f-bbd2-2ba2f42f9e43" /> FastPlay
 
 FastPlay is a keyboard-first Windows video player for fast local playback, smooth scrubbing, and ergonomic control across monitors.
 
@@ -8,7 +8,7 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
-<img width="550" height="480" alt="ezgif-1084bbf2cf26c3f5" src="https://github.com/user-attachments/assets/79667f65-6150-46d8-bb7c-a5024b53d2d1" />
+<img width="800" height="450" alt="FastPlay_gif" src="https://github.com/user-attachments/assets/4d837a35-ed8b-43fe-95b0-5bc2a18f0c7d" />
 
 ## Why FastPlay exists
 
