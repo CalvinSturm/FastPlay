@@ -32,7 +32,8 @@ use windows::{
                 D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
                 D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
                 D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+                D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
                 D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
                 D3D11_VIDEO_PROCESSOR_ROTATION_180, D3D11_VIDEO_PROCESSOR_ROTATION_270,
@@ -112,6 +113,17 @@ pub(crate) struct SubtitleRenderer {
     blend_state: ID3D11BlendState,
 }
 
+/// Colorimetry of a decoded frame, reduced to what the D3D11 video processor
+/// can express: which YCbCr→RGB matrix applies and whether the samples use
+/// the full 0–255 range or the limited 16–235 studio range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SurfaceColor {
+    /// BT.709 matrix when true, BT.601 otherwise.
+    pub(crate) bt709: bool,
+    /// Full-range (0–255) samples when true, limited/studio (16–235) otherwise.
+    pub(crate) full_range: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct VideoSurface {
     texture: ID3D11Texture2D,
@@ -120,6 +132,7 @@ pub(crate) struct VideoSurface {
     pub(crate) height: u32,
     pub(crate) sar_num: u32,
     pub(crate) sar_den: u32,
+    pub(crate) color: SurfaceColor,
 }
 
 impl VideoSurface {
@@ -392,6 +405,7 @@ impl D3D11Device {
         height: u32,
         sar_num: u32,
         sar_den: u32,
+        color: SurfaceColor,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         // Guard: if the device was removed (GPU TDR) bail out before touching
         // any D3D11 objects.  Without this the worker thread crashes inside
@@ -463,6 +477,7 @@ impl D3D11Device {
             height,
             sar_num,
             sar_den,
+            color,
         })
     }
 
@@ -616,6 +631,29 @@ impl D3D11Device {
             let mut streams = [stream];
             let blt_result = {
                 let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
+                // Without an explicit color space the driver guesses the
+                // YCbCr matrix and nominal range; guessing wrong (e.g.
+                // treating limited-range 16–235 video as full range) washes
+                // out blacks and dulls color. D3D11_VIDEO_PROCESSOR_COLOR_SPACE
+                // is a bitfield, LSB first: Usage:1 RGB_Range:1 YCbCr_Matrix:1
+                // YCbCr_xvYCC:1 Nominal_Range:2. YCbCr_Matrix 1 = BT.709,
+                // 0 = BT.601; Nominal_Range 1 = 16–235, 2 = 0–255.
+                let input_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                    _bitfield: ((surface.color.bt709 as u32) << 2)
+                        | (if surface.color.full_range { 2 } else { 1 } << 4),
+                };
+                // Output is the BGRA backbuffer: playback usage, full-range RGB.
+                // Full-range output is coupled to the 8-bit B8G8R8A8_UNORM
+                // swapchain format (see dxgi.rs); a future 10-bit/HDR
+                // backbuffer must update this color space in lockstep.
+                let output_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+                self.video_context.VideoProcessorSetStreamColorSpace(
+                    &cache.processor,
+                    0,
+                    &input_color_space,
+                );
+                self.video_context
+                    .VideoProcessorSetOutputColorSpace(&cache.processor, &output_color_space);
                 self.video_context.VideoProcessorSetStreamOutputRate(
                     &cache.processor,
                     0,
@@ -1389,6 +1427,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         stride: usize,
         sar_num: u32,
         sar_den: u32,
+        color: SurfaceColor,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
             return Err(Box::new(D3D11Error(
@@ -1449,6 +1488,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             height,
             sar_num,
             sar_den,
+            color,
         })
     }
 }
