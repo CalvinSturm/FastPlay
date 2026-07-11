@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::{
-    ffi::d3d11::{D3D11Device, VideoSurface},
+    ffi::d3d11::{D3D11Device, SurfaceColor, VideoSurface},
     media::{
         audio::AudioStreamFormat,
         source::MediaSource,
@@ -1058,6 +1058,28 @@ unsafe fn open_audio_decoder(
     }))
 }
 
+/// Reduce a decoded frame's colorimetry tags to the matrix/range pair the
+/// D3D11 video processor understands.
+///
+/// Untagged streams fall back on the industry convention: SD material
+/// (≤576 lines) is BT.601, anything larger is BT.709. RGB sources map to
+/// BT.601 limited because that is what sws_scale produces when it converts
+/// RGB to NV12 in the software-fallback path.
+unsafe fn frame_surface_color(frame: *const AVFrame) -> SurfaceColor {
+    let colorspace = (*frame).colorspace;
+    let bt709 = match colorspace {
+        AVColorSpace_AVCOL_SPC_BT709 => true,
+        AVColorSpace_AVCOL_SPC_RGB
+        | AVColorSpace_AVCOL_SPC_BT470BG
+        | AVColorSpace_AVCOL_SPC_SMPTE170M
+        | AVColorSpace_AVCOL_SPC_SMPTE240M => false,
+        _ => (*frame).height > 576,
+    };
+    let full_range = colorspace != AVColorSpace_AVCOL_SPC_RGB
+        && (*frame).color_range == AVColorRange_AVCOL_RANGE_JPEG;
+    SurfaceColor { bt709, full_range }
+}
+
 unsafe fn receive_video_frames<F>(
     video: &mut VideoDecoder,
     frame: *mut AVFrame,
@@ -1138,6 +1160,7 @@ where
                         (*frame).height as u32,
                         sar_num,
                         sar_den,
+                        frame_surface_color(frame),
                     )
                     .map_err(|error| error.to_string())?;
 
@@ -1268,6 +1291,7 @@ impl SoftwareVideoConverter {
                 stride,
                 sar_num,
                 sar_den,
+                frame_surface_color(frame),
             )
             .map_err(|e| e.to_string())
     }
