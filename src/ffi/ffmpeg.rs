@@ -15,13 +15,20 @@ use std::{
 };
 
 use crate::{
-    ffi::d3d11::{D3D11Device, SurfaceColor, VideoSurface},
+    ffi::{
+        d3d11::{D3D11Device, SurfaceColor, VideoSurface},
+        dxgi::query_hdr_presentation_capabilities,
+    },
     media::{
         audio::AudioStreamFormat,
         source::MediaSource,
         video::{VideoDecodeMode, VideoDecodePreference},
     },
     playback::generations::{OpenGeneration, OperationId, SeekGeneration},
+    render::hdr::{
+        classify_color_tags, select_video_presentation_path, ContentColorInfo, ContentColorMode,
+        ContentLightMetadata, HdrError, MasteringDisplayMetadata, VideoPresentationPath,
+    },
 };
 
 include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
@@ -276,6 +283,44 @@ impl DecodeSession {
         // open_video_decoder drops the session immediately.
         if should_cancel() {
             return Ok(None);
+        }
+
+        // Presentation-path fork (HDR skeleton). Decided from stream-level
+        // tags only, before any frame is decoded; everything below this
+        // block — the decode loop, first-frame handling, swapchain, and
+        // processor configuration — is the pre-existing verified SDR flow,
+        // untouched. Every HDR outcome is a typed error surfaced through
+        // the existing OpenFailed flow until the HDR pipeline is verified
+        // end to end.
+        //
+        // SDR short-circuits before any capability probing: an SDR open
+        // performs zero new COM work here, so a capability-query failure on
+        // exotic systems (headless/RDP output, drivers without the newer
+        // interfaces) can never regress SDR open availability.
+        if video.content_color.mode != ContentColorMode::Sdr {
+            let hdr_capabilities = query_hdr_presentation_capabilities(device, None)
+                .map_err(|error| error.to_string())?;
+            match select_video_presentation_path(&video.content_color, &hdr_capabilities) {
+                // Unreachable for non-SDR modes (the decision function
+                // returns ExistingSdr only for Sdr content); kept as an
+                // explicit no-op for match exhaustiveness.
+                VideoPresentationPath::ExistingSdr => {}
+                VideoPresentationPath::Hdr10Passthrough => {
+                    // Integration point for the passthrough commit: create
+                    // the HDR renderer via SwapChainPresenter::new_for_path,
+                    // then refine the classification from the first decoded
+                    // frame (refine_color_from_first_frame) once the HDR
+                    // swapchain exists. Until the color spaces are verified
+                    // this is a typed error, never a panic.
+                    return Err(HdrError::HdrColorSpaceUnverified.to_string());
+                }
+                VideoPresentationPath::HdrToSdrToneMapRequired => {
+                    return Err(HdrError::ToneMappingNotImplemented.to_string());
+                }
+                VideoPresentationPath::UnsupportedHdr => {
+                    return Err(HdrError::UnsupportedHdrPresentation.to_string());
+                }
+            }
         }
         // Audio can be handled by an independent [`AudioDecodeSession`] on its
         // own thread so it is never gated behind slow (e.g. software-decoded
@@ -768,6 +813,10 @@ struct VideoDecoder {
     /// Clockwise quarter-turns derived from the stream's display matrix side
     /// data (0 = no rotation, 1 = 90° CW, 2 = 180°, 3 = 270° CW).
     rotation_quarter_turns: u8,
+    /// Stream-level color classification from `AVCodecParameters`, captured
+    /// at decoder open. Drives the presentation-path decision before any
+    /// frame is decoded.
+    content_color: ContentColorInfo,
 }
 
 enum VideoDecoderOutput {
@@ -912,6 +961,7 @@ unsafe fn open_hardware_video_decoder(
     }
 
     let rotation_quarter_turns = stream_rotation_quarter_turns(codec_parameters);
+    let content_color = classify_stream_color(codec_parameters)?;
 
     ffmpeg_check(
         avcodec_parameters_to_context(codec.0, codec_parameters),
@@ -934,6 +984,7 @@ unsafe fn open_hardware_video_decoder(
         mode: VideoDecodeMode::HardwareD3D11,
         hw_fallback_count: 0,
         rotation_quarter_turns,
+        content_color,
     })
 }
 
@@ -969,6 +1020,7 @@ unsafe fn open_software_video_decoder(
     }
 
     let rotation_quarter_turns = stream_rotation_quarter_turns(codec_parameters);
+    let content_color = classify_stream_color(codec_parameters)?;
 
     ffmpeg_check(
         avcodec_parameters_to_context(codec.0, codec_parameters),
@@ -989,6 +1041,7 @@ unsafe fn open_software_video_decoder(
         mode: VideoDecodeMode::Software,
         hw_fallback_count: 0,
         rotation_quarter_turns,
+        content_color,
     })
 }
 
@@ -1056,6 +1109,111 @@ unsafe fn open_audio_decoder(
         resampler,
         output_format,
     }))
+}
+
+/// Stream-level color classification from `AVCodecParameters` only.
+///
+/// Called during open, after `avformat_find_stream_info` completes and
+/// before any frame is decoded — this is what drives presentation-path
+/// selection (and therefore swapchain format choice). It never parses HDR
+/// side data; that belongs to first-frame refinement on the HDR path.
+///
+/// SAFETY contract: `codecpar` must be the live codec parameters of a
+/// stream owned by an open `AVFormatContext`. It is read-only here and not
+/// retained beyond the call.
+unsafe fn classify_stream_color(
+    codecpar: *const AVCodecParameters,
+) -> Result<ContentColorInfo, String> {
+    if codecpar.is_null() {
+        return Err("video stream codec parameters were null during color classification".into());
+    }
+    let color_primaries = (*codecpar).color_primaries;
+    let color_transfer = (*codecpar).color_trc;
+    Ok(ContentColorInfo {
+        mode: classify_color_tags(color_primaries, color_transfer),
+        color_primaries,
+        color_transfer,
+        color_space: (*codecpar).color_space,
+        color_range: (*codecpar).color_range,
+        mastering_display: None,
+        content_light: None,
+    })
+}
+
+/// First-frame refinement of the stream-level classification.
+///
+/// Precedence rule: valid, *specified* frame-level tags override
+/// stream-level tags; unspecified frame fields leave the stream-level
+/// values in place. Frame side data (mastering display, content light) is
+/// attached only here, never at stream level.
+///
+/// Integration point: runs ONLY on the HDR path, after the HDR swapchain
+/// exists, on a first frame that already flowed through the unchanged
+/// decode path (see the `Hdr10Passthrough` arm in `DecodeSession::open`).
+/// The verified SDR path never calls this and its first-frame handling is
+/// untouched.
+///
+/// HDR-VERIFY: the concrete field-by-field refinement (upgrading `mode`
+/// from frame-level trc/primaries, range/matrix overrides) is unresolved;
+/// today the stream classification passes through with side-data
+/// attachment only.
+///
+/// SAFETY contract: `frame` must be a live decoded `AVFrame` owned by the
+/// caller. Read-only access; nothing is retained beyond the call.
+unsafe fn refine_color_from_first_frame(
+    stream_info: ContentColorInfo,
+    frame: *const AVFrame,
+) -> Result<ContentColorInfo, String> {
+    if frame.is_null() {
+        return Err("first decoded frame was null during HDR color refinement".into());
+    }
+    let (mastering_display, content_light) = extract_hdr_metadata_from_frame(frame)?;
+    let mut refined = stream_info;
+    refined.mastering_display = mastering_display;
+    refined.content_light = content_light;
+    Ok(refined)
+}
+
+/// Locate HDR10 static metadata side data on a decoded frame.
+///
+/// Missing side data yields `None` and never fails playback. Side data
+/// that IS present cannot be parsed yet: the payload structs
+/// (`AVMasteringDisplayMetadata`, `AVContentLightMetadata`) are not on our
+/// bindgen allowlist, and their layouts must not be guessed — presence is
+/// a typed error so the verification commit cannot be skipped silently.
+///
+/// HDR-VERIFY: bind the payload structs and parse `data`/`size` into
+/// [`MasteringDisplayMetadata`] / [`ContentLightMetadata`].
+///
+/// SAFETY contract: `frame` must be a live decoded `AVFrame`; the
+/// `side_data` entries are owned by the frame, and only the bound
+/// `AVFrameSideData` header (the `type_` tag) is read — never the payload.
+unsafe fn extract_hdr_metadata_from_frame(
+    frame: *const AVFrame,
+) -> Result<
+    (
+        Option<MasteringDisplayMetadata>,
+        Option<ContentLightMetadata>,
+    ),
+    String,
+> {
+    if frame.is_null() {
+        return Err("frame was null during HDR metadata extraction".into());
+    }
+    let count = (*frame).nb_side_data.max(0) as isize;
+    for index in 0..count {
+        let entry = *(*frame).side_data.offset(index);
+        if entry.is_null() {
+            continue;
+        }
+        let side_data_type = (*entry).type_;
+        if side_data_type == AVFrameSideDataType_AV_FRAME_DATA_MASTERING_DISPLAY_METADATA
+            || side_data_type == AVFrameSideDataType_AV_FRAME_DATA_CONTENT_LIGHT_LEVEL
+        {
+            return Err(HdrError::HdrMetadataConversionUnverified.to_string());
+        }
+    }
+    Ok((None, None))
 }
 
 /// Reduce a decoded frame's colorimetry tags to the matrix/range pair the

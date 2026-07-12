@@ -20,20 +20,20 @@ use windows::{
                 D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11Device,
                 ID3D11DeviceContext, ID3D11InputLayout, ID3D11Multithread, ID3D11PixelShader,
                 ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
-                ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoDevice,
-                ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-                ID3D11VideoProcessorOutputView, D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE,
-                D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
-                D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA, D3D11_BUFFER_DESC,
-                D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CPU_ACCESS_READ,
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-                D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE,
-                D3D11_MAP_READ, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
-                D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
-                D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
-                D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+                ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoContext1,
+                ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+                ID3D11VideoProcessorEnumerator1, ID3D11VideoProcessorOutputView,
+                D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
+                D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
+                D3D11_BLEND_SRC_ALPHA, D3D11_BUFFER_DESC, D3D11_COLOR_WRITE_ENABLE_ALL,
+                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_ELEMENT_DESC,
+                D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+                D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_VPIV,
+                D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
+                D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE, D3D11_USAGE_STAGING,
+                D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+                D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
                 D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
                 D3D11_VIDEO_PROCESSOR_ROTATION_180, D3D11_VIDEO_PROCESSOR_ROTATION_270,
@@ -42,8 +42,9 @@ use windows::{
                 D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
             },
             Dxgi::Common::{
-                DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R32G32B32_FLOAT,
-                DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+                DXGI_COLOR_SPACE_TYPE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12,
+                DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL,
+                DXGI_SAMPLE_DESC,
             },
             Gdi::{
                 CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
@@ -395,6 +396,83 @@ impl D3D11Device {
         // an un-AddRef'd pointer is correct — the previous clone()
         // + into_raw() leaked one COM reference per call.
         self.device.as_raw()
+    }
+
+    /// Whether the device exposes `ID3D11VideoContext1` (required for the
+    /// HDR color-space APIs). A read-only QueryInterface; never called on
+    /// the SDR render path.
+    pub(crate) fn video_context1_available(&self) -> bool {
+        self.video_context.cast::<ID3D11VideoContext1>().is_ok()
+    }
+
+    /// HDR-only video processor configuration for the `Hdr10Passthrough`
+    /// path. The verified SDR configuration in `render_video_surface` is a
+    /// separate, untouched code path and never calls this.
+    ///
+    /// Both color spaces come from `HDR-VERIFY` helpers that are typed
+    /// errors today, so the `Set*ColorSpace1` calls below are unreachable
+    /// until those values are verified — this function currently returns a
+    /// typed error, never a panic.
+    // Wired into the HDR render path by the passthrough commit.
+    #[allow(dead_code)]
+    pub(crate) fn configure_hdr10_video_processor_skeleton(
+        &self,
+        processor: &ID3D11VideoProcessor,
+        content: &crate::render::hdr::ContentColorInfo,
+    ) -> Result<(), Box<dyn Error>> {
+        let video_context1: ID3D11VideoContext1 = self
+            .video_context
+            .cast()
+            .map_err(|_| crate::render::hdr::HdrError::VideoContext1Unavailable)?;
+
+        // HDR-VERIFY: stream (YCbCr PQ/HLG BT.2020) and output (RGB PQ
+        // BT.2020) color-space variants are unresolved typed errors.
+        let stream_color_space = crate::render::hdr::verified_hdr_stream_color_space(content)?;
+        let output_color_space = crate::render::hdr::verified_hdr10_processor_output_color_space()?;
+
+        // SAFETY: the processor belongs to this device; like the SDR Set*
+        // calls, the caller must hold context_lock to serialise video
+        // context access across threads.
+        unsafe {
+            let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
+            video_context1.VideoProcessorSetStreamColorSpace1(processor, 0, stream_color_space);
+            video_context1.VideoProcessorSetOutputColorSpace1(processor, output_color_space);
+        }
+        Ok(())
+    }
+
+    /// Structural capability check for HDR format conversion through the
+    /// video processor. Takes the actual decoded input format and the
+    /// intended color spaces/output format — interface availability alone
+    /// never counts as support.
+    ///
+    /// The color-space arguments must come from the `verified_*` helpers,
+    /// which are typed errors until resolved, so this cannot run with
+    /// guessed values.
+    // Wired into capability probing by the passthrough commit.
+    #[allow(dead_code)]
+    pub(crate) fn check_hdr_format_conversion(
+        &self,
+        enumerator: &ID3D11VideoProcessorEnumerator,
+        input_format: DXGI_FORMAT,
+        input_color_space: DXGI_COLOR_SPACE_TYPE,
+        output_format: DXGI_FORMAT,
+        output_color_space: DXGI_COLOR_SPACE_TYPE,
+    ) -> Result<bool, Box<dyn Error>> {
+        let enumerator1: ID3D11VideoProcessorEnumerator1 = enumerator
+            .cast()
+            .map_err(|_| crate::render::hdr::HdrError::VideoProcessorEnumerator1Unavailable)?;
+        // SAFETY: read-only capability query on a live enumerator from this
+        // device.
+        let supported = unsafe {
+            enumerator1.CheckVideoProcessorFormatConversion(
+                input_format,
+                input_color_space,
+                output_format,
+                output_color_space,
+            )?
+        };
+        Ok(supported.as_bool())
     }
 
     pub(crate) unsafe fn surface_from_raw_texture(
