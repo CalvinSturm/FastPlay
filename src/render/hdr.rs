@@ -53,10 +53,13 @@ pub(crate) enum ContentColorMode {
     Sdr,
     /// PQ / SMPTE ST 2084 transfer (HDR10 family).
     Hdr10Pq,
-    /// Hybrid Log-Gamma transfer.
+    /// Hybrid Log-Gamma transfer with BT.2020 primaries (standard BT.2100
+    /// HLG signalling).
     Hlg,
-    /// HDR-signalled but ambiguous (e.g. BT.2020 primaries with an
-    /// unspecified transfer). Never silently treated as SDR or as HDR10.
+    /// HDR-signalled but ambiguous, contradictory, or incomplete (e.g.
+    /// BT.2020 primaries with an unspecified transfer, or PQ/HLG with
+    /// non-BT.2020 or unspecified primaries). Never silently treated as
+    /// SDR or as HDR10.
     Unknown,
 }
 
@@ -244,7 +247,9 @@ impl Error for HdrError {}
 ///   contradict HDR10, and unspecified primaries are incomplete
 ///   signalling with no verified default here — neither may be assumed
 ///   HDR10 or silently tone-mapped.
-/// - HLG → `Hlg` regardless of primaries; never downgraded to SDR.
+/// - HLG + BT.2020 primaries → `Hlg` (standard BT.2100 HLG signalling).
+/// - HLG + anything else → `Unknown`, by the same contradictory /
+///   incomplete reasoning as PQ; never downgraded to SDR.
 /// - Unspecified transfer + BT.2020 primaries → `Unknown` (could be PQ,
 ///   HLG, or wide-gamut SDR).
 /// - Any explicit SDR-class transfer, or fully untagged content → `Sdr`.
@@ -266,7 +271,19 @@ pub(crate) fn classify_color_tags(
         };
     }
     if color_transfer == AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67 {
-        return ContentColorMode::Hlg;
+        // BT.2100 defines HLG over BT.2020 primaries, exactly like PQ, and
+        // the repository holds no compatibility evidence for accepting
+        // anything else. Known non-BT.2020 primaries are contradictory and
+        // unspecified primaries are incomplete; both dead-end as Unknown
+        // (UnsupportedHdr at path level), the same conservative policy as
+        // PQ above. Today Hlg and Unknown reach the identical dead end, so
+        // this costs nothing; if real HLG content ships with unspecified
+        // primaries, the future HLG commit may relax this with evidence.
+        return if color_primaries == AVColorPrimaries_AVCOL_PRI_BT2020 {
+            ContentColorMode::Hlg
+        } else {
+            ContentColorMode::Unknown
+        };
     }
     if color_transfer == AVColorTransferCharacteristic_AVCOL_TRC_UNSPECIFIED {
         if color_primaries == AVColorPrimaries_AVCOL_PRI_BT2020 {
@@ -287,11 +304,15 @@ pub(crate) fn classify_color_tags(
         // frame-level tags before presentation), not a classifier change.
         return ContentColorMode::Sdr;
     }
-    // Every remaining transfer tag is an explicit SDR-class transfer
-    // (BT.709, gamma 2.2/2.8, SMPTE 170M/240M, sRGB, BT2020_10/12, ...).
-    // That includes BT.2020 primaries with an SDR transfer — wide-gamut
-    // SDR: the primaries widen the gamut but do not change the dynamic
-    // range, so it stays on the SDR path and must never select PQ output.
+    // Every remaining transfer tag falls through to Sdr. For the standard
+    // SDR-class transfers (BT.709, gamma 2.2/2.8, SMPTE 170M/240M, sRGB,
+    // BT2020_10/12) that is explicit policy; for the exotic and reserved
+    // codepoints (linear, log, SMPTE 428, vendor extensions) it is
+    // retained legacy behavior — none of them carry an HDR signal, and
+    // they continue through the verified SDR path exactly as before this
+    // module existed. That includes BT.2020 primaries with an SDR
+    // transfer — wide-gamut SDR: the primaries widen the gamut but do not
+    // change the dynamic range, so it must never select PQ output.
     ContentColorMode::Sdr
 }
 
@@ -427,9 +448,23 @@ mod tests {
     use crate::ffi::ffmpeg::{
         AVColorPrimaries_AVCOL_PRI_BT709, AVColorPrimaries_AVCOL_PRI_SMPTE170M,
         AVColorPrimaries_AVCOL_PRI_UNSPECIFIED, AVColorRange_AVCOL_RANGE_UNSPECIFIED,
-        AVColorSpace_AVCOL_SPC_UNSPECIFIED, AVColorTransferCharacteristic_AVCOL_TRC_BT2020_10,
+        AVColorSpace_AVCOL_SPC_UNSPECIFIED, AVColorTransferCharacteristic_AVCOL_TRC_BT1361_ECG,
+        AVColorTransferCharacteristic_AVCOL_TRC_BT2020_10,
         AVColorTransferCharacteristic_AVCOL_TRC_BT2020_12,
         AVColorTransferCharacteristic_AVCOL_TRC_BT709,
+        AVColorTransferCharacteristic_AVCOL_TRC_GAMMA22,
+        AVColorTransferCharacteristic_AVCOL_TRC_GAMMA28,
+        AVColorTransferCharacteristic_AVCOL_TRC_IEC61966_2_1,
+        AVColorTransferCharacteristic_AVCOL_TRC_IEC61966_2_4,
+        AVColorTransferCharacteristic_AVCOL_TRC_LINEAR,
+        AVColorTransferCharacteristic_AVCOL_TRC_LOG,
+        AVColorTransferCharacteristic_AVCOL_TRC_LOG_SQRT,
+        AVColorTransferCharacteristic_AVCOL_TRC_RESERVED,
+        AVColorTransferCharacteristic_AVCOL_TRC_RESERVED0,
+        AVColorTransferCharacteristic_AVCOL_TRC_SMPTE170M,
+        AVColorTransferCharacteristic_AVCOL_TRC_SMPTE240M,
+        AVColorTransferCharacteristic_AVCOL_TRC_SMPTE428,
+        AVColorTransferCharacteristic_AVCOL_TRC_V_LOG,
     };
 
     fn info(mode: ContentColorMode) -> ContentColorInfo {
@@ -634,11 +669,14 @@ mod tests {
     }
 
     #[test]
-    fn classify_hlg_with_non_bt2020_primaries_is_hlg() {
-        // HLG stays explicit regardless of primaries; never downgraded to
-        // SDR (it dead-ends in its typed error at path level).
+    fn classify_contradictory_or_incomplete_hlg_is_unknown() {
+        // Same conservative policy as PQ: BT.2100 HLG requires BT.2020
+        // primaries. Known non-BT.2020 primaries are contradictory and
+        // unspecified primaries are incomplete; neither may be assumed
+        // valid HLG, and neither may be downgraded to SDR.
         for primaries in [
             AVColorPrimaries_AVCOL_PRI_BT709,
+            AVColorPrimaries_AVCOL_PRI_SMPTE170M,
             AVColorPrimaries_AVCOL_PRI_UNSPECIFIED,
         ] {
             assert_eq!(
@@ -646,23 +684,64 @@ mod tests {
                     primaries,
                     AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
                 ),
-                ContentColorMode::Hlg
+                ContentColorMode::Unknown
             );
         }
     }
 
     #[test]
-    fn classify_wide_gamut_sdr_transfers_stay_sdr() {
-        // BT.2020 primaries under an explicit SDR-class transfer is
-        // wide-gamut SDR: primaries alone never select HDR.
-        for transfer in [
+    fn classified_hlg_dead_ends_as_unsupported_never_sdr_or_passthrough() {
+        // End to end: standard BT.2100 HLG classifies as Hlg and dead-ends
+        // as UnsupportedHdr under any capabilities — never HDR10
+        // passthrough, never the ordinary SDR path.
+        let mode = classify_color_tags(
+            AVColorPrimaries_AVCOL_PRI_BT2020,
+            AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
+        );
+        assert_eq!(mode, ContentColorMode::Hlg);
+        let mut content = info(mode);
+        content.color_primaries = AVColorPrimaries_AVCOL_PRI_BT2020;
+        content.color_transfer = AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67;
+        for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
+            assert_eq!(
+                select_video_presentation_path(&content, &caps),
+                VideoPresentationPath::UnsupportedHdr
+            );
+        }
+    }
+
+    #[test]
+    fn every_explicit_sdr_transfer_stays_sdr_with_bt2020_primaries() {
+        // Table of every bound transfer value that reaches the SDR
+        // fallthrough arm — everything except PQ, HLG, and unspecified
+        // (aliases and the *_NB / EXT_BASE sentinels excluded; V_LOG
+        // stands in for the vendor-extension range). Each is paired with
+        // BT.2020 primaries, which also pins the wide-gamut-SDR policy:
+        // primaries alone never select HDR.
+        let sdr_transfers = [
+            AVColorTransferCharacteristic_AVCOL_TRC_RESERVED0,
             AVColorTransferCharacteristic_AVCOL_TRC_BT709,
+            AVColorTransferCharacteristic_AVCOL_TRC_RESERVED,
+            AVColorTransferCharacteristic_AVCOL_TRC_GAMMA22,
+            AVColorTransferCharacteristic_AVCOL_TRC_GAMMA28,
+            AVColorTransferCharacteristic_AVCOL_TRC_SMPTE170M,
+            AVColorTransferCharacteristic_AVCOL_TRC_SMPTE240M,
+            AVColorTransferCharacteristic_AVCOL_TRC_LINEAR,
+            AVColorTransferCharacteristic_AVCOL_TRC_LOG,
+            AVColorTransferCharacteristic_AVCOL_TRC_LOG_SQRT,
+            AVColorTransferCharacteristic_AVCOL_TRC_IEC61966_2_4,
+            AVColorTransferCharacteristic_AVCOL_TRC_BT1361_ECG,
+            AVColorTransferCharacteristic_AVCOL_TRC_IEC61966_2_1,
             AVColorTransferCharacteristic_AVCOL_TRC_BT2020_10,
             AVColorTransferCharacteristic_AVCOL_TRC_BT2020_12,
-        ] {
+            AVColorTransferCharacteristic_AVCOL_TRC_SMPTE428,
+            AVColorTransferCharacteristic_AVCOL_TRC_V_LOG,
+        ];
+        for transfer in sdr_transfers {
             assert_eq!(
                 classify_color_tags(AVColorPrimaries_AVCOL_PRI_BT2020, transfer),
-                ContentColorMode::Sdr
+                ContentColorMode::Sdr,
+                "transfer value {transfer} must classify as Sdr",
             );
         }
     }
