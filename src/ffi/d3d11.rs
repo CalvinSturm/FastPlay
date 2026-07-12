@@ -409,10 +409,12 @@ impl D3D11Device {
     /// path. The verified SDR configuration in `render_video_surface` is a
     /// separate, untouched code path and never calls this.
     ///
-    /// Both color spaces come from `HDR-VERIFY` helpers that are typed
-    /// errors today, so the `Set*ColorSpace1` calls below are unreachable
-    /// until those values are verified — this function currently returns a
-    /// typed error, never a panic.
+    /// Both color spaces come from the `verified_*` helpers in
+    /// `render::hdr`: resolved for standard HDR10 and pixel-validated
+    /// through the identical `Set*ColorSpace1` calls in
+    /// `hdr10_validation_blt` (`bench/verify-colors-pq.ps1`). Non-HDR10
+    /// signals (HLG, constant-luminance / non-BT.2020 matrices, full-range
+    /// PQ) still return typed errors from those helpers, never a panic.
     // Wired into the HDR render path by the passthrough commit.
     #[allow(dead_code)]
     pub(crate) fn configure_hdr10_video_processor_skeleton(
@@ -425,8 +427,9 @@ impl D3D11Device {
             .cast()
             .map_err(|_| crate::render::hdr::HdrError::VideoContext1Unavailable)?;
 
-        // HDR-VERIFY: stream (YCbCr PQ/HLG BT.2020) and output (RGB PQ
-        // BT.2020) color-space variants are unresolved typed errors.
+        // Resolved for standard HDR10 (YCBCR_STUDIO_G2084_LEFT_P2020 in,
+        // RGB_FULL_G2084_NONE_P2020 out); anything else is a typed error
+        // from the helpers.
         let stream_color_space = crate::render::hdr::verified_hdr_stream_color_space(content)?;
         let output_color_space = crate::render::hdr::verified_hdr10_processor_output_color_space()?;
 
