@@ -125,6 +125,11 @@ pub struct PlaybackSession {
     seek_discard_before_pts: Option<Duration>,
     seek_frame_presented_since_request: bool,
     audio_stream_expected: bool,
+    /// False once the video worker reports the file has no video track
+    /// (audio-only media). Gates the presentation state machine so it drives
+    /// priming/end-of-stream from audio alone instead of waiting for a video
+    /// frame that will never arrive. Defaults true; reset per open.
+    video_stream_expected: bool,
     overlay: OverlayManager,
     video_queue: VideoFrameQueue,
     queued_audio_frames: VecDeque<QueuedAudioFrame>,
@@ -226,6 +231,7 @@ impl PlaybackSession {
             seek_discard_before_pts: None,
             seek_frame_presented_since_request: false,
             audio_stream_expected: false,
+            video_stream_expected: true,
             overlay: OverlayManager::new(),
             video_queue: VideoFrameQueue::with_capacity(queue_defaults.decoded_video_frames),
             queued_audio_frames: VecDeque::with_capacity(queue_defaults.decoded_audio_frames),
@@ -1025,6 +1031,16 @@ impl PlaybackSession {
                     return Ok(());
                 }
 
+                // For audio-only media there is no video frame to move the
+                // session out of Opening/Seeking, so the first audio frame does
+                // it. (A/V files leave this to the first video frame above so
+                // priming still waits on the picture.)
+                if !self.video_stream_expected
+                    && matches!(self.state, PlaybackState::Opening | PlaybackState::Seeking)
+                {
+                    self.state = PlaybackState::Priming;
+                }
+
                 self.push_audio_frame(DecodedAudioFrame {
                     open_gen: frame.open_gen,
                     seek_gen: frame.seek_gen,
@@ -1051,6 +1067,18 @@ impl PlaybackSession {
                 if matches!(self.state, PlaybackState::Playing | PlaybackState::Priming) {
                     self.state = PlaybackState::Draining;
                 }
+            }
+            SessionEvent::NoVideoStream { open_gen, op_id } => {
+                if open_gen != self.generations.open() || Some(op_id) != self.active_operation_id {
+                    return Ok(());
+                }
+                flog!("[no_video_stream] op={:?} (audio-only)", op_id);
+                // Audio-only: no video frame will arrive, so mark the video
+                // side absent and already-ended. Priming/Playing is then driven
+                // by the audio clock (see AudioFrameReady and the audio-anchor
+                // transition), and end-of-playback no longer waits on video.
+                self.video_stream_expected = false;
+                self.video_stream_ended = true;
             }
             SessionEvent::AudioStreamEnded {
                 open_gen,
@@ -1286,6 +1314,10 @@ impl PlaybackSession {
         self.overlay.active_subtitle_viewport = None;
         if reset_audio_expectation {
             self.audio_stream_expected = false;
+            // A fresh open re-assumes video until the worker proves otherwise;
+            // a seek within the current file must preserve the audio-only
+            // determination (the worker is not respawned to re-report it).
+            self.video_stream_expected = true;
         }
 
         if rebuild_audio_sink {
@@ -1457,8 +1489,22 @@ impl PlaybackSession {
                 )
             };
             let mut session = match open_result {
-                Ok(Some(session)) => session,
-                Ok(None) => return,
+                Ok(ffmpeg::VideoOpen::Ready(session)) => session,
+                Ok(ffmpeg::VideoOpen::Cancelled) => return,
+                Ok(ffmpeg::VideoOpen::NoVideoStream) => {
+                    // Audio-only file: no video will ever arrive. Tell the
+                    // coordinator so it plays from the audio worker alone, then
+                    // exit — there is no video to decode. (Suppressed if a newer
+                    // command already superseded this open.)
+                    if !control.is_shutdown() {
+                        let (_seek_gen, op_id) = gen_cell.get();
+                        let _ = worker_send(
+                            SessionEvent::NoVideoStream { open_gen, op_id },
+                            &sender,
+                        );
+                    }
+                    return;
+                }
                 Err(error) => {
                     if !control.is_shutdown() {
                         let (seek_gen, op_id) = gen_cell.get();

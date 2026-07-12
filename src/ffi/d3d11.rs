@@ -43,7 +43,7 @@ use windows::{
             },
             Dxgi::Common::{
                 DXGI_COLOR_SPACE_TYPE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12,
-                DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R32G32B32_FLOAT,
+                DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R32G32B32_FLOAT,
                 DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
             },
             Gdi::{
@@ -134,6 +134,14 @@ pub(crate) struct VideoSurface {
     pub(crate) sar_num: u32,
     pub(crate) sar_den: u32,
     pub(crate) color: SurfaceColor,
+    /// When `Some`, this frame carries HDR content that must be tone-mapped
+    /// to SDR by the video processor: the value is the decoded stream's DXGI
+    /// input color space (PQ or HLG), set through `ID3D11VideoContext1`
+    /// with an sRGB output space so the driver performs HDR→SDR conversion.
+    /// `None` is the pixel-verified SDR path, where `color` alone drives the
+    /// legacy matrix/range configuration. Constant for every frame of one
+    /// opened file (resolved once at decoder open).
+    pub(crate) hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
 }
 
 impl VideoSurface {
@@ -169,6 +177,12 @@ pub(crate) struct VideoProcessorCache {
     output_height: u32,
     /// Raw pointer used only for identity comparison — never dereferenced.
     backbuffer_identity: *mut c_void,
+    /// The HDR tone-map input color space this processor was built and
+    /// capability-checked for (`None` = the SDR path). Part of the cache
+    /// key: a surface whose `hdr_tone_map` differs forces a rebuild, so the
+    /// one-time `CheckVideoProcessorFormatConversion` gate below always
+    /// matches the frames actually blitted through it.
+    hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
 }
 
 pub(crate) struct BgraFrameCapture {
@@ -478,6 +492,61 @@ impl D3D11Device {
         Ok(supported.as_bool())
     }
 
+    /// Open-time gate for the HDR→SDR tone-map path: does this device's video
+    /// processor advertise converting an HDR input (`input_color_space`, in
+    /// either of the decode formats HW/SW produce — NV12 for 8-bit, P010 for
+    /// 10-bit) straight to the SDR sRGB backbuffer the tone-map blt targets?
+    ///
+    /// Checked at open so an unsupported combination fails the open cleanly
+    /// (typed `OpenFailed`) instead of erroring at the first blt — a render
+    /// error is otherwise misread as device-lost and crash-loops device
+    /// recovery. Not every GPU exposes single-pass HDR→8-bit-SDR conversion
+    /// through the video processor (many only reach a wide-gamut/float or PQ
+    /// target); on those this returns false and the file is declined rather
+    /// than shown mis-converted.
+    pub(crate) fn supports_hdr_tone_map(
+        &self,
+        width: u32,
+        height: u32,
+        input_color_space: DXGI_COLOR_SPACE_TYPE,
+    ) -> Result<bool, Box<dyn Error>> {
+        let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputFrameRate: DXGI_RATIONAL {
+                Numerator: 1,
+                Denominator: 1,
+            },
+            InputWidth: width.max(1),
+            InputHeight: height.max(1),
+            OutputFrameRate: DXGI_RATIONAL {
+                Numerator: 1,
+                Denominator: 1,
+            },
+            OutputWidth: width.max(1),
+            OutputHeight: height.max(1),
+            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+        };
+        // SAFETY: content_desc is fully initialized; the enumerator is a live
+        // COM object owned by this scope.
+        let enumerator = unsafe {
+            self.video_device
+                .CreateVideoProcessorEnumerator(&content_desc)?
+        };
+        let out_cs = crate::render::hdr::tone_map_output_color_space();
+        for input_format in [DXGI_FORMAT_NV12, DXGI_FORMAT_P010] {
+            if self.check_hdr_format_conversion(
+                &enumerator,
+                input_format,
+                input_color_space,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                out_cs,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Dev-only HDR10 validation blt (`bench/verify-colors-pq.ps1`): renders
     /// one NV12 surface into an R10G10B10A2 backbuffer with the resolved
     /// HDR10 color spaces set through `ID3D11VideoContext1`. This is the
@@ -673,6 +742,7 @@ impl D3D11Device {
         sar_num: u32,
         sar_den: u32,
         color: SurfaceColor,
+        hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         // Guard: if the device was removed (GPU TDR) bail out before touching
         // any D3D11 objects.  Without this the worker thread crashes inside
@@ -745,6 +815,7 @@ impl D3D11Device {
             sar_num,
             sar_den,
             color,
+            hdr_tone_map,
         })
     }
 
@@ -776,7 +847,8 @@ impl D3D11Device {
                         && c.input_height == surface.height
                         && c.output_width == output_width
                         && c.output_height == output_height
-                        && c.backbuffer_identity == bb_identity =>
+                        && c.backbuffer_identity == bb_identity
+                        && c.hdr_tone_map == surface.hdr_tone_map =>
                 {
                     c
                 }
@@ -800,6 +872,7 @@ impl D3D11Device {
                     let enumerator = self
                         .video_device
                         .CreateVideoProcessorEnumerator(&content_desc)?;
+
                     let processor = self.video_device.CreateVideoProcessor(&enumerator, 0)?;
 
                     let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
@@ -828,6 +901,7 @@ impl D3D11Device {
                         output_width,
                         output_height,
                         backbuffer_identity: bb_identity,
+                        hdr_tone_map: surface.hdr_tone_map,
                     });
                     slot.as_mut().unwrap()
                 }
@@ -895,32 +969,72 @@ impl D3D11Device {
             // SetMultithreadProtected; without the lock the two threads
             // race on the same underlying immediate context, crashing
             // in d3d11.dll.
+            // For HDR content, the driver tone-maps only through the newer
+            // ID3D11VideoContext1 color-space API (DXGI color spaces carry the
+            // PQ/HLG transfer the legacy bitfield cannot express). Cast once,
+            // outside the lock; a device without it is a typed error rather
+            // than a silently mis-converted (washed-out) frame.
+            let video_context1: Option<ID3D11VideoContext1> = match surface.hdr_tone_map {
+                Some(_) => Some(
+                    self.video_context
+                        .cast()
+                        .map_err(|_| crate::render::hdr::HdrError::VideoContext1Unavailable)?,
+                ),
+                None => None,
+            };
+
             let mut streams = [stream];
             let blt_result = {
                 let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
-                // Without an explicit color space the driver guesses the
-                // YCbCr matrix and nominal range; guessing wrong (e.g.
-                // treating limited-range 16–235 video as full range) washes
-                // out blacks and dulls color. D3D11_VIDEO_PROCESSOR_COLOR_SPACE
-                // is a bitfield, LSB first: Usage:1 RGB_Range:1 YCbCr_Matrix:1
-                // YCbCr_xvYCC:1 Nominal_Range:2. YCbCr_Matrix 1 = BT.709,
-                // 0 = BT.601; Nominal_Range 1 = 16–235, 2 = 0–255.
-                let input_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-                    _bitfield: ((surface.color.bt709 as u32) << 2)
-                        | (if surface.color.full_range { 2 } else { 1 } << 4),
-                };
-                // Output is the BGRA backbuffer: playback usage, full-range RGB.
-                // Full-range output is coupled to the 8-bit B8G8R8A8_UNORM
-                // swapchain format (see dxgi.rs); a future 10-bit/HDR
-                // backbuffer must update this color space in lockstep.
-                let output_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
-                self.video_context.VideoProcessorSetStreamColorSpace(
-                    &cache.processor,
-                    0,
-                    &input_color_space,
-                );
-                self.video_context
-                    .VideoProcessorSetOutputColorSpace(&cache.processor, &output_color_space);
+                match (surface.hdr_tone_map, &video_context1) {
+                    // HDR→SDR: tag the stream with its decoded HDR color space
+                    // (PQ or HLG) and the output as sRGB, and the video
+                    // processor tone-maps into the 8-bit SDR backbuffer. The
+                    // format-conversion capability was proven at cache
+                    // creation above.
+                    (Some(input_color_space), Some(vc1)) => {
+                        vc1.VideoProcessorSetStreamColorSpace1(
+                            &cache.processor,
+                            0,
+                            input_color_space,
+                        );
+                        vc1.VideoProcessorSetOutputColorSpace1(
+                            &cache.processor,
+                            crate::render::hdr::tone_map_output_color_space(),
+                        );
+                    }
+                    // SDR: the pixel-verified legacy path, byte-for-byte
+                    // unchanged. Without an explicit color space the driver
+                    // guesses the YCbCr matrix and nominal range; guessing
+                    // wrong (e.g. treating limited-range 16–235 video as full
+                    // range) washes out blacks and dulls color.
+                    // D3D11_VIDEO_PROCESSOR_COLOR_SPACE is a bitfield, LSB
+                    // first: Usage:1 RGB_Range:1 YCbCr_Matrix:1 YCbCr_xvYCC:1
+                    // Nominal_Range:2. YCbCr_Matrix 1 = BT.709, 0 = BT.601;
+                    // Nominal_Range 1 = 16–235, 2 = 0–255.
+                    _ => {
+                        let input_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                            _bitfield: ((surface.color.bt709 as u32) << 2)
+                                | (if surface.color.full_range { 2 } else { 1 } << 4),
+                        };
+                        // Output is the BGRA backbuffer: playback usage,
+                        // full-range RGB. Full-range output is coupled to the
+                        // 8-bit B8G8R8A8_UNORM swapchain format (see dxgi.rs);
+                        // a future 10-bit/HDR backbuffer must update this color
+                        // space in lockstep.
+                        let output_color_space =
+                            D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+                        self.video_context.VideoProcessorSetStreamColorSpace(
+                            &cache.processor,
+                            0,
+                            &input_color_space,
+                        );
+                        self.video_context.VideoProcessorSetOutputColorSpace(
+                            &cache.processor,
+                            &output_color_space,
+                        );
+                    }
+                }
                 self.video_context.VideoProcessorSetStreamOutputRate(
                     &cache.processor,
                     0,
@@ -1695,6 +1809,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         sar_num: u32,
         sar_den: u32,
         color: SurfaceColor,
+        hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
             return Err(Box::new(D3D11Error(
@@ -1756,6 +1871,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             sar_num,
             sar_den,
             color,
+            hdr_tone_map,
         })
     }
 }

@@ -114,6 +114,10 @@ pub fn run(config: HdrValidateConfig) -> Result<(), Box<dyn Error>> {
             bt709: false,
             full_range: false,
         },
+        // This harness drives the dedicated hdr10_validation_blt (which reads
+        // its color spaces from the verified_* helpers), not the production
+        // tone-map blt path, so no tone-map tag is attached here.
+        None,
     )?;
 
     let stream_color_space_override = config
