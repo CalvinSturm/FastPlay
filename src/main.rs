@@ -91,6 +91,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // deadlines and produces stuttering / A-V desync.
     let _timer_resolution = ffi::runtime::MultimediaTimerResolution::begin_1ms();
 
+    // Dev-gated HDR color validation (bench/verify-colors-pq.ps1): renders
+    // one NV12 frame through the HDR10 color-space path into a 10-bit
+    // swapchain and dumps the backbuffer readback, then exits. Inert unless
+    // the FASTPLAY_HDR_VALIDATE_* environment variables are set.
+    if let Some(config) = render::hdr_validate::config_from_env() {
+        return render::hdr_validate::run(config);
+    }
+
     let media_path = parse_media_source_from_args()?;
     let window = NativeWindow::create("FastPlay", 1280, 720)?;
     let mut session = PlaybackSession::new(window)?;

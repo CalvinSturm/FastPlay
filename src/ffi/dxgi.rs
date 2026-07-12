@@ -16,7 +16,10 @@ use windows::{
         Graphics::{
             Direct3D11::{ID3D11Texture2D, ID3D11VideoContext1},
             Dxgi::{
-                Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                Common::{
+                    DXGI_ALPHA_MODE_IGNORE, DXGI_COLOR_SPACE_TYPE, DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_SAMPLE_DESC,
+                },
                 CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGIOutput, IDXGIOutput6,
                 IDXGISwapChain1, IDXGISwapChain3, IDXGISwapChain4, DXGI_CREATE_FACTORY_FLAGS,
                 DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_HDR_METADATA_HDR10,
@@ -787,6 +790,36 @@ impl DxgiSwapChain {
         })
     }
 
+    /// Dev-only HDR10 validation pass (`bench/verify-colors-pq.ps1`): blt
+    /// `surface` into this (HDR) swapchain's backbuffer with the resolved
+    /// HDR10 color spaces, then read the backbuffer straight back through
+    /// the staging-texture path — deliberately WITHOUT presenting, so DWM
+    /// never touches the measured pixels.
+    // Called only by the env-gated validation entry (render::hdr_validate).
+    #[allow(dead_code)]
+    pub fn hdr10_validation_pass(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+        content: &ContentColorInfo,
+        stream_color_space_override: Option<DXGI_COLOR_SPACE_TYPE>,
+    ) -> Result<BgraFrameCapture, Box<dyn Error>> {
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain backbuffer is not bound".into()))?;
+        let (output_width, output_height) = current_backbuffer_size(backbuffer)?;
+        device.hdr10_validation_blt(
+            surface,
+            backbuffer,
+            output_width,
+            output_height,
+            content,
+            stream_color_space_override,
+        )?;
+        device.capture_bgra_texture(backbuffer)
+    }
+
     pub fn render(
         &mut self,
         device: &D3D11Device,
@@ -1166,9 +1199,9 @@ pub fn query_hdr_presentation_capabilities(
             }
         }
 
-        // Swapchain HDR10 color-space support. Gated on the verified
-        // swapchain color space, which is a typed error today, so this
-        // capability stays false until the HDR-VERIFY commit resolves it.
+        // Swapchain HDR10 color-space support, against the verified
+        // RGB_FULL_G2084_NONE_P2020 value (validated by
+        // bench/verify-colors-pq.ps1).
         if let Ok(swap_chain3) = swap_chain.cast::<IDXGISwapChain3>() {
             if let Ok(hdr_color_space) = verified_hdr10_swapchain_color_space() {
                 // SAFETY: read-only support query.
