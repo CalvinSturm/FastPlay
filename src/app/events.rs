@@ -32,6 +32,14 @@ pub enum SessionEvent {
         seek_gen: SeekGeneration,
         op_id: OperationId,
     },
+    /// The opened file has no video stream (audio-only media). The video
+    /// worker emits this instead of `OpenFailed` so the coordinator can play
+    /// the file audio-only: no video frame will ever arrive, so it drives the
+    /// clock and end-of-stream from audio alone.
+    NoVideoStream {
+        open_gen: OpenGeneration,
+        op_id: OperationId,
+    },
     AudioStreamEnded {
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,

@@ -31,8 +31,10 @@ pub(crate) enum RendererConstructor {
     /// swapchain with the verified HDR10 color space, but is not yet wired
     /// into the production render path (passthrough commit).
     Hdr10Skeleton,
-    /// The explicit HDR-to-SDR tone-mapping boundary (typed
-    /// `ToneMappingNotImplemented` error today).
+    /// The HDR-to-SDR tone-mapping path. Tone-mapping is performed by the
+    /// video processor at blt time (see `render_video_surface`), writing SDR
+    /// sRGB into the ordinary 8-bit backbuffer, so this dispatches to the
+    /// same verified SDR swapchain constructor — no distinct HDR swapchain.
     HdrToSdrToneMap(HdrToSdrRendererCtor),
 }
 
@@ -53,19 +55,21 @@ pub(crate) fn renderer_constructor_for_path(
     }
 }
 
-/// Future HDR-to-SDR tone-mapping renderer. Deliberately a typed error:
-/// HDR content on an SDR display must never fall through to the existing
-/// SDR path without an explicit conversion.
-///
-/// HDR-VERIFY: tone-mapping implementation (processor-based or shader) is
-/// future work behind this single boundary.
+/// HDR-to-SDR tone-mapping renderer. The conversion is done by the GPU
+/// video processor during `render_video_surface` (it tags the decoded HDR
+/// stream color space and an sRGB output space, and the driver tone-maps),
+/// writing SDR sRGB straight into the ordinary 8-bit backbuffer. The
+/// swapchain is therefore the verified SDR swapchain — this delegates to the
+/// same `SwapChainPresenter::new` the SDR path uses. `content`/`capabilities`
+/// are unused here because the per-frame color spaces are resolved from the
+/// surface's tone-map tag at blt time, not baked into the swapchain.
 pub(crate) fn create_hdr_to_sdr_renderer(
-    _window: &NativeWindow,
-    _device: &D3D11Device,
+    window: &NativeWindow,
+    device: &D3D11Device,
     _content: &ContentColorInfo,
     _capabilities: &HdrPresentationCapabilities,
 ) -> Result<SwapChainPresenter, Box<dyn std::error::Error>> {
-    Err(HdrError::ToneMappingNotImplemented.into())
+    SwapChainPresenter::new(window, device)
 }
 
 pub struct SwapChainPresenter {

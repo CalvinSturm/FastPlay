@@ -26,10 +26,12 @@ use crate::{
     },
     playback::generations::{OpenGeneration, OperationId, SeekGeneration},
     render::hdr::{
-        classify_color_tags, select_video_presentation_path, ContentColorInfo, ContentColorMode,
-        ContentLightMetadata, HdrError, MasteringDisplayMetadata, VideoPresentationPath,
+        classify_color_tags, select_video_presentation_path, tone_map_stream_color_space,
+        ContentColorInfo, ContentColorMode, ContentLightMetadata, HdrError,
+        MasteringDisplayMetadata, VideoPresentationPath,
     },
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_TYPE;
 
 include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
 
@@ -181,6 +183,20 @@ pub(crate) enum StreamStatus {
     Cancelled,
 }
 
+/// Outcome of [`DecodeSession::open`]. The video worker acts on each variant:
+/// run the decode loop, exit quietly, or hand the file to the audio-only path.
+pub(crate) enum VideoOpen {
+    /// A video decode session is ready.
+    Ready(DecodeSession),
+    /// Cancellation was signalled during the (expensive) open, so no decode
+    /// work should begin.
+    Cancelled,
+    /// The file has no video stream (audio-only media). Any duration has
+    /// already been reported through the `on_duration` callback; the worker
+    /// signals the coordinator and exits, leaving the audio worker to play it.
+    NoVideoStream,
+}
+
 /// One open media file with its video (and optional audio) decoders, ready to
 /// decode. The persistent decode worker opens a session once and seeks within
 /// it (`seek` + `run_to_eof`) instead of reopening the file per operation.
@@ -211,9 +227,11 @@ impl DecodeSession {
     }
 
     /// Open the file, find streams, and allocate the video/audio decoders.
-    /// Returns `Ok(None)` if cancellation was signalled during the (expensive)
-    /// open so no decode work begins. Reports the selected decode mode and the
-    /// media duration through the callbacks, then applies `start_position`.
+    /// Returns [`VideoOpen::Cancelled`] if cancellation was signalled during
+    /// the (expensive) open so no decode work begins, or
+    /// [`VideoOpen::NoVideoStream`] for audio-only media (the file opens fine
+    /// but has no video track). Reports the selected decode mode and the media
+    /// duration through the callbacks, then applies `start_position`.
     pub(crate) unsafe fn open(
         source: &MediaSource,
         device: &D3D11Device,
@@ -225,7 +243,7 @@ impl DecodeSession {
         should_cancel: &impl Fn() -> bool,
         on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
         on_duration: &mut impl FnMut(Duration) -> Result<(), String>,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<VideoOpen, String> {
         let source_path = source
             .path()
             .to_str()
@@ -270,28 +288,44 @@ impl DecodeSession {
         )?;
         interrupt.set_deadline(None);
 
+        // Audio-only media (mp3, flac, m4a, …) opens fine but has no video
+        // stream. Detect that here and report it as a distinct outcome instead
+        // of failing: the video worker exits and the independent audio worker
+        // plays the file. Report duration first (from this format context, the
+        // one the timeline needs) since the video worker is about to bow out.
+        if !has_video_stream(input.0) {
+            let total_duration = frame_pts(
+                fastplay_ffmpeg_duration_micros(input.0),
+                AVRational {
+                    num: 1,
+                    den: 1_000_000,
+                },
+            );
+            if !total_duration.is_zero() {
+                on_duration(total_duration)?;
+            }
+            return Ok(VideoOpen::NoVideoStream);
+        }
+
         // Check cancellation before allocating a hardware decoder on the GPU.
         // Without this, rapid seeks pile up concurrent decoder sessions from
         // threads that haven't reached the main decode loop yet, exhausting
         // the GPU's session limit (typically 8-16) and causing device loss.
         if should_cancel() {
-            return Ok(None);
+            return Ok(VideoOpen::Cancelled);
         }
 
-        let video = open_video_decoder(input.0, device, decode_preference)?;
+        let mut video = open_video_decoder(input.0, device, decode_preference)?;
         // Re-check after decoder creation so a cancel that arrived during
         // open_video_decoder drops the session immediately.
         if should_cancel() {
-            return Ok(None);
+            return Ok(VideoOpen::Cancelled);
         }
 
-        // Presentation-path fork (HDR skeleton). Decided from stream-level
-        // tags only, before any frame is decoded; everything below this
-        // block — the decode loop, first-frame handling, swapchain, and
-        // processor configuration — is the pre-existing verified SDR flow,
-        // untouched. Every HDR outcome is a typed error surfaced through
-        // the existing OpenFailed flow until the HDR pipeline is verified
-        // end to end.
+        // Presentation-path fork. Decided from stream-level tags only, before
+        // any frame is decoded. SDR and HDR-to-SDR-tone-map are the presentable
+        // outcomes; passthrough and unsupported combinations remain typed
+        // errors surfaced through the existing OpenFailed flow.
         //
         // SDR short-circuits before any capability probing: an SDR open
         // performs zero new COM work here, so a capability-query failure on
@@ -315,7 +349,31 @@ impl DecodeSession {
                     return Err(HdrError::HdrColorSpaceUnverified.to_string());
                 }
                 VideoPresentationPath::HdrToSdrToneMapRequired => {
-                    return Err(HdrError::ToneMappingNotImplemented.to_string());
+                    // Present HDR (PQ or HLG) through the verified SDR
+                    // swapchain: resolve the decoded stream's DXGI input color
+                    // space and stamp every surface with it, so the render
+                    // path drives the video processor's HDR→SDR tone-mapping
+                    // (ID3D11VideoContext1 + sRGB output). Resolution can still
+                    // reject non-standard signals (full-range PQ, CL matrices)
+                    // as typed errors — better a clean open failure than a
+                    // mis-tone-mapped frame.
+                    let input_color_space =
+                        tone_map_stream_color_space(&video.content_color).map_err(|e| e.to_string())?;
+                    // Gate on the GPU's real capability *now*, at open, so an
+                    // unsupported HDR combination fails the open cleanly. Not
+                    // every video processor can convert HDR straight to 8-bit
+                    // SDR in one pass (some only reach a PQ or float target);
+                    // deferring this to the first blt would surface as a
+                    // present error that device recovery misreads as
+                    // device-lost and retries forever.
+                    let (probe_w, probe_h) = video_coded_dimensions(input.0, video.stream_index);
+                    let supported = device
+                        .supports_hdr_tone_map(probe_w, probe_h, input_color_space)
+                        .map_err(|e| e.to_string())?;
+                    if !supported {
+                        return Err(HdrError::HdrFormatConversionUnsupported.to_string());
+                    }
+                    video.tone_map_input = Some(input_color_space);
                 }
                 VideoPresentationPath::UnsupportedHdr => {
                     return Err(HdrError::UnsupportedHdrPresentation.to_string());
@@ -376,7 +434,7 @@ impl DecodeSession {
         }
         let frame = Frame(frame);
 
-        Ok(Some(Self {
+        Ok(VideoOpen::Ready(Self {
             input,
             video,
             audio,
@@ -464,6 +522,11 @@ impl DecodeSession {
                                 send_result
                             );
                             sw_decoder.hw_fallback_count = self.video.hw_fallback_count + 1;
+                            // Preserve the HDR tone-map decision across the
+                            // decoder swap: the stream's color space is
+                            // unchanged by falling back to software, so its
+                            // surfaces must still be tagged for HDR→SDR.
+                            sw_decoder.tone_map_input = self.video.tone_map_input;
                             self.video = sw_decoder;
                             hw_mid_fallback_done = true;
                             self.summary.decode_mode = self.video.mode;
@@ -817,6 +880,12 @@ struct VideoDecoder {
     /// at decoder open. Drives the presentation-path decision before any
     /// frame is decoded.
     content_color: ContentColorInfo,
+    /// When `Some`, this stream is HDR and presents through the SDR swapchain
+    /// via the video processor's HDR→SDR tone-mapping: the value is the
+    /// decoded DXGI input color space (PQ or HLG), stamped on every produced
+    /// surface. `None` is the ordinary SDR path. Set once at open by the
+    /// presentation-path fork; see `DecodeSession::open`.
+    tone_map_input: Option<DXGI_COLOR_SPACE_TYPE>,
 }
 
 enum VideoDecoderOutput {
@@ -985,6 +1054,7 @@ unsafe fn open_hardware_video_decoder(
         hw_fallback_count: 0,
         rotation_quarter_turns,
         content_color,
+        tone_map_input: None,
     })
 }
 
@@ -1042,6 +1112,7 @@ unsafe fn open_software_video_decoder(
         hw_fallback_count: 0,
         rotation_quarter_turns,
         content_color,
+        tone_map_input: None,
     })
 }
 
@@ -1109,6 +1180,50 @@ unsafe fn open_audio_decoder(
         resampler,
         output_format,
     }))
+}
+
+/// Whether the open format context exposes any decodable video stream.
+/// Uses the same `av_find_best_stream` probe the decoders use, so a file it
+/// reports as video-less is exactly one `open_video_decoder` would reject with
+/// "Stream not found" — letting the caller route audio-only media to the
+/// audio-only path instead of failing the open.
+///
+/// SAFETY: `format_context` must be a live `AVFormatContext` after
+/// `avformat_find_stream_info`; the call is read-only.
+unsafe fn has_video_stream(format_context: *mut AVFormatContext) -> bool {
+    let index = av_find_best_stream(
+        format_context,
+        AVMediaType_AVMEDIA_TYPE_VIDEO,
+        -1,
+        -1,
+        null_mut(),
+        0,
+    );
+    index >= 0
+}
+
+/// The selected video stream's coded pixel dimensions, read from its
+/// `AVCodecParameters`. Used only to size the open-time HDR tone-map
+/// capability enumerator; a `(0, 0)` fallback is clamped to `1x1` by the
+/// capability check and does not affect the boolean support result.
+///
+/// SAFETY: `format_context` must be a live `AVFormatContext` and
+/// `stream_index` one of its streams; `codecpar` is read-only here.
+unsafe fn video_coded_dimensions(
+    format_context: *mut AVFormatContext,
+    stream_index: usize,
+) -> (u32, u32) {
+    let Ok(stream) = selected_stream(format_context, stream_index) else {
+        return (0, 0);
+    };
+    let codecpar = fastplay_ffmpeg_stream_codecpar(stream);
+    if codecpar.is_null() {
+        return (0, 0);
+    }
+    (
+        (*codecpar).width.max(0) as u32,
+        (*codecpar).height.max(0) as u32,
+    )
 }
 
 /// Stream-level color classification from `AVCodecParameters` only.
@@ -1287,6 +1402,9 @@ where
             return Ok(());
         }
 
+        // Copied out before the `&mut video.output` borrow so both arms can
+        // stamp surfaces with it without a disjoint-field borrow dance.
+        let tone_map_input = video.tone_map_input;
         let result = match &mut video.output {
             VideoDecoderOutput::Hardware => {
                 let pixel_format = (*frame).format as AVPixelFormat;
@@ -1319,6 +1437,7 @@ where
                         sar_num,
                         sar_den,
                         frame_surface_color(frame),
+                        tone_map_input,
                     )
                     .map_err(|error| error.to_string())?;
 
@@ -1335,7 +1454,7 @@ where
                 }
             }
             VideoDecoderOutput::Software(converter) => {
-                let surface = converter.convert(frame, device)?;
+                let surface = converter.convert(frame, device, tone_map_input)?;
                 let sar = (*frame).sample_aspect_ratio;
                 let sar_num = if sar.num > 0 && sar.den > 0 {
                     sar.num as u32
@@ -1383,6 +1502,7 @@ impl SoftwareVideoConverter {
         &mut self,
         frame: *mut AVFrame,
         device: &D3D11Device,
+        tone_map_input: Option<DXGI_COLOR_SPACE_TYPE>,
     ) -> Result<VideoSurface, String> {
         let width = (*frame).width;
         let height = (*frame).height;
@@ -1450,6 +1570,7 @@ impl SoftwareVideoConverter {
                 sar_num,
                 sar_den,
                 frame_surface_color(frame),
+                tone_map_input,
             )
             .map_err(|e| e.to_string())
     }

@@ -103,6 +103,7 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 - software video decode fallback with D3D11 upload and present
 - WASAPI shared-mode audio playback
 - audio-master playback timing when audio exists
+- audio-only file playback (e.g. `.mp3`, `.flac`, `.wav`, `.m4a`, `.opus`) with the idle background shown while audio plays
 - generation-safe seek and reopen behavior
 - device-loss and resize recovery paths
 
@@ -146,7 +147,7 @@ FastPlay does **not** currently aim to provide:
 * plugin support
 * browser or web UI
 * advanced subtitle styling or embedded subtitle track selection
-* HDR or tone mapping
+* full HDR tone mapping (only single-pass GPU tone-map on capable hardware; see Known limitations)
 * extra hardware backends beyond the current D3D11-first design
 
 Lightweight queue/folder playback is implemented (see Features); full playlists, persistent playlist files, and media-library behavior remain non-goals.
@@ -161,7 +162,7 @@ These are current real-world caveats, separate from the deliberate non-goals abo
 * **Queue is in-memory and session-only.** Dropping multiple files or a folder builds a play queue you can step through (`PageUp` / `PageDown`) with auto-advance at end of file, but the queue is not saved between runs, there are no persistent playlist files, folder scanning is non-recursive, and there is no shuffle, repeat, or in-window queue list.
 * **No streaming or network sources.** Local files only.
 * **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
-* **HDR is not tone-mapped.** HDR content plays but is not color-managed.
+* **HDR playback is hardware-dependent.** HDR-tagged video (HDR10 PQ and HLG, e.g. iPhone recordings) is presented only through a single-pass GPU video-processor tone-map to SDR, which requires a display/GPU that advertises direct HDR→8-bit-SDR conversion. Where that is unavailable the file is declined at open with a clear message rather than shown with wrong colors; multi-stage tone mapping is not yet implemented. SDR video and audio-only files are unaffected.
 * **Early release.** Behavior, shortcuts, and metrics are still changing between versions.
 
 ## Requirements

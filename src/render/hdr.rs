@@ -20,9 +20,11 @@ use std::{error::Error, fmt};
 
 use windows::Win32::Graphics::Dxgi::{
     Common::{
-        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, DXGI_COLOR_SPACE_TYPE,
-        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
-        DXGI_FORMAT_R10G10B10A2_UNORM,
+        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+        DXGI_COLOR_SPACE_TYPE, DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020, DXGI_FORMAT,
+        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM,
     },
     DXGI_HDR_METADATA_HDR10,
 };
@@ -73,8 +75,13 @@ pub(crate) enum VideoPresentationPath {
     /// mapping. Requires every capability bit checked in
     /// [`select_video_presentation_path`].
     Hdr10Passthrough,
-    /// HDR10 content on an SDR display: needs the (unimplemented)
-    /// HDR-to-SDR tone mapper.
+    /// HDR content presented through the existing SDR swapchain via the
+    /// GPU video processor's HDR-to-SDR conversion: the blt tags the
+    /// stream with its HDR color space ([`tone_map_stream_color_space`])
+    /// and the output as SDR sRGB ([`tone_map_output_color_space`]), and
+    /// the driver tone-maps. Selected for HDR10 on an SDR display (and,
+    /// until passthrough is implemented, whenever passthrough is not
+    /// available) and for HLG.
     HdrToSdrToneMapRequired,
     /// Any HDR-signalled combination we cannot present correctly.
     UnsupportedHdr,
@@ -195,7 +202,6 @@ pub(crate) enum HdrError {
     HdrFormatConversionUnsupported,
     HdrColorSpaceUnverified,
     HdrMetadataConversionUnverified,
-    ToneMappingNotImplemented,
     SwapChain4Unavailable,
 }
 
@@ -223,10 +229,6 @@ impl fmt::Display for HdrError {
             }
             Self::HdrMetadataConversionUnverified => {
                 "HDR playback is not available yet: HDR metadata conversion is unverified"
-            }
-            Self::ToneMappingNotImplemented => {
-                "this video is HDR but the display is in SDR mode; HDR-to-SDR tone mapping is \
-                 not implemented yet"
             }
             Self::SwapChain4Unavailable => {
                 "HDR metadata requires IDXGISwapChain4, which this system does not expose"
@@ -331,21 +333,22 @@ pub(crate) fn select_video_presentation_path(
                 && capabilities.hdr10_format_conversion_supported
             {
                 VideoPresentationPath::Hdr10Passthrough
-            } else if !capabilities.display_hdr_active {
-                // HDR10 content, SDR display: only an explicit HDR-to-SDR
-                // conversion may present this. It must never fall through
-                // to the existing SDR path.
-                VideoPresentationPath::HdrToSdrToneMapRequired
             } else {
-                // HDR display, but some required processor/swapchain
-                // capability is missing.
-                VideoPresentationPath::UnsupportedHdr
+                // SDR display, or an HDR display missing some required
+                // passthrough capability: only an explicit HDR-to-SDR
+                // conversion may present this. It must never fall through
+                // to the existing SDR path. (The tone-map path performs its
+                // own structural checks — ID3D11VideoContext1 at open,
+                // CheckVideoProcessorFormatConversion at the blt — and
+                // dead-ends as a typed error when they fail.)
+                VideoPresentationPath::HdrToSdrToneMapRequired
             }
         }
         // HLG is never auto-classified as HDR10 passthrough and never
-        // reaches the SDR path. HDR-VERIFY: a dedicated HLG path (native or
-        // via processor conversion) is future work.
-        ContentColorMode::Hlg => VideoPresentationPath::UnsupportedHdr,
+        // reaches the plain SDR path; it presents through the explicit
+        // HDR-to-SDR conversion (GHLG stream color space). A native HLG
+        // passthrough path is future work.
+        ContentColorMode::Hlg => VideoPresentationPath::HdrToSdrToneMapRequired,
         // HDR-signalled but ambiguous content dead-ends explicitly.
         ContentColorMode::Unknown => VideoPresentationPath::UnsupportedHdr,
     }
@@ -425,6 +428,54 @@ pub(crate) fn verified_hdr_stream_color_space(
 pub(crate) fn verified_hdr10_processor_output_color_space(
 ) -> Result<DXGI_COLOR_SPACE_TYPE, HdrError> {
     verified_hdr10_swapchain_color_space()
+}
+
+/// The YCbCr input color space the tone-map blt tags the decoded HDR
+/// stream with, so the GPU video processor knows what it is converting
+/// *from*:
+///
+/// - HDR10 PQ reuses [`verified_hdr_stream_color_space`]
+///   (`YCBCR_STUDIO_G2084_LEFT_P2020`, resolved + pixel-validated), with
+///   the same typed errors for full-range / constant-luminance /
+///   non-BT.2020 signals.
+/// - HLG (BT.2100: BT.2020 NCL matrix, or unspecified which BT.2100
+///   defines as BT.2020 NCL) maps to the only GHLG variants the DXGI enum
+///   offers: `YCBCR_STUDIO_GHLG_TOPLEFT_P2020` for studio/unspecified
+///   range and `YCBCR_FULL_GHLG_TOPLEFT_P2020` for full range. Validated
+///   structurally per-device via `CheckVideoProcessorFormatConversion` at
+///   the blt (there is no chroma-siting choice to get wrong: TOPLEFT is
+///   the only siting DXGI defines for GHLG).
+/// - Anything else stays a typed error rather than a guess.
+pub(crate) fn tone_map_stream_color_space(
+    content: &ContentColorInfo,
+) -> Result<DXGI_COLOR_SPACE_TYPE, HdrError> {
+    match content.mode {
+        ContentColorMode::Hdr10Pq => verified_hdr_stream_color_space(content),
+        ContentColorMode::Hlg => {
+            if content.color_space != AVColorSpace_AVCOL_SPC_BT2020_NCL
+                && content.color_space != AVColorSpace_AVCOL_SPC_UNSPECIFIED
+            {
+                return Err(HdrError::HdrColorSpaceUnverified);
+            }
+            if content.color_range == AVColorRange_AVCOL_RANGE_JPEG {
+                Ok(DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020)
+            } else {
+                Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020)
+            }
+        }
+        ContentColorMode::Sdr | ContentColorMode::Unknown => {
+            Err(HdrError::HdrColorSpaceUnverified)
+        }
+    }
+}
+
+/// The video processor output color space for the tone-map path: full-range
+/// sRGB (G22, BT.709) — exactly what the existing 8-bit B8G8R8A8 SDR
+/// swapchain scans out, so tone-mapped output presents through the verified
+/// SDR swapchain unchanged. Must stay in lockstep with the SDR backbuffer
+/// format (see `swapchain_format_for_path`).
+pub(crate) fn tone_map_output_color_space() -> DXGI_COLOR_SPACE_TYPE {
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
 }
 
 /// Conversion boundary between FFmpeg-sourced metadata and DXGI.
@@ -548,10 +599,37 @@ mod tests {
     }
 
     #[test]
-    fn hlg_never_selects_passthrough_or_existing_sdr() {
+    fn pq_without_passthrough_capabilities_selects_tone_map_never_sdr() {
+        // Missing passthrough capability (SDR display, no context1, no
+        // format conversion) routes PQ to the explicit tone-map path —
+        // never the plain SDR path, never a dead end.
+        for caps in [
+            HdrPresentationCapabilities::default(),
+            HdrPresentationCapabilities {
+                display_hdr_active: false,
+                ..full_capabilities()
+            },
+            HdrPresentationCapabilities {
+                video_context1_available: false,
+                ..full_capabilities()
+            },
+            HdrPresentationCapabilities {
+                hdr10_format_conversion_supported: false,
+                ..full_capabilities()
+            },
+        ] {
+            assert_eq!(
+                select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps),
+                VideoPresentationPath::HdrToSdrToneMapRequired
+            );
+        }
+    }
+
+    #[test]
+    fn hlg_selects_tone_map_never_passthrough_or_existing_sdr() {
         for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
             let path = select_video_presentation_path(&info(ContentColorMode::Hlg), &caps);
-            assert_eq!(path, VideoPresentationPath::UnsupportedHdr);
+            assert_eq!(path, VideoPresentationPath::HdrToSdrToneMapRequired);
         }
     }
 
@@ -690,10 +768,10 @@ mod tests {
     }
 
     #[test]
-    fn classified_hlg_dead_ends_as_unsupported_never_sdr_or_passthrough() {
-        // End to end: standard BT.2100 HLG classifies as Hlg and dead-ends
-        // as UnsupportedHdr under any capabilities — never HDR10
-        // passthrough, never the ordinary SDR path.
+    fn classified_hlg_routes_to_tone_map_never_sdr_or_passthrough() {
+        // End to end: standard BT.2100 HLG classifies as Hlg and routes to
+        // the explicit HDR-to-SDR conversion under any capabilities — never
+        // HDR10 passthrough, never the ordinary SDR path.
         let mode = classify_color_tags(
             AVColorPrimaries_AVCOL_PRI_BT2020,
             AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
@@ -705,7 +783,7 @@ mod tests {
         for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
             assert_eq!(
                 select_video_presentation_path(&content, &caps),
-                VideoPresentationPath::UnsupportedHdr
+                VideoPresentationPath::HdrToSdrToneMapRequired
             );
         }
     }
@@ -894,6 +972,98 @@ mod tests {
         ] {
             assert_eq!(
                 verified_hdr_stream_color_space(&info(mode)),
+                Err(HdrError::HdrColorSpaceUnverified)
+            );
+        }
+    }
+
+    #[test]
+    fn tone_map_output_is_full_range_srgb() {
+        // Tone-mapped output must match what the verified 8-bit SDR
+        // swapchain scans out (full-range G22 BT.709), so it presents
+        // through the unchanged SDR swapchain.
+        assert_eq!(
+            tone_map_output_color_space(),
+            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+        );
+    }
+
+    #[test]
+    fn tone_map_pq_stream_space_matches_verified_hdr10() {
+        // PQ reuses the resolved, pixel-validated HDR10 stream color space.
+        let content = hdr10_info(
+            AVColorSpace_AVCOL_SPC_BT2020_NCL,
+            crate::ffi::ffmpeg::AVColorRange_AVCOL_RANGE_MPEG,
+        );
+        assert_eq!(
+            tone_map_stream_color_space(&content),
+            Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020)
+        );
+    }
+
+    fn hlg_info(color_space: AVColorSpace, color_range: AVColorRange) -> ContentColorInfo {
+        ContentColorInfo {
+            mode: ContentColorMode::Hlg,
+            color_primaries: AVColorPrimaries_AVCOL_PRI_BT2020,
+            color_transfer: AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
+            color_space,
+            color_range,
+            mastering_display: None,
+            content_light: None,
+        }
+    }
+
+    #[test]
+    fn tone_map_hlg_stream_space_is_ghlg_topleft() {
+        use crate::ffi::ffmpeg::{AVColorRange_AVCOL_RANGE_MPEG, AVColorRange_AVCOL_RANGE_UNSPECIFIED};
+        // Studio / unspecified range HLG (BT.2020 NCL, or unspecified which
+        // BT.2100 defines as BT.2020 NCL) maps to studio GHLG.
+        for color_space in [
+            AVColorSpace_AVCOL_SPC_BT2020_NCL,
+            AVColorSpace_AVCOL_SPC_UNSPECIFIED,
+        ] {
+            for color_range in [
+                AVColorRange_AVCOL_RANGE_MPEG,
+                AVColorRange_AVCOL_RANGE_UNSPECIFIED,
+            ] {
+                assert_eq!(
+                    tone_map_stream_color_space(&hlg_info(color_space, color_range)),
+                    Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020)
+                );
+            }
+        }
+        // Full-range HLG maps to the full GHLG variant.
+        assert_eq!(
+            tone_map_stream_color_space(&hlg_info(
+                AVColorSpace_AVCOL_SPC_BT2020_NCL,
+                AVColorRange_AVCOL_RANGE_JPEG,
+            )),
+            Ok(DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020)
+        );
+    }
+
+    #[test]
+    fn tone_map_non_standard_hlg_matrix_is_typed_error() {
+        use crate::ffi::ffmpeg::{
+            AVColorRange_AVCOL_RANGE_MPEG, AVColorSpace_AVCOL_SPC_BT2020_CL,
+            AVColorSpace_AVCOL_SPC_BT709,
+        };
+        for color_space in [
+            AVColorSpace_AVCOL_SPC_BT2020_CL,
+            AVColorSpace_AVCOL_SPC_BT709,
+        ] {
+            assert_eq!(
+                tone_map_stream_color_space(&hlg_info(color_space, AVColorRange_AVCOL_RANGE_MPEG)),
+                Err(HdrError::HdrColorSpaceUnverified)
+            );
+        }
+    }
+
+    #[test]
+    fn tone_map_sdr_and_unknown_are_typed_errors() {
+        for mode in [ContentColorMode::Sdr, ContentColorMode::Unknown] {
+            assert_eq!(
+                tone_map_stream_color_space(&info(mode)),
                 Err(HdrError::HdrColorSpaceUnverified)
             );
         }
