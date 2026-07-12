@@ -5,11 +5,12 @@
 //! decision function that selects a [`VideoPresentationPath`] before any
 //! renderer or swapchain work happens for a newly opened file.
 //!
-//! Nothing here resolves a DXGI color-space constant, an HDR metadata unit
-//! conversion, or an FFmpeg side-data layout. Every such value is fenced
-//! behind a `verified_*` helper that returns a typed error until it is
-//! verified in its own later commit. Search for `HDR-VERIFY` to find all of
-//! them.
+//! Every value that could be guessed is fenced behind a `verified_*`
+//! helper: the HDR10 color spaces are resolved against the installed
+//! windows 0.58 bindings and validated structurally + by pixel
+//! (`bench/verify-colors-pq.ps1`); everything still unresolved (metadata
+//! conversion, side-data layouts, HLG, display-active policy) remains a
+//! typed error. Search for `HDR-VERIFY` to find the open items.
 //!
 //! The verified SDR path never enters this module beyond
 //! [`select_video_presentation_path`] returning
@@ -19,15 +20,18 @@ use std::{error::Error, fmt};
 
 use windows::Win32::Graphics::Dxgi::{
     Common::{
-        DXGI_COLOR_SPACE_TYPE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, DXGI_COLOR_SPACE_TYPE,
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
         DXGI_FORMAT_R10G10B10A2_UNORM,
     },
     DXGI_HDR_METADATA_HDR10,
 };
 
 use crate::ffi::ffmpeg::{
-    AVColorPrimaries, AVColorPrimaries_AVCOL_PRI_BT2020, AVColorRange, AVColorSpace,
-    AVColorTransferCharacteristic, AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
+    AVColorPrimaries, AVColorPrimaries_AVCOL_PRI_BT2020, AVColorRange,
+    AVColorRange_AVCOL_RANGE_JPEG, AVColorSpace, AVColorSpace_AVCOL_SPC_BT2020_NCL,
+    AVColorSpace_AVCOL_SPC_UNSPECIFIED, AVColorTransferCharacteristic,
+    AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
     AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
     AVColorTransferCharacteristic_AVCOL_TRC_UNSPECIFIED,
 };
@@ -154,14 +158,15 @@ pub(crate) struct HdrPresentationCapabilities {
     /// panel with HDR toggled off must leave this false.
     /// HDR-VERIFY: activity detection policy is unresolved.
     pub(crate) display_hdr_active: bool,
-    /// `IDXGISwapChain3::CheckColorSpaceSupport` accepted the HDR10 color
-    /// space. HDR-VERIFY: requires the verified swapchain color-space value.
+    /// `IDXGISwapChain3::CheckColorSpaceSupport` accepted the verified HDR10
+    /// swapchain color space.
     pub(crate) swapchain_hdr10_color_space_supported: bool,
     /// `ID3D11VideoContext1` is available on the device.
     pub(crate) video_context1_available: bool,
-    /// `CheckVideoProcessorFormatConversion` accepted NV12/P010 HDR10 input
-    /// to the HDR output format. HDR-VERIFY: requires verified color-space
-    /// values and runs against a real processor enumerator.
+    /// `CheckVideoProcessorFormatConversion` accepted NV12 HDR10 input to
+    /// the HDR output format with the verified color spaces.
+    /// HDR-VERIFY: the open-time probe still needs wiring to a live
+    /// processor enumerator (passthrough commit); P010 input is unprobed.
     pub(crate) hdr10_format_conversion_supported: bool,
     /// Same, for HLG input. HDR-VERIFY: unresolved.
     pub(crate) hlg_format_conversion_supported: bool,
@@ -320,26 +325,60 @@ pub(crate) fn swapchain_format_for_path(path: VideoPresentationPath) -> DXGI_FOR
 // guessed constant or a numeric discriminant.
 // ---------------------------------------------------------------------------
 
-/// HDR-VERIFY: exact windows-rs `DXGI_COLOR_SPACE_TYPE` variant for the
-/// HDR10 swapchain (RGB, full range, PQ / G2084, BT.2020 primaries).
+/// The HDR10 swapchain color space: RGB, full range, PQ (G2084), BT.2020
+/// primaries.
+///
+/// Verified against the installed windows 0.58 bindings
+/// (`DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` = 12), structurally via
+/// `CheckColorSpaceSupport` on the live HDR display, and by pixel via
+/// `bench/verify-colors-pq.ps1` (backbuffer readback vs ffmpeg's PQ
+/// reference decode, with a wrong-matrix negative control).
 pub(crate) fn verified_hdr10_swapchain_color_space() -> Result<DXGI_COLOR_SPACE_TYPE, HdrError> {
-    Err(HdrError::HdrColorSpaceUnverified)
+    Ok(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
 }
 
-/// HDR-VERIFY: exact YCbCr input color-space variant derived from the
-/// decoded texture format (NV12/P010), nominal range, BT.2020 matrix
-/// variant, and PQ vs HLG transfer. Must not be guessed from `content`.
+/// The YCbCr input color space for decoded HDR10 frames.
+///
+/// Resolved only for the standard HDR10 signal — PQ transfer, BT.2020
+/// non-constant-luminance matrix (or unspecified, which BT.2100 defines as
+/// BT.2020 NCL for PQ), studio/limited range — to
+/// `DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020` (13). Everything else
+/// stays a typed error rather than a guess:
+/// - Full-range PQ YCbCr has NO variant in the installed bindings'
+///   `DXGI_COLOR_SPACE_TYPE` enum, so it is inexpressible on this path.
+/// - Constant-luminance BT.2020 and non-BT.2020 matrices are unverified.
+/// - HLG resolves in its own commit.
+///
+/// HDR-VERIFY: chroma siting. `..._LEFT_P2020` matches H.264's default
+/// 4:2:0 siting; `..._TOPLEFT_P2020` (16) exists for HEVC UHD content that
+/// signals top-left. `ContentColorInfo` does not carry chroma_location yet,
+/// and the bar-interior pixel oracle cannot distinguish siting (it only
+/// shifts chroma upsampling by half a pixel at edges). Revisit when HEVC
+/// HDR content is wired.
 pub(crate) fn verified_hdr_stream_color_space(
-    _content: &ContentColorInfo,
+    content: &ContentColorInfo,
 ) -> Result<DXGI_COLOR_SPACE_TYPE, HdrError> {
-    Err(HdrError::HdrColorSpaceUnverified)
+    if content.mode != ContentColorMode::Hdr10Pq {
+        return Err(HdrError::HdrColorSpaceUnverified);
+    }
+    if content.color_range == AVColorRange_AVCOL_RANGE_JPEG {
+        return Err(HdrError::UnsupportedHdrPresentation);
+    }
+    if content.color_space != AVColorSpace_AVCOL_SPC_BT2020_NCL
+        && content.color_space != AVColorSpace_AVCOL_SPC_UNSPECIFIED
+    {
+        return Err(HdrError::HdrColorSpaceUnverified);
+    }
+    Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020)
 }
 
-/// HDR-VERIFY: exact RGB PQ BT.2020 output variant for
-/// `VideoProcessorSetOutputColorSpace1`.
+/// The video processor output color space for HDR10 passthrough: identical
+/// to the swapchain space (the processor writes PQ-encoded RGB directly
+/// into the R10G10B10A2 backbuffer; no transfer conversion happens between
+/// blt and scanout).
 pub(crate) fn verified_hdr10_processor_output_color_space(
 ) -> Result<DXGI_COLOR_SPACE_TYPE, HdrError> {
-    Err(HdrError::HdrColorSpaceUnverified)
+    verified_hdr10_swapchain_color_space()
 }
 
 /// Conversion boundary between FFmpeg-sourced metadata and DXGI.
@@ -548,19 +587,93 @@ mod tests {
     }
 
     #[test]
-    fn verification_boundaries_are_typed_errors_not_panics() {
+    fn hdr10_swapchain_and_processor_output_are_rgb_full_pq_bt2020() {
         assert_eq!(
             verified_hdr10_swapchain_color_space(),
-            Err(HdrError::HdrColorSpaceUnverified)
+            Ok(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
         );
-        assert_eq!(
-            verified_hdr_stream_color_space(&info(ContentColorMode::Hdr10Pq)),
-            Err(HdrError::HdrColorSpaceUnverified)
-        );
+        // Passthrough writes PQ RGB straight into the backbuffer, so the
+        // processor output space must equal the swapchain space.
         assert_eq!(
             verified_hdr10_processor_output_color_space(),
-            Err(HdrError::HdrColorSpaceUnverified)
+            verified_hdr10_swapchain_color_space()
         );
+    }
+
+    fn hdr10_info(color_space: AVColorSpace, color_range: AVColorRange) -> ContentColorInfo {
+        ContentColorInfo {
+            mode: ContentColorMode::Hdr10Pq,
+            color_primaries: AVColorPrimaries_AVCOL_PRI_BT2020,
+            color_transfer: AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
+            color_space,
+            color_range,
+            mastering_display: None,
+            content_light: None,
+        }
+    }
+
+    #[test]
+    fn standard_hdr10_stream_maps_to_studio_pq_left_bt2020() {
+        use crate::ffi::ffmpeg::AVColorRange_AVCOL_RANGE_MPEG;
+        for color_space in [
+            AVColorSpace_AVCOL_SPC_BT2020_NCL,
+            // BT.2100: unspecified matrix with PQ means BT.2020 NCL.
+            AVColorSpace_AVCOL_SPC_UNSPECIFIED,
+        ] {
+            for color_range in [
+                AVColorRange_AVCOL_RANGE_MPEG,
+                crate::ffi::ffmpeg::AVColorRange_AVCOL_RANGE_UNSPECIFIED,
+            ] {
+                assert_eq!(
+                    verified_hdr_stream_color_space(&hdr10_info(color_space, color_range)),
+                    Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_standard_hdr10_signals_stay_typed_errors() {
+        use crate::ffi::ffmpeg::{
+            AVColorRange_AVCOL_RANGE_MPEG, AVColorSpace_AVCOL_SPC_BT2020_CL,
+            AVColorSpace_AVCOL_SPC_BT709,
+        };
+        // Full-range PQ YCbCr has no DXGI_COLOR_SPACE_TYPE variant.
+        assert_eq!(
+            verified_hdr_stream_color_space(&hdr10_info(
+                AVColorSpace_AVCOL_SPC_BT2020_NCL,
+                AVColorRange_AVCOL_RANGE_JPEG,
+            )),
+            Err(HdrError::UnsupportedHdrPresentation)
+        );
+        // Constant-luminance and non-BT.2020 matrices are unverified.
+        for color_space in [
+            AVColorSpace_AVCOL_SPC_BT2020_CL,
+            AVColorSpace_AVCOL_SPC_BT709,
+        ] {
+            assert_eq!(
+                verified_hdr_stream_color_space(&hdr10_info(
+                    color_space,
+                    AVColorRange_AVCOL_RANGE_MPEG,
+                )),
+                Err(HdrError::HdrColorSpaceUnverified)
+            );
+        }
+        // Non-PQ modes (HLG, Unknown, Sdr) do not resolve here.
+        for mode in [
+            ContentColorMode::Hlg,
+            ContentColorMode::Unknown,
+            ContentColorMode::Sdr,
+        ] {
+            assert_eq!(
+                verified_hdr_stream_color_space(&info(mode)),
+                Err(HdrError::HdrColorSpaceUnverified)
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_conversion_remains_a_typed_error() {
         assert!(matches!(
             build_dxgi_hdr10_metadata(None, None),
             Err(HdrError::HdrMetadataConversionUnverified)

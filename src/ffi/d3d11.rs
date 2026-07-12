@@ -43,8 +43,8 @@ use windows::{
             },
             Dxgi::Common::{
                 DXGI_COLOR_SPACE_TYPE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12,
-                DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL,
-                DXGI_SAMPLE_DESC,
+                DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R32G32B32_FLOAT,
+                DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
             },
             Gdi::{
                 CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
@@ -473,6 +473,192 @@ impl D3D11Device {
             )?
         };
         Ok(supported.as_bool())
+    }
+
+    /// Dev-only HDR10 validation blt (`bench/verify-colors-pq.ps1`): renders
+    /// one NV12 surface into an R10G10B10A2 backbuffer with the resolved
+    /// HDR10 color spaces set through `ID3D11VideoContext1`. This is the
+    /// prototype of the future passthrough render path; the verified SDR
+    /// `render_video_surface` above is untouched and shares no code with it.
+    ///
+    /// `stream_color_space_override` exists solely for the harness's
+    /// negative control (deliberately wrong input space must produce a
+    /// pixel FAIL). When it is set, the structural format-conversion check
+    /// is logged but not enforced, so the wrong value demonstrably reaches
+    /// the blt.
+    // Called only by the env-gated validation entry (render::hdr_validate).
+    #[allow(dead_code)]
+    pub(crate) fn hdr10_validation_blt(
+        &self,
+        surface: &VideoSurface,
+        backbuffer: &ID3D11Texture2D,
+        output_width: u32,
+        output_height: u32,
+        content: &crate::render::hdr::ContentColorInfo,
+        stream_color_space_override: Option<DXGI_COLOR_SPACE_TYPE>,
+    ) -> Result<(), Box<dyn Error>> {
+        let output_color_space = crate::render::hdr::verified_hdr10_processor_output_color_space()?;
+        let stream_color_space = match stream_color_space_override {
+            Some(wrong) => wrong,
+            None => crate::render::hdr::verified_hdr_stream_color_space(content)?,
+        };
+
+        let video_context1: ID3D11VideoContext1 = self
+            .video_context
+            .cast()
+            .map_err(|_| crate::render::hdr::HdrError::VideoContext1Unavailable)?;
+
+        // SAFETY: same contracts as render_video_surface — all objects are
+        // created from this device, the views reference live textures, and
+        // every ID3D11VideoContext call runs under context_lock.
+        unsafe {
+            let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                InputFrameRate: DXGI_RATIONAL {
+                    Numerator: 1,
+                    Denominator: 1,
+                },
+                InputWidth: surface.width.max(1),
+                InputHeight: surface.height.max(1),
+                OutputFrameRate: DXGI_RATIONAL {
+                    Numerator: 1,
+                    Denominator: 1,
+                },
+                OutputWidth: output_width.max(1),
+                OutputHeight: output_height.max(1),
+                Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+            };
+            let enumerator = self
+                .video_device
+                .CreateVideoProcessorEnumerator(&content_desc)?;
+
+            // Structural oracle: the driver accepts or rejects the exact
+            // (format, color space) conversion pair.
+            let conversion_supported = self.check_hdr_format_conversion(
+                &enumerator,
+                DXGI_FORMAT_NV12,
+                stream_color_space,
+                DXGI_FORMAT_R10G10B10A2_UNORM,
+                output_color_space,
+            )?;
+            flog!(
+                "[hdr-validate] CheckVideoProcessorFormatConversion NV12({:?}) -> \
+                 R10G10B10A2({:?}): {}",
+                stream_color_space,
+                output_color_space,
+                conversion_supported
+            );
+            if !conversion_supported && stream_color_space_override.is_none() {
+                return Err(crate::render::hdr::HdrError::HdrFormatConversionUnsupported.into());
+            }
+
+            let processor = self.video_device.CreateVideoProcessor(&enumerator, 0)?;
+
+            let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                },
+            };
+            let mut output_view = None;
+            self.video_device.CreateVideoProcessorOutputView(
+                backbuffer,
+                &enumerator,
+                &output_desc,
+                Some(&mut output_view),
+            )?;
+            let output_view = output_view.ok_or(D3D11Error(
+                "CreateVideoProcessorOutputView returned no HDR view",
+            ))?;
+
+            let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                FourCC: 0,
+                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPIV {
+                        MipSlice: 0,
+                        ArraySlice: surface.subresource_index,
+                    },
+                },
+            };
+            let mut input_view = None;
+            self.video_device.CreateVideoProcessorInputView(
+                &surface.texture,
+                &enumerator,
+                &input_desc,
+                Some(&mut input_view),
+            )?;
+            let input_view = input_view.ok_or(D3D11Error(
+                "CreateVideoProcessorInputView returned no HDR view",
+            ))?;
+
+            let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: BOOL(1),
+                OutputIndex: 0,
+                InputFrameOrField: 0,
+                PastFrames: 0,
+                FutureFrames: 0,
+                ppPastSurfaces: std::ptr::null_mut(),
+                pInputSurface: ManuallyDrop::new(Some(input_view)),
+                ppFutureSurfaces: std::ptr::null_mut(),
+                ppPastSurfacesRight: std::ptr::null_mut(),
+                pInputSurfaceRight: ManuallyDrop::new(None),
+                ppFutureSurfacesRight: std::ptr::null_mut(),
+            };
+
+            let full_target = RECT {
+                left: 0,
+                top: 0,
+                right: output_width as i32,
+                bottom: output_height as i32,
+            };
+            let mut streams = [stream];
+            let blt_result = {
+                let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
+                video_context1.VideoProcessorSetStreamColorSpace1(
+                    &processor,
+                    0,
+                    stream_color_space,
+                );
+                video_context1.VideoProcessorSetOutputColorSpace1(&processor, output_color_space);
+                self.video_context.VideoProcessorSetStreamOutputRate(
+                    &processor,
+                    0,
+                    D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
+                    BOOL(0),
+                    None,
+                );
+                // Full-frame stretch: the validation window is created at the
+                // video's exact size, so source and dest map 1:1.
+                self.video_context.VideoProcessorSetStreamSourceRect(
+                    &processor,
+                    0,
+                    BOOL(1),
+                    Some(&RECT {
+                        left: 0,
+                        top: 0,
+                        right: surface.width as i32,
+                        bottom: surface.height as i32,
+                    }),
+                );
+                self.video_context.VideoProcessorSetStreamDestRect(
+                    &processor,
+                    0,
+                    BOOL(1),
+                    Some(&full_target),
+                );
+                self.video_context.VideoProcessorSetOutputTargetRect(
+                    &processor,
+                    BOOL(1),
+                    Some(&full_target),
+                );
+                self.video_context
+                    .VideoProcessorBlt(&processor, &output_view, 0, &streams)
+            };
+            ManuallyDrop::drop(&mut streams[0].pInputSurface);
+            blt_result?;
+        }
+        Ok(())
     }
 
     pub(crate) unsafe fn surface_from_raw_texture(
