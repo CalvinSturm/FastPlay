@@ -14,13 +14,16 @@ use windows::{
     Win32::{
         Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
         Graphics::{
-            Direct3D11::ID3D11Texture2D,
+            Direct3D11::{ID3D11Texture2D, ID3D11VideoContext1},
             Dxgi::{
                 Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-                CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1,
-                DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
-                DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-                DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGIOutput, IDXGIOutput6,
+                IDXGISwapChain1, IDXGISwapChain3, IDXGISwapChain4, DXGI_CREATE_FACTORY_FLAGS,
+                DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_HDR_METADATA_HDR10,
+                DXGI_HDR_METADATA_TYPE_HDR10, DXGI_PRESENT, DXGI_SCALING_STRETCH,
+                DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT, DXGI_SWAP_CHAIN_DESC1,
+                DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
             Gdi::{
                 GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO,
@@ -65,6 +68,10 @@ use crate::{
         VideoProcessorCache, VideoSurface,
     },
     platform::input::InputEvent,
+    render::hdr::{
+        swapchain_format_for_path, verified_hdr10_swapchain_color_space, ContentColorInfo,
+        HdrDisplayDescriptor, HdrError, HdrPresentationCapabilities, VideoPresentationPath,
+    },
 };
 
 // SetCapture / ReleaseCapture / GetSystemMetrics / BringWindowToTop are not
@@ -704,6 +711,82 @@ impl DxgiSwapChain {
         })
     }
 
+    /// HDR10 swapchain skeleton for [`VideoPresentationPath::Hdr10Passthrough`].
+    ///
+    /// The verified SDR [`create`](Self::create) above is untouched; this is
+    /// a separate constructor selected only by the presentation-path fork.
+    /// The unverified HDR10 color space is resolved FIRST, so today this
+    /// returns a typed error before any COM object is created — no swapchain
+    /// is ever created and then abandoned, and nothing is recreated
+    /// mid-playback.
+    ///
+    /// Created once per HDR playback session, never by resizing or device
+    /// recovery of an SDR session.
+    // Wired by SwapChainPresenter::new_for_path; unreachable until the
+    // HDR-VERIFY color-space commit lands.
+    #[allow(dead_code)]
+    pub fn create_hdr10_skeleton(
+        window: &NativeWindowInner,
+        device: &D3D11Device,
+        _content: &ContentColorInfo,
+        _capabilities: &HdrPresentationCapabilities,
+    ) -> Result<Self, Box<dyn Error>> {
+        // HDR-VERIFY: typed error until the RGB full-range PQ BT.2020
+        // swapchain color-space variant is verified.
+        let hdr_color_space = verified_hdr10_swapchain_color_space()?;
+
+        let factory: IDXGIFactory2 = create_factory()?;
+        let dxgi_device: IDXGIDevice = device.raw_device().cast()?;
+
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: 0,
+            Height: 0,
+            Format: swapchain_format_for_path(VideoPresentationPath::Hdr10Passthrough),
+            Stereo: BOOL(0),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            Flags: 0,
+        };
+
+        // SAFETY: same contract as the SDR constructor — valid device and
+        // HWND for the swap chain's lifetime, one swap chain per HWND.
+        let swap_chain = unsafe {
+            factory.CreateSwapChainForHwnd(&dxgi_device, window.hwnd(), &desc, None, None)?
+        };
+
+        let swap_chain3: IDXGISwapChain3 = swap_chain
+            .cast()
+            .map_err(|_| HdrError::HdrSwapchainColorSpaceUnsupported)?;
+        // SAFETY: read-only support query, then a color-space commit, on the
+        // swap chain created above.
+        unsafe {
+            let support = swap_chain3.CheckColorSpaceSupport(hdr_color_space)?;
+            if support & (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32) == 0 {
+                return Err(HdrError::HdrSwapchainColorSpaceUnsupported.into());
+            }
+            swap_chain3.SetColorSpace1(hdr_color_space)?;
+        }
+
+        let (backbuffer, render_target) = create_backbuffer_state(device, &swap_chain)?;
+
+        Ok(Self {
+            swap_chain,
+            backbuffer: Some(backbuffer),
+            render_target: Some(render_target),
+            width: 0,
+            height: 0,
+            subtitle_renderer: None,
+            vp_cache: None,
+        })
+    }
+
     pub fn render(
         &mut self,
         device: &D3D11Device,
@@ -1034,6 +1117,120 @@ fn current_backbuffer_size(backbuffer: &ID3D11Texture2D) -> Result<(u32, u32), B
     }
 
     Ok((desc.Width, desc.Height))
+}
+
+/// Query the display, swapchain, and device capabilities that gate HDR
+/// presentation. Pure data out; the decision itself lives in
+/// [`select_video_presentation_path`](crate::render::hdr::select_video_presentation_path).
+///
+/// `swap_chain` is `None` when called from the decode worker at open time
+/// (the worker has no window objects); all display-dependent capabilities
+/// then stay conservatively false, which can only make HDR content dead-end
+/// in a typed error — it can never affect SDR selection.
+///
+/// An HDR-*capable* display is deliberately not treated as HDR-*active*:
+/// both flags stay false until their interpretation is verified.
+pub fn query_hdr_presentation_capabilities(
+    device: &D3D11Device,
+    swap_chain: Option<&IDXGISwapChain1>,
+) -> Result<HdrPresentationCapabilities, Box<dyn Error>> {
+    let mut capabilities = HdrPresentationCapabilities {
+        video_context1_available: device.video_context1_available(),
+        ..Default::default()
+    };
+
+    if let Some(swap_chain) = swap_chain {
+        // Output associated with the playback window, via the swap chain the
+        // window already owns (the project's existing DXGI flow).
+        // SAFETY: read-only queries on a live swap chain.
+        let output: Result<IDXGIOutput, _> = unsafe { swap_chain.GetContainingOutput() };
+        if let Ok(output) = output {
+            if let Ok(output6) = output.cast::<IDXGIOutput6>() {
+                capabilities.output6_available = true;
+                // SAFETY: GetDesc1 fills a plain descriptor struct.
+                let desc = unsafe { output6.GetDesc1()? };
+                // Preserve the raw fields future display policy needs.
+                capabilities.display_descriptor = Some(HdrDisplayDescriptor {
+                    color_space: desc.ColorSpace,
+                    bits_per_color: desc.BitsPerColor,
+                    min_luminance: desc.MinLuminance,
+                    max_luminance: desc.MaxLuminance,
+                    max_full_frame_luminance: desc.MaxFullFrameLuminance,
+                });
+                // HDR-VERIFY: interpretation of DXGI_OUTPUT_DESC1 (which
+                // ColorSpace values mean HDR output is ACTIVE, not merely
+                // that the panel is capable) is unresolved. Both flags stay
+                // false until verified.
+                capabilities.display_hdr_capable = false;
+                capabilities.display_hdr_active = false;
+            }
+        }
+
+        // Swapchain HDR10 color-space support. Gated on the verified
+        // swapchain color space, which is a typed error today, so this
+        // capability stays false until the HDR-VERIFY commit resolves it.
+        if let Ok(swap_chain3) = swap_chain.cast::<IDXGISwapChain3>() {
+            if let Ok(hdr_color_space) = verified_hdr10_swapchain_color_space() {
+                // SAFETY: read-only support query.
+                let support = unsafe { swap_chain3.CheckColorSpaceSupport(hdr_color_space)? };
+                capabilities.swapchain_hdr10_color_space_supported =
+                    support & (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32) != 0;
+            }
+        }
+    }
+
+    // HDR-VERIFY: ID3D11VideoProcessorEnumerator1::
+    // CheckVideoProcessorFormatConversion needs a live processor enumerator,
+    // which exists only per-content in the render path
+    // (see D3D11Device::check_hdr_format_conversion). Both conversion
+    // capabilities stay false until that probe is wired with verified
+    // color-space values — interface availability alone must not count as
+    // support.
+    capabilities.hdr10_format_conversion_supported = false;
+    capabilities.hlg_format_conversion_supported = false;
+
+    Ok(capabilities)
+}
+
+/// Apply HDR10 static metadata to an HDR swapchain. Called only on the
+/// `Hdr10Passthrough` path; the metadata itself comes from
+/// [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata),
+/// which is a typed error until its unit conversion is verified.
+// Wired by the HDR passthrough commit.
+#[allow(dead_code)]
+pub fn apply_hdr10_metadata(
+    swap_chain3: &IDXGISwapChain3,
+    metadata: &DXGI_HDR_METADATA_HDR10,
+) -> Result<(), Box<dyn Error>> {
+    let swap_chain4: IDXGISwapChain4 = swap_chain3
+        .cast()
+        .map_err(|_| HdrError::SwapChain4Unavailable)?;
+    // windows 0.58 exposes SetHDRMetaData(type, Option<&[u8]>); the payload
+    // is the typed DXGI_HDR_METADATA_HDR10 viewed as its exact byte
+    // representation — named enum, typed struct, size taken from the type.
+    // SAFETY: `metadata` is a live repr(C) struct; the byte view borrows it
+    // only for the duration of the call.
+    unsafe {
+        let bytes = std::slice::from_raw_parts(
+            (metadata as *const DXGI_HDR_METADATA_HDR10).cast::<u8>(),
+            std::mem::size_of::<DXGI_HDR_METADATA_HDR10>(),
+        );
+        swap_chain4.SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, Some(bytes))?;
+    }
+    Ok(())
+}
+
+/// HDR-only presentation state, grouped so no `is_hdr` flags leak into the
+/// SDR structs. Constructed only on the `Hdr10Passthrough` path;
+/// [`VideoPresentationPath`] remains the sole control value.
+// Constructed by the HDR passthrough commit.
+#[allow(dead_code)]
+pub struct Hdr10PresentationState {
+    pub swapchain3: IDXGISwapChain3,
+    pub swapchain4: Option<IDXGISwapChain4>,
+    pub video_context1: ID3D11VideoContext1,
+    pub content_color: ContentColorInfo,
+    pub capabilities: HdrPresentationCapabilities,
 }
 
 fn create_factory() -> Result<IDXGIFactory2, Box<dyn Error>> {
