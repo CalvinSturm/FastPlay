@@ -81,8 +81,10 @@ pub(crate) enum VideoPresentationPath {
 /// FFmpeg tags so later verification commits can map them to DXGI color
 /// spaces without re-deriving anything.
 #[derive(Debug, Clone)]
-// The raw tag fields are read by the HDR-VERIFY color-space mapping
-// commits; only `mode` drives the skeleton's decision today.
+// `mode`, `color_space`, and `color_range` drive today's decisions
+// (path selection and verified_hdr_stream_color_space); the remaining raw
+// fields are read by the HDR-VERIFY metadata-conversion and
+// frame-refinement commits.
 #[allow(dead_code)]
 pub(crate) struct ContentColorInfo {
     pub(crate) mode: ContentColorMode,

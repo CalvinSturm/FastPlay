@@ -718,15 +718,15 @@ impl DxgiSwapChain {
     ///
     /// The verified SDR [`create`](Self::create) above is untouched; this is
     /// a separate constructor selected only by the presentation-path fork.
-    /// The unverified HDR10 color space is resolved FIRST, so today this
-    /// returns a typed error before any COM object is created — no swapchain
-    /// is ever created and then abandoned, and nothing is recreated
-    /// mid-playback.
+    /// The HDR10 color space is resolved FIRST, so any typed error surfaces
+    /// before any COM object is created — no swapchain is ever created and
+    /// then abandoned, and nothing is recreated mid-playback.
     ///
     /// Created once per HDR playback session, never by resizing or device
     /// recovery of an SDR session.
-    // Wired by SwapChainPresenter::new_for_path; unreachable until the
-    // HDR-VERIFY color-space commit lands.
+    // Wired by SwapChainPresenter::new_for_path; today reached only from
+    // the env-gated validation entry (render::hdr_validate). Production
+    // wiring is the passthrough commit.
     #[allow(dead_code)]
     pub fn create_hdr10_skeleton(
         window: &NativeWindowInner,
@@ -734,8 +734,9 @@ impl DxgiSwapChain {
         _content: &ContentColorInfo,
         _capabilities: &HdrPresentationCapabilities,
     ) -> Result<Self, Box<dyn Error>> {
-        // HDR-VERIFY: typed error until the RGB full-range PQ BT.2020
-        // swapchain color-space variant is verified.
+        // Resolved: RGB_FULL_G2084_NONE_P2020, validated structurally
+        // (CheckColorSpaceSupport + SetColorSpace1 below on a live HDR
+        // display) and by pixel (bench/verify-colors-pq.ps1).
         let hdr_color_space = verified_hdr10_swapchain_color_space()?;
 
         let factory: IDXGIFactory2 = create_factory()?;

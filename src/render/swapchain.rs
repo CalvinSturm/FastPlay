@@ -27,8 +27,9 @@ type HdrToSdrRendererCtor = fn(
 pub(crate) enum RendererConstructor {
     /// The pre-HDR, pixel-verified SDR constructor — unchanged.
     ExistingSdr(SdrRendererCtor),
-    /// The HDR10 passthrough swapchain skeleton (typed error until the
-    /// HDR-VERIFY color-space commit lands).
+    /// The HDR10 passthrough swapchain skeleton: creates the R10G10B10A2
+    /// swapchain with the verified HDR10 color space, but is not yet wired
+    /// into the production render path (passthrough commit).
     Hdr10Skeleton,
     /// The explicit HDR-to-SDR tone-mapping boundary (typed
     /// `ToneMappingNotImplemented` error today).
@@ -86,8 +87,10 @@ impl SwapChainPresenter {
     }
 
     /// Presentation-path renderer fork. `ExistingSdr` delegates to the
-    /// unchanged [`Self::new`]; every HDR path is a typed error until its
-    /// HDR-VERIFY commits land.
+    /// unchanged [`Self::new`]. `Hdr10Passthrough` builds the validated
+    /// HDR10 swapchain skeleton, but its render path does not yet apply
+    /// the HDR processor color spaces (the device's HDR processor
+    /// configuration is unwired); tone mapping stays a typed error.
     ///
     /// Not yet called by presenter.rs — startup and device recovery are
     /// always SDR today, and HDR files dead-end at open with a typed error.
