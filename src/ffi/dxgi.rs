@@ -51,7 +51,7 @@ use windows::{
                 TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
                 GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
                 MINMAXINFO, MSG, PM_REMOVE, QS_ALLINPUT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE,
+                SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_APP,
                 WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP,
                 WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN,
                 WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
@@ -1415,6 +1415,14 @@ unsafe fn extract_drop_paths(data_obj: &IDataObject) -> Vec<PathBuf> {
     paths
 }
 
+/// Automation hook for the color-verification harness
+/// (`bench/verify-colors.ps1`): queues a screenshot exactly like Ctrl+S does,
+/// through the same `InputEvent::SaveScreenshot` → capture-before-Present
+/// flow. A dedicated message is needed because the keyboard path reads live
+/// `GetKeyState` modifier state, which a cross-process `PostMessageW` cannot
+/// synthesize.
+pub(crate) const WM_APP_SAVE_SCREENSHOT: u32 = WM_APP + 1;
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -1422,6 +1430,15 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        WM_APP_SAVE_SCREENSHOT => {
+            if let Some(state) = window_state(hwnd) {
+                state
+                    .input_events
+                    .borrow_mut()
+                    .push(InputEvent::SaveScreenshot);
+            }
+            LRESULT(0)
+        }
         WM_NCCREATE => {
             // SAFETY:
             // - `lparam` contains the CREATESTRUCTW pointer for WM_NCCREATE
