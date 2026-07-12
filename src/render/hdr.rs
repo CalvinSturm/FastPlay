@@ -236,39 +236,62 @@ impl fmt::Display for HdrError {
 impl Error for HdrError {}
 
 /// Pure classification of stream-level color tags into a
-/// [`ContentColorMode`]. Deliberately keeps today's behavior for everything
-/// that is not explicitly HDR-signalled: fully untagged content and exotic
-/// SDR transfers continue through the verified SDR path exactly as before
-/// this module existed.
+/// [`ContentColorMode`]. The transfer characteristic controls the
+/// dynamic-range classification; primaries alone never select HDR:
 ///
-/// HDR-VERIFY: policy for BT.2020-primaries SDR transfers (BT2020_10/12 wide
-/// gamut) is unresolved; they classify as `Sdr` today, matching pre-skeleton
-/// behavior.
+/// - PQ + BT.2020 primaries → `Hdr10Pq` (standard HDR10 signalling).
+/// - PQ + anything else → `Unknown`: known non-BT.2020 primaries
+///   contradict HDR10, and unspecified primaries are incomplete
+///   signalling with no verified default here — neither may be assumed
+///   HDR10 or silently tone-mapped.
+/// - HLG → `Hlg` regardless of primaries; never downgraded to SDR.
+/// - Unspecified transfer + BT.2020 primaries → `Unknown` (could be PQ,
+///   HLG, or wide-gamut SDR).
+/// - Any explicit SDR-class transfer, or fully untagged content → `Sdr`.
 pub(crate) fn classify_color_tags(
     color_primaries: AVColorPrimaries,
     color_transfer: AVColorTransferCharacteristic,
 ) -> ContentColorMode {
     if color_transfer == AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084 {
-        return ContentColorMode::Hdr10Pq;
+        // Standard HDR10 requires BT.2020 primaries under the PQ transfer.
+        // PQ with known non-BT.2020 primaries (e.g. BT.709) is
+        // contradictory and not valid HDR10; PQ with unspecified primaries
+        // is incomplete. Both dead-end as Unknown (UnsupportedHdr at path
+        // level) rather than being guessed into HDR10 or routed into a
+        // tone-mapping path.
+        return if color_primaries == AVColorPrimaries_AVCOL_PRI_BT2020 {
+            ContentColorMode::Hdr10Pq
+        } else {
+            ContentColorMode::Unknown
+        };
     }
     if color_transfer == AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67 {
         return ContentColorMode::Hlg;
     }
-    if color_transfer == AVColorTransferCharacteristic_AVCOL_TRC_UNSPECIFIED
-        && color_primaries == AVColorPrimaries_AVCOL_PRI_BT2020
-    {
-        // BT.2020 primaries with no transfer tag is HDR-signalled but
-        // ambiguous: it could be PQ, HLG, or wide-gamut SDR. It must not
-        // silently reach the SDR path, and must not be assumed HDR10.
-        return ContentColorMode::Unknown;
+    if color_transfer == AVColorTransferCharacteristic_AVCOL_TRC_UNSPECIFIED {
+        if color_primaries == AVColorPrimaries_AVCOL_PRI_BT2020 {
+            // BT.2020 primaries with no transfer tag is HDR-signalled but
+            // ambiguous: it could be PQ, HLG, or wide-gamut SDR. It must
+            // not silently reach the SDR path, and must not be assumed
+            // HDR10.
+            return ContentColorMode::Unknown;
+        }
+        // HDR-VERIFY: fully untagged content (unspecified transfer,
+        // non-BT.2020 primaries) classifies as Sdr BY POLICY, and
+        // permanently so: first-frame refinement runs only on the HDR path
+        // and never upgrades an SDR-selected presentation path. An
+        // untagged-but-actually-HDR file (stripped-container PQ, some
+        // screen recordings) therefore plays washed out through the SDR
+        // path — the same bug class this fork exists to fix. Fixing that
+        // requires separate refinement/lifecycle work (upgrade from
+        // frame-level tags before presentation), not a classifier change.
+        return ContentColorMode::Sdr;
     }
-    // HDR-VERIFY: fully untagged content (unspecified transfer, non-BT.2020
-    // primaries) classifies PERMANENTLY as Sdr here, because first-frame
-    // refinement is stubbed and unreachable. An untagged-but-actually-HDR
-    // file (stripped-container PQ, some screen recordings) therefore plays
-    // washed out through the SDR path — the same bug class this fork
-    // exists to fix. The frame-refinement commit must revisit this branch
-    // (upgrade from frame-level tags before presentation), not inherit it.
+    // Every remaining transfer tag is an explicit SDR-class transfer
+    // (BT.709, gamma 2.2/2.8, SMPTE 170M/240M, sRGB, BT2020_10/12, ...).
+    // That includes BT.2020 primaries with an SDR transfer — wide-gamut
+    // SDR: the primaries widen the gamut but do not change the dynamic
+    // range, so it stays on the SDR path and must never select PQ output.
     ContentColorMode::Sdr
 }
 
@@ -402,8 +425,10 @@ pub(crate) fn build_dxgi_hdr10_metadata(
 mod tests {
     use super::*;
     use crate::ffi::ffmpeg::{
-        AVColorPrimaries_AVCOL_PRI_BT709, AVColorPrimaries_AVCOL_PRI_UNSPECIFIED,
-        AVColorRange_AVCOL_RANGE_UNSPECIFIED, AVColorSpace_AVCOL_SPC_UNSPECIFIED,
+        AVColorPrimaries_AVCOL_PRI_BT709, AVColorPrimaries_AVCOL_PRI_SMPTE170M,
+        AVColorPrimaries_AVCOL_PRI_UNSPECIFIED, AVColorRange_AVCOL_RANGE_UNSPECIFIED,
+        AVColorSpace_AVCOL_SPC_UNSPECIFIED, AVColorTransferCharacteristic_AVCOL_TRC_BT2020_10,
+        AVColorTransferCharacteristic_AVCOL_TRC_BT2020_12,
         AVColorTransferCharacteristic_AVCOL_TRC_BT709,
     };
 
@@ -569,6 +594,127 @@ mod tests {
                 AVColorTransferCharacteristic_AVCOL_TRC_BT709,
             ),
             ContentColorMode::Sdr
+        );
+    }
+
+    #[test]
+    fn classify_pq_with_bt709_primaries_is_unknown() {
+        // PQ with known non-BT.2020 primaries contradicts standard HDR10.
+        assert_eq!(
+            classify_color_tags(
+                AVColorPrimaries_AVCOL_PRI_BT709,
+                AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
+            ),
+            ContentColorMode::Unknown
+        );
+    }
+
+    #[test]
+    fn classify_pq_with_smpte170m_primaries_is_unknown() {
+        assert_eq!(
+            classify_color_tags(
+                AVColorPrimaries_AVCOL_PRI_SMPTE170M,
+                AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
+            ),
+            ContentColorMode::Unknown
+        );
+    }
+
+    #[test]
+    fn classify_pq_with_unspecified_primaries_is_unknown() {
+        // Incomplete PQ signalling: no verified default exists here, so it
+        // must not be assumed to be valid HDR10.
+        assert_eq!(
+            classify_color_tags(
+                AVColorPrimaries_AVCOL_PRI_UNSPECIFIED,
+                AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
+            ),
+            ContentColorMode::Unknown
+        );
+    }
+
+    #[test]
+    fn classify_hlg_with_non_bt2020_primaries_is_hlg() {
+        // HLG stays explicit regardless of primaries; never downgraded to
+        // SDR (it dead-ends in its typed error at path level).
+        for primaries in [
+            AVColorPrimaries_AVCOL_PRI_BT709,
+            AVColorPrimaries_AVCOL_PRI_UNSPECIFIED,
+        ] {
+            assert_eq!(
+                classify_color_tags(
+                    primaries,
+                    AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
+                ),
+                ContentColorMode::Hlg
+            );
+        }
+    }
+
+    #[test]
+    fn classify_wide_gamut_sdr_transfers_stay_sdr() {
+        // BT.2020 primaries under an explicit SDR-class transfer is
+        // wide-gamut SDR: primaries alone never select HDR.
+        for transfer in [
+            AVColorTransferCharacteristic_AVCOL_TRC_BT709,
+            AVColorTransferCharacteristic_AVCOL_TRC_BT2020_10,
+            AVColorTransferCharacteristic_AVCOL_TRC_BT2020_12,
+        ] {
+            assert_eq!(
+                classify_color_tags(AVColorPrimaries_AVCOL_PRI_BT2020, transfer),
+                ContentColorMode::Sdr
+            );
+        }
+    }
+
+    #[test]
+    fn classify_unspecified_transfer_with_known_non_bt2020_primaries_is_sdr() {
+        assert_eq!(
+            classify_color_tags(
+                AVColorPrimaries_AVCOL_PRI_BT709,
+                AVColorTransferCharacteristic_AVCOL_TRC_UNSPECIFIED,
+            ),
+            ContentColorMode::Sdr
+        );
+    }
+
+    #[test]
+    fn contradictory_pq_dead_ends_as_unsupported_never_tone_mapped() {
+        // End to end: classification, then path selection. Contradictory PQ
+        // must produce UnsupportedHdr with or without capabilities — never
+        // the SDR path and never the tone-mapping path.
+        let mode = classify_color_tags(
+            AVColorPrimaries_AVCOL_PRI_BT709,
+            AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
+        );
+        assert_eq!(mode, ContentColorMode::Unknown);
+        let mut content = info(mode);
+        content.color_primaries = AVColorPrimaries_AVCOL_PRI_BT709;
+        content.color_transfer = AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084;
+        for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
+            assert_eq!(
+                select_video_presentation_path(&content, &caps),
+                VideoPresentationPath::UnsupportedHdr
+            );
+        }
+    }
+
+    #[test]
+    fn classified_standard_pq_still_selects_passthrough() {
+        // End to end: the valid HDR10 signal still classifies as Hdr10Pq and
+        // still selects the passthrough/skeleton path under full
+        // capabilities.
+        let mode = classify_color_tags(
+            AVColorPrimaries_AVCOL_PRI_BT2020,
+            AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
+        );
+        assert_eq!(mode, ContentColorMode::Hdr10Pq);
+        let mut content = info(mode);
+        content.color_primaries = AVColorPrimaries_AVCOL_PRI_BT2020;
+        content.color_transfer = AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084;
+        assert_eq!(
+            select_video_presentation_path(&content, &full_capabilities()),
+            VideoPresentationPath::Hdr10Passthrough
         );
     }
 
