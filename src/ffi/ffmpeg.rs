@@ -197,6 +197,24 @@ pub(crate) enum VideoOpen {
     NoVideoStream,
 }
 
+/// Outcome of [`AudioDecodeSession::open`]. The mirror of [`VideoOpen`], and
+/// for the same reason: "this file has no audio" and "a seek superseded the
+/// open" call for opposite responses, and this used to return `None` for both.
+///
+/// `NoAudioStream` is permanent — the worker exits and the file plays video
+/// alone. `Cancelled` is transient, and the worker must serve the pending
+/// command and reopen: exiting instead leaves audio silent for the rest of the
+/// file, because the coordinator keeps sending seeks to a control channel that
+/// outlives the thread and so never learns the worker is gone.
+pub(crate) enum AudioOpen {
+    /// An audio decode session is ready.
+    Ready(AudioDecodeSession),
+    /// The file has no audio stream. The coordinator plays video alone.
+    NoAudioStream,
+    /// A newer command (always a seek) arrived while the open was in flight.
+    Cancelled,
+}
+
 /// One open media file with its video (and optional audio) decoders, ready to
 /// decode. The persistent decode worker opens a session once and seeks within
 /// it (`seek` + `run_to_eof`) instead of reopening the file per operation.
@@ -670,16 +688,15 @@ pub(crate) struct AudioDecodeSession {
 }
 
 impl AudioDecodeSession {
-    /// Open `source` audio-only. Returns `Ok(None)` when the file has no audio
-    /// stream (the coordinator then simply runs without an audio worker) or when
-    /// cancellation was signalled during the open.
+    /// Open `source` audio-only. See [`AudioOpen`] for how the worker must treat
+    /// each outcome — in particular, `Cancelled` is not a reason to stop.
     pub(crate) unsafe fn open(
         source: &MediaSource,
         audio_output_format: AudioStreamFormat,
         start_position: Option<Duration>,
         io_cancel: Box<dyn Fn() -> bool>,
         should_cancel: &impl Fn() -> bool,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<AudioOpen, String> {
         let source_path = source
             .path()
             .to_str()
@@ -721,11 +738,11 @@ impl AudioDecodeSession {
         interrupt.set_deadline(None);
 
         if should_cancel() {
-            return Ok(None);
+            return Ok(AudioOpen::Cancelled);
         }
 
         let Some(audio) = open_audio_decoder(input.0, audio_output_format)? else {
-            return Ok(None);
+            return Ok(AudioOpen::NoAudioStream);
         };
         let audio_batch = AudioBatcher::new(audio.output_format);
 
@@ -748,7 +765,7 @@ impl AudioDecodeSession {
         }
         let frame = Frame(frame);
 
-        Ok(Some(Self {
+        Ok(AudioOpen::Ready(Self {
             input,
             audio,
             audio_batch,
