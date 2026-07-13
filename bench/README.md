@@ -91,6 +91,36 @@ For each clip × iteration the harness:
 6. Closes via `WM_CLOSE` — `session.log` only flushes on a graceful exit.
 7. Parses the log and aggregates.
 
+## Correctness verifiers
+
+Alongside the latency harness, `bench/` holds pixel-level verifiers. They also
+drive the real player and read pixels back; they assert instead of measuring,
+and exit non-zero on failure.
+
+| Script | Verifies |
+|--------|----------|
+| `verify-colors.ps1` | SDR (BT.709) backbuffer matches an ffmpeg reference decode |
+| `verify-colors-pq.ps1` | The resolved HDR10 color spaces, via 10-bit backbuffer readback |
+| `verify-subtitles-hdr.ps1` | Overlays composite correctly on top of HDR video |
+
+`verify-subtitles-hdr.ps1` exists because HDR frames reach the backbuffer by a
+different route than SDR ones: SDR is blitted by the D3D11 video processor,
+while HDR is tone-mapped by our own pixel shader, which binds and clears the
+render target itself before drawing. Overlays are then drawn onto that same
+target. Nothing in the unit tests covers that ordering, and getting it wrong
+either loses the subtitles or wipes the picture under them.
+
+It plays the same clip twice — once with a sidecar `.srt`, once without — and
+reads the backbuffer through the app's own screenshot path (`WM_APP+1`), which
+captures *after* overlays are composited. Per clip it asserts that the frame is
+not blank (so a black screen cannot pass), that the subtitle band changed when
+the sidecar was present, and that the picture *above* the band did not. It runs
+an HLG clip and an SDR control, so a harness fault shows up as both failing.
+
+```powershell
+pwsh -File bench\verify-subtitles-hdr.ps1
+```
+
 ## Limitations
 
 - p95 is only as good as the sample count — small synthetic corpora give rough
