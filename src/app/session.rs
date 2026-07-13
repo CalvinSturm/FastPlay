@@ -1498,10 +1498,8 @@ impl PlaybackSession {
                     // command already superseded this open.)
                     if !control.is_shutdown() {
                         let (_seek_gen, op_id) = gen_cell.get();
-                        let _ = worker_send(
-                            SessionEvent::NoVideoStream { open_gen, op_id },
-                            &sender,
-                        );
+                        let _ =
+                            worker_send(SessionEvent::NoVideoStream { open_gen, op_id }, &sender);
                     }
                     return;
                 }
@@ -1739,28 +1737,62 @@ impl PlaybackSession {
                     }
                 };
 
-            let io_cancel: Box<dyn Fn() -> bool> = {
+            let io_cancel = || -> Box<dyn Fn() -> bool> {
                 let control = control.clone();
                 Box::new(move || control.is_shutdown())
             };
 
-            let mut session = match unsafe {
-                AudioDecodeSession::open(
-                    &source,
-                    audio_format,
-                    start_position,
-                    io_cancel,
-                    &cancelled,
-                )
-            } {
-                // No audio stream, or cancelled during open: nothing to do.
-                Ok(None) => return,
-                Ok(Some(session)) => session,
-                Err(error) => {
-                    if !control.is_shutdown() {
-                        flog!("[audio_worker] open failed (continuing without audio): {error}");
+            // Open, retrying if a seek supersedes the open while it is in
+            // flight. A seek bumps the command sequence, which is exactly what
+            // `cancelled` watches, so scrubbing early — before this worker has
+            // finished opening the file — cancels the open. Exiting on that
+            // (as this once did) killed audio for the rest of the file: the
+            // coordinator only re-sends seeks to the worker's control channel,
+            // which outlives the thread, so nothing ever noticed it was gone.
+            // Serve the command instead and reopen at its target.
+            let mut start_at = start_position;
+            let mut session = loop {
+                match unsafe {
+                    AudioDecodeSession::open(
+                        &source,
+                        audio_format,
+                        start_at,
+                        io_cancel(),
+                        &cancelled,
+                    )
+                } {
+                    Ok(ffmpeg::AudioOpen::Ready(session)) => break session,
+                    // Permanent: this file simply has no audio.
+                    Ok(ffmpeg::AudioOpen::NoAudioStream) => return,
+                    Ok(ffmpeg::AudioOpen::Cancelled) => {
+                        if control.is_shutdown() {
+                            return;
+                        }
+                        // The command that cancelled the open is still pending;
+                        // take it and reopen there. `wait_next` returns it
+                        // immediately (it never blocks when one is queued).
+                        match control.wait_next() {
+                            (DecodeCommand::Shutdown, _) => return,
+                            (
+                                DecodeCommand::Seek {
+                                    target,
+                                    seek_gen,
+                                    op_id,
+                                },
+                                new_seq,
+                            ) => {
+                                serving.set(new_seq);
+                                gen_cell.set((seek_gen, op_id));
+                                start_at = Some(target);
+                            }
+                        }
                     }
-                    return;
+                    Err(error) => {
+                        if !control.is_shutdown() {
+                            flog!("[audio_worker] open failed (continuing without audio): {error}");
+                        }
+                        return;
+                    }
                 }
             };
 
