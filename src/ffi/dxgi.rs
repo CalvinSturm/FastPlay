@@ -67,8 +67,8 @@ use windows::{
 
 use crate::{
     ffi::d3d11::{
-        BgraFrameCapture, D3D11Device, RenderTargetView, SubtitleOverlay, SubtitleRenderer,
-        VideoProcessorCache, VideoSurface,
+        BgraFrameCapture, D3D11Device, HdrToneMapRenderer, RenderTargetView, SubtitleOverlay,
+        SubtitleRenderer, VideoProcessorCache, VideoSurface,
     },
     platform::input::InputEvent,
     render::hdr::{
@@ -652,6 +652,9 @@ pub struct DxgiSwapChain {
     height: u32,
     subtitle_renderer: Option<SubtitleRenderer>,
     vp_cache: Option<VideoProcessorCache>,
+    /// Built lazily on the first HDR frame, so SDR playback never compiles the
+    /// tone-map shaders. Holds no backbuffer-derived resources.
+    hdr_tone_map_renderer: Option<HdrToneMapRenderer>,
 }
 
 impl DxgiSwapChain {
@@ -662,8 +665,56 @@ impl DxgiSwapChain {
     pub fn release_resources(&mut self) {
         self.vp_cache = None;
         self.subtitle_renderer = None;
+        self.hdr_tone_map_renderer = None;
         self.render_target = None;
         self.backbuffer = None;
+    }
+
+    /// Draw one decoded frame into the backbuffer, on whichever path its
+    /// colorimetry requires: HDR is tone-mapped to SDR in our own shader,
+    /// SDR goes through the video processor untouched.
+    fn render_video(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+        output_width: u32,
+        output_height: u32,
+        view: &crate::render::ViewTransform,
+    ) -> Result<(), Box<dyn Error>> {
+        if surface.hdr_tone_map.is_some() {
+            if self.hdr_tone_map_renderer.is_none() {
+                self.hdr_tone_map_renderer = Some(device.create_hdr_tone_map_renderer()?);
+            }
+            let renderer = self
+                .hdr_tone_map_renderer
+                .as_ref()
+                .ok_or_else(|| DxgiError("HDR tone-map renderer is not bound".into()))?;
+            let render_target = self
+                .render_target
+                .as_ref()
+                .ok_or_else(|| DxgiError("swap-chain render target is not bound".into()))?;
+            return device.render_video_surface_tone_mapped(
+                surface,
+                renderer,
+                render_target,
+                output_width,
+                output_height,
+                view,
+            );
+        }
+
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("swap-chain backbuffer texture is not bound".into()))?;
+        device.render_video_surface(
+            surface,
+            backbuffer,
+            output_width,
+            output_height,
+            view,
+            &mut self.vp_cache,
+        )
     }
 
     pub fn create(
@@ -711,6 +762,7 @@ impl DxgiSwapChain {
             height: 0,
             subtitle_renderer: None,
             vp_cache: None,
+            hdr_tone_map_renderer: None,
         })
     }
 
@@ -788,6 +840,7 @@ impl DxgiSwapChain {
             height: 0,
             subtitle_renderer: None,
             vp_cache: None,
+            hdr_tone_map_renderer: None,
         })
     }
 
@@ -952,14 +1005,7 @@ impl DxgiSwapChain {
             (self.width, self.height)
         };
 
-        device.render_video_surface(
-            surface,
-            backbuffer,
-            output_width,
-            output_height,
-            view,
-            &mut self.vp_cache,
-        )?;
+        self.render_video(device, surface, output_width, output_height, view)?;
         for overlay in [
             subtitle_overlay,
             timeline_overlay,
@@ -1009,25 +1055,21 @@ impl DxgiSwapChain {
             ));
         }
 
+        // Cloned (a COM refcount bump, not a pixel copy) so the capture below
+        // does not hold a borrow of `self` across the `&mut self` render call.
         let backbuffer = self
             .backbuffer
             .as_ref()
-            .ok_or_else(|| DxgiError("swap-chain backbuffer texture is not bound".into()))?;
+            .ok_or_else(|| DxgiError("swap-chain backbuffer texture is not bound".into()))?
+            .clone();
 
         let (output_width, output_height) = if self.width == 0 || self.height == 0 {
-            current_backbuffer_size(backbuffer)?
+            current_backbuffer_size(&backbuffer)?
         } else {
             (self.width, self.height)
         };
 
-        device.render_video_surface(
-            surface,
-            backbuffer,
-            output_width,
-            output_height,
-            view,
-            &mut self.vp_cache,
-        )?;
+        self.render_video(device, surface, output_width, output_height, view)?;
         for overlay in [
             subtitle_overlay,
             timeline_overlay,
@@ -1053,7 +1095,7 @@ impl DxgiSwapChain {
             )?;
         }
 
-        let capture = device.capture_bgra_texture(backbuffer)?;
+        let capture = device.capture_bgra_texture(&backbuffer)?;
         Ok((self.present()?, capture))
     }
 

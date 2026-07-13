@@ -9,8 +9,14 @@
 //! helper: the HDR10 color spaces are resolved against the installed
 //! windows 0.58 bindings and validated structurally + by pixel
 //! (`bench/verify-colors-pq.ps1`); everything still unresolved (metadata
-//! conversion, side-data layouts, HLG, display-active policy) remains a
-//! typed error. Search for `HDR-VERIFY` to find the open items.
+//! conversion, side-data layouts, display-active policy) remains a typed
+//! error. Search for `HDR-VERIFY` to find the open items.
+//!
+//! PQ and HLG both present today, tone-mapped to SDR in a pixel shader
+//! (`HdrToneMapRenderer`) rather than by the GPU video processor — see
+//! [`VideoPresentationPath::HdrToSdrToneMapRequired`] for why the processor
+//! cannot do it. This module resolves the stream's DXGI color space and
+//! [`tone_map_signal`] decodes it into that shader's inputs.
 //!
 //! The verified SDR path never enters this module beyond
 //! [`select_video_presentation_path`] returning
@@ -20,11 +26,12 @@ use std::{error::Error, fmt};
 
 use windows::Win32::Graphics::Dxgi::{
     Common::{
-        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
-        DXGI_COLOR_SPACE_TYPE, DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, DXGI_COLOR_SPACE_TYPE,
+        DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
         DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
-        DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020, DXGI_FORMAT,
-        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM,
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020,
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_R10G10B10A2_UNORM,
     },
     DXGI_HDR_METADATA_HDR10,
 };
@@ -75,13 +82,20 @@ pub(crate) enum VideoPresentationPath {
     /// mapping. Requires every capability bit checked in
     /// [`select_video_presentation_path`].
     Hdr10Passthrough,
-    /// HDR content presented through the existing SDR swapchain via the
-    /// GPU video processor's HDR-to-SDR conversion: the blt tags the
-    /// stream with its HDR color space ([`tone_map_stream_color_space`])
-    /// and the output as SDR sRGB ([`tone_map_output_color_space`]), and
-    /// the driver tone-maps. Selected for HDR10 on an SDR display (and,
-    /// until passthrough is implemented, whenever passthrough is not
-    /// available) and for HLG.
+    /// HDR content tone-mapped to SDR in our own pixel shader and presented
+    /// through the existing SDR swapchain. The stream's colorimetry is
+    /// resolved to a DXGI color space ([`tone_map_stream_color_space`]) and
+    /// decoded into shader inputs ([`tone_map_signal`]).
+    ///
+    /// This does *not* use the video processor's HDR-to-SDR conversion.
+    /// That was the original design and it is unreachable on real hardware:
+    /// NVIDIA's video processor advertises no GHLG input conversion at all,
+    /// and accepts PQ only to linear-scRGB or HDR10 outputs — never to the
+    /// gamma-2.2 sRGB the 8-bit SDR backbuffer scans out. Driver conversion
+    /// tables are not a portable substitute for doing the transfer math.
+    ///
+    /// Selected for HDR10 on an SDR display (and, until passthrough is
+    /// implemented, whenever passthrough is not available) and for HLG.
     HdrToSdrToneMapRequired,
     /// Any HDR-signalled combination we cannot present correctly.
     UnsupportedHdr,
@@ -203,6 +217,11 @@ pub(crate) enum HdrError {
     HdrColorSpaceUnverified,
     HdrMetadataConversionUnverified,
     SwapChain4Unavailable,
+    /// The tone-map shader cannot sample the decoder's output format on this
+    /// device (no NV12/P010 shader-resource views). Raised at open, never at
+    /// the first draw: a per-frame render error is misread by device recovery
+    /// as device-lost and crash-loops.
+    HdrToneMapUnavailable,
 }
 
 impl fmt::Display for HdrError {
@@ -232,6 +251,10 @@ impl fmt::Display for HdrError {
             }
             Self::SwapChain4Unavailable => {
                 "HDR metadata requires IDXGISwapChain4, which this system does not expose"
+            }
+            Self::HdrToneMapUnavailable => {
+                "this GPU cannot sample the decoded HDR frame format, so HDR tone mapping is \
+                 unavailable"
             }
         };
         f.write_str(message)
@@ -463,19 +486,71 @@ pub(crate) fn tone_map_stream_color_space(
                 Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020)
             }
         }
-        ContentColorMode::Sdr | ContentColorMode::Unknown => {
-            Err(HdrError::HdrColorSpaceUnverified)
-        }
+        ContentColorMode::Sdr | ContentColorMode::Unknown => Err(HdrError::HdrColorSpaceUnverified),
     }
 }
 
-/// The video processor output color space for the tone-map path: full-range
-/// sRGB (G22, BT.709) — exactly what the existing 8-bit B8G8R8A8 SDR
-/// swapchain scans out, so tone-mapped output presents through the verified
-/// SDR swapchain unchanged. Must stay in lockstep with the SDR backbuffer
-/// format (see `swapchain_format_for_path`).
-pub(crate) fn tone_map_output_color_space() -> DXGI_COLOR_SPACE_TYPE {
-    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+/// The transfer function carried by a frame on the tone-map path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HdrTransfer {
+    /// SMPTE ST 2084 (PQ). Absolute: signal 1.0 means 10 000 cd/m²,
+    /// independent of the mastering display.
+    Pq,
+    /// BT.2100 Hybrid Log-Gamma. Scene-referred: the inverse OETF yields
+    /// scene light, and the OOTF (system gamma) completes it to display
+    /// light. Not interchangeable with PQ — applying the wrong one is a
+    /// gross error, not a shade of grading.
+    Hlg,
+}
+
+/// Everything the tone-map pixel shader needs to know about the decoded
+/// signal, decoded back out of the DXGI color space that
+/// [`tone_map_stream_color_space`] already resolved.
+///
+/// The DXGI color space stays the single validated representation of the
+/// stream's colorimetry (it is what rejects full-range PQ, constant-luminance
+/// matrices, and non-BT.2020 signalling), even though the tone-map path no
+/// longer hands it to the video processor. This function is the one place
+/// that turns it back into shader inputs, so the shader can never disagree
+/// with what was validated at open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HdrToneMapSignal {
+    pub(crate) transfer: HdrTransfer,
+    /// Full-range (0–max) samples when true, studio/limited otherwise.
+    pub(crate) full_range: bool,
+}
+
+/// Decode a validated tone-map stream color space into shader inputs.
+///
+/// Only the spaces [`tone_map_stream_color_space`] can actually produce are
+/// accepted; anything else is a typed error rather than a guessed transfer.
+pub(crate) fn tone_map_signal(
+    color_space: DXGI_COLOR_SPACE_TYPE,
+) -> Result<HdrToneMapSignal, HdrError> {
+    // Both PQ sitings map to the same shader inputs: chroma siting shifts
+    // upsampling by half a chroma sample and does not change the transfer,
+    // matrix, or range the shader applies.
+    if color_space == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020
+        || color_space == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020
+    {
+        return Ok(HdrToneMapSignal {
+            transfer: HdrTransfer::Pq,
+            full_range: false,
+        });
+    }
+    if color_space == DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020 {
+        return Ok(HdrToneMapSignal {
+            transfer: HdrTransfer::Hlg,
+            full_range: false,
+        });
+    }
+    if color_space == DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020 {
+        return Ok(HdrToneMapSignal {
+            transfer: HdrTransfer::Hlg,
+            full_range: true,
+        });
+    }
+    Err(HdrError::HdrColorSpaceUnverified)
 }
 
 /// Conversion boundary between FFmpeg-sourced metadata and DXGI.
@@ -978,13 +1053,62 @@ mod tests {
     }
 
     #[test]
-    fn tone_map_output_is_full_range_srgb() {
-        // Tone-mapped output must match what the verified 8-bit SDR
-        // swapchain scans out (full-range G22 BT.709), so it presents
-        // through the unchanged SDR swapchain.
+    fn tone_map_signal_round_trips_every_resolvable_stream_space() {
+        // Whatever tone_map_stream_color_space resolves, tone_map_signal must
+        // decode — otherwise a file passes the open gate and then dead-ends in
+        // the renderer. These two functions are the only link between the
+        // validated colorimetry and the shader, so they must stay total with
+        // respect to each other.
+        use crate::ffi::ffmpeg::{AVColorRange_AVCOL_RANGE_JPEG, AVColorRange_AVCOL_RANGE_MPEG};
+
+        let cases = [
+            (
+                hdr10_info(
+                    AVColorSpace_AVCOL_SPC_BT2020_NCL,
+                    AVColorRange_AVCOL_RANGE_MPEG,
+                ),
+                HdrTransfer::Pq,
+                false,
+            ),
+            (
+                hlg_info(
+                    AVColorSpace_AVCOL_SPC_BT2020_NCL,
+                    AVColorRange_AVCOL_RANGE_MPEG,
+                ),
+                HdrTransfer::Hlg,
+                false,
+            ),
+            (
+                hlg_info(
+                    AVColorSpace_AVCOL_SPC_BT2020_NCL,
+                    AVColorRange_AVCOL_RANGE_JPEG,
+                ),
+                HdrTransfer::Hlg,
+                true,
+            ),
+        ];
+        for (content, transfer, full_range) in cases {
+            let space = tone_map_stream_color_space(&content)
+                .expect("standard HDR signalling must resolve a stream color space");
+            assert_eq!(
+                tone_map_signal(space),
+                Ok(HdrToneMapSignal {
+                    transfer,
+                    full_range
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn tone_map_signal_rejects_a_non_hdr_color_space() {
+        // An SDR YCbCr space must never be decoded into a transfer function:
+        // the shader would apply a PQ or HLG EOTF to gamma-encoded samples.
         assert_eq!(
-            tone_map_output_color_space(),
-            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+            tone_map_signal(
+                windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
+            ),
+            Err(HdrError::HdrColorSpaceUnverified)
         );
     }
 
@@ -1015,7 +1139,9 @@ mod tests {
 
     #[test]
     fn tone_map_hlg_stream_space_is_ghlg_topleft() {
-        use crate::ffi::ffmpeg::{AVColorRange_AVCOL_RANGE_MPEG, AVColorRange_AVCOL_RANGE_UNSPECIFIED};
+        use crate::ffi::ffmpeg::{
+            AVColorRange_AVCOL_RANGE_MPEG, AVColorRange_AVCOL_RANGE_UNSPECIFIED,
+        };
         // Studio / unspecified range HLG (BT.2020 NCL, or unspecified which
         // BT.2100 defines as BT.2020 NCL) maps to studio GHLG.
         for color_space in [
