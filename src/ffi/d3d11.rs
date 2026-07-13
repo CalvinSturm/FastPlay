@@ -13,7 +13,7 @@ use windows::{
         Foundation::{BOOL, COLORREF, RECT},
         Graphics::{
             Direct3D::{
-                Fxc::D3DCompile, ID3DBlob, D3D_DRIVER_TYPE_HARDWARE,
+                Fxc::D3DCompile, ID3DBlob, D3D11_SRV_DIMENSION_TEXTURE2D, D3D_DRIVER_TYPE_HARDWARE,
                 D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
             },
             Direct3D11::{
@@ -23,15 +23,17 @@ use windows::{
                 ID3D11Texture2D, ID3D11VertexShader, ID3D11VideoContext, ID3D11VideoContext1,
                 ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
                 ID3D11VideoProcessorEnumerator1, ID3D11VideoProcessorOutputView,
-                D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
-                D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
-                D3D11_BLEND_SRC_ALPHA, D3D11_BUFFER_DESC, D3D11_COLOR_WRITE_ENABLE_ALL,
-                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_ELEMENT_DESC,
-                D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-                D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_VPIV,
-                D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
-                D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE, D3D11_USAGE_STAGING,
+                D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE,
+                D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
+                D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA, D3D11_BUFFER_DESC,
+                D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CPU_ACCESS_READ, D3D11_CPU_ACCESS_WRITE,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE,
+                D3D11_MAP_READ, D3D11_MAP_WRITE_DISCARD, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
+                D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
+                D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_SRV, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+                D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
+                D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE, D3D11_USAGE_STAGING,
                 D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
                 D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
                 D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL,
@@ -43,8 +45,9 @@ use windows::{
             },
             Dxgi::Common::{
                 DXGI_COLOR_SPACE_TYPE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12,
-                DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R32G32B32_FLOAT,
-                DXGI_FORMAT_R32G32_FLOAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+                DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16G16_UNORM,
+                DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R32G32_FLOAT,
+                DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
             },
             Gdi::{
                 CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
@@ -114,6 +117,96 @@ pub(crate) struct SubtitleRenderer {
     blend_state: ID3D11BlendState,
 }
 
+/// GPU objects for the HDR→SDR tone-map path: a full-screen-quad shader pair
+/// that samples the decoded NV12/P010 frame directly and does the transfer
+/// math itself (see `HDR_TONE_MAP_PIXEL_SHADER`).
+///
+/// This exists because the D3D11 video processor cannot do the job: NVIDIA
+/// advertises no HLG (`GHLG`) input conversion at all, and offers PQ only to
+/// linear-scRGB or HDR10 outputs, never to the gamma-2.2 sRGB an 8-bit SDR
+/// backbuffer scans out. Doing the EOTF, tone curve, gamut, and encode in a
+/// shader is both portable and exact.
+///
+/// The vertex and constant buffers are `DYNAMIC` and rewritten each frame
+/// (geometry follows the window/zoom/rotation; the constants follow the
+/// stream), so the whole path allocates nothing per frame.
+pub(crate) struct HdrToneMapRenderer {
+    vertex_shader: ID3D11VertexShader,
+    pixel_shader: ID3D11PixelShader,
+    input_layout: ID3D11InputLayout,
+    sampler: ID3D11SamplerState,
+    vertex_buffer: ID3D11Buffer,
+    constant_buffer: ID3D11Buffer,
+}
+
+/// Mirror of the tone-map shader's `cbuffer`. Two `float4`s: HLSL constant
+/// buffers are laid out in 16-byte registers, so the size must stay a
+/// multiple of 16 and no field may straddle a register boundary.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct ToneMapParams {
+    /// `[y_offset, y_scale, c_offset, c_scale]` — normalizes raw YCbCr samples
+    /// to Y in [0,1] and Cb/Cr in [-0.5,0.5]. Bit-depth and range dependent,
+    /// so it is computed on the CPU (see [`ToneMapParams::new`]) rather than
+    /// branched on in the shader.
+    range: [f32; 4],
+    /// `[sample_scale, transfer, knee, unused]`.
+    params: [f32; 4],
+}
+
+/// Where the tone curve stops being the identity. Below this (in units of
+/// diffuse white) HDR and SDR agree, so the shader passes those values
+/// through untouched and only the highlights above it get compressed. 0.75
+/// keeps all of skin, sky, and midtones bit-exact and reserves the top
+/// quarter of the range for specular roll-off.
+const TONE_MAP_KNEE: f32 = 0.75;
+
+impl ToneMapParams {
+    /// `ten_bit` selects the studio-range levels and the P010 sample scaling;
+    /// it must reflect the *texture* format, not the stream's nominal depth.
+    fn new(signal: crate::render::hdr::HdrToneMapSignal, ten_bit: bool) -> Self {
+        // Studio (limited) range levels, per BT.709/BT.2020, scaled to the
+        // bit depth actually stored in the texture. Expressed as normalized
+        // code values so the shader stays depth-agnostic.
+        let (max_code, black, white_span, chroma_center, chroma_span) = if ten_bit {
+            (1023.0, 64.0, 876.0, 512.0, 896.0)
+        } else {
+            (255.0, 16.0, 219.0, 128.0, 224.0)
+        };
+
+        let range = if signal.full_range {
+            // Full range: luma already spans the code range, and chroma is
+            // centered on the midpoint code with no headroom/footroom. The
+            // center is `chroma_center / max_code` (128/255, 512/1023), not
+            // exactly 0.5 — the same convention as full-range (JPEG) YCbCr.
+            [0.0, 1.0, chroma_center / max_code, 1.0]
+        } else {
+            [
+                black / max_code,
+                max_code / white_span,
+                chroma_center / max_code,
+                max_code / chroma_span,
+            ]
+        };
+
+        // P010 stores each 10-bit code in the *high* bits of a 16-bit word, so
+        // a UNORM fetch returns code * 64 / 65535, not code / 1023. Rescale so
+        // the shader sees a value normalized against the 10-bit maximum.
+        // NV12 is already normalized against 255 by the UNORM fetch.
+        let sample_scale = if ten_bit { 65535.0 / 65472.0 } else { 1.0 };
+
+        let transfer = match signal.transfer {
+            crate::render::hdr::HdrTransfer::Pq => 0.0,
+            crate::render::hdr::HdrTransfer::Hlg => 1.0,
+        };
+
+        Self {
+            range,
+            params: [sample_scale, transfer, TONE_MAP_KNEE, 0.0],
+        }
+    }
+}
+
 /// Colorimetry of a decoded frame, reduced to what the D3D11 video processor
 /// can express: which YCbCr→RGB matrix applies and whether the samples use
 /// the full 0–255 range or the limited 16–235 studio range.
@@ -177,12 +270,6 @@ pub(crate) struct VideoProcessorCache {
     output_height: u32,
     /// Raw pointer used only for identity comparison — never dereferenced.
     backbuffer_identity: *mut c_void,
-    /// The HDR tone-map input color space this processor was built and
-    /// capability-checked for (`None` = the SDR path). Part of the cache
-    /// key: a surface whose `hdr_tone_map` differs forces a rebuild, so the
-    /// one-time `CheckVideoProcessorFormatConversion` gate below always
-    /// matches the frames actually blitted through it.
-    hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
 }
 
 pub(crate) struct BgraFrameCapture {
@@ -492,61 +579,6 @@ impl D3D11Device {
         Ok(supported.as_bool())
     }
 
-    /// Open-time gate for the HDR→SDR tone-map path: does this device's video
-    /// processor advertise converting an HDR input (`input_color_space`, in
-    /// either of the decode formats HW/SW produce — NV12 for 8-bit, P010 for
-    /// 10-bit) straight to the SDR sRGB backbuffer the tone-map blt targets?
-    ///
-    /// Checked at open so an unsupported combination fails the open cleanly
-    /// (typed `OpenFailed`) instead of erroring at the first blt — a render
-    /// error is otherwise misread as device-lost and crash-loops device
-    /// recovery. Not every GPU exposes single-pass HDR→8-bit-SDR conversion
-    /// through the video processor (many only reach a wide-gamut/float or PQ
-    /// target); on those this returns false and the file is declined rather
-    /// than shown mis-converted.
-    pub(crate) fn supports_hdr_tone_map(
-        &self,
-        width: u32,
-        height: u32,
-        input_color_space: DXGI_COLOR_SPACE_TYPE,
-    ) -> Result<bool, Box<dyn Error>> {
-        let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: DXGI_RATIONAL {
-                Numerator: 1,
-                Denominator: 1,
-            },
-            InputWidth: width.max(1),
-            InputHeight: height.max(1),
-            OutputFrameRate: DXGI_RATIONAL {
-                Numerator: 1,
-                Denominator: 1,
-            },
-            OutputWidth: width.max(1),
-            OutputHeight: height.max(1),
-            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-        };
-        // SAFETY: content_desc is fully initialized; the enumerator is a live
-        // COM object owned by this scope.
-        let enumerator = unsafe {
-            self.video_device
-                .CreateVideoProcessorEnumerator(&content_desc)?
-        };
-        let out_cs = crate::render::hdr::tone_map_output_color_space();
-        for input_format in [DXGI_FORMAT_NV12, DXGI_FORMAT_P010] {
-            if self.check_hdr_format_conversion(
-                &enumerator,
-                input_format,
-                input_color_space,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                out_cs,
-            )? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     /// Dev-only HDR10 validation blt (`bench/verify-colors-pq.ps1`): renders
     /// one NV12 surface into an R10G10B10A2 backbuffer with the resolved
     /// HDR10 color spaces set through `ID3D11VideoContext1`. This is the
@@ -819,6 +851,11 @@ impl D3D11Device {
         })
     }
 
+    /// Present one SDR frame through the D3D11 video processor. This is the
+    /// pixel-verified path; HDR goes through
+    /// [`Self::render_video_surface_tone_mapped`] instead, because the video
+    /// processor cannot convert HDR to the 8-bit sRGB backbuffer (see
+    /// [`HdrToneMapRenderer`]).
     pub(crate) fn render_video_surface(
         &self,
         surface: &VideoSurface,
@@ -828,6 +865,12 @@ impl D3D11Device {
         view: &crate::render::ViewTransform,
         vp_cache: &mut Option<VideoProcessorCache>,
     ) -> Result<(), Box<dyn Error>> {
+        if surface.hdr_tone_map.is_some() {
+            return Err(Box::new(D3D11Error(
+                "HDR surface routed to the SDR video-processor path",
+            )));
+        }
+
         // SAFETY:
         // - the enumerator and processor are created from the active device
         // - the input and output views reference live D3D11 textures
@@ -847,8 +890,7 @@ impl D3D11Device {
                         && c.input_height == surface.height
                         && c.output_width == output_width
                         && c.output_height == output_height
-                        && c.backbuffer_identity == bb_identity
-                        && c.hdr_tone_map == surface.hdr_tone_map =>
+                        && c.backbuffer_identity == bb_identity =>
                 {
                     c
                 }
@@ -901,7 +943,6 @@ impl D3D11Device {
                         output_width,
                         output_height,
                         backbuffer_identity: bb_identity,
-                        hdr_tone_map: surface.hdr_tone_map,
                     });
                     slot.as_mut().unwrap()
                 }
@@ -969,72 +1010,34 @@ impl D3D11Device {
             // SetMultithreadProtected; without the lock the two threads
             // race on the same underlying immediate context, crashing
             // in d3d11.dll.
-            // For HDR content, the driver tone-maps only through the newer
-            // ID3D11VideoContext1 color-space API (DXGI color spaces carry the
-            // PQ/HLG transfer the legacy bitfield cannot express). Cast once,
-            // outside the lock; a device without it is a typed error rather
-            // than a silently mis-converted (washed-out) frame.
-            let video_context1: Option<ID3D11VideoContext1> = match surface.hdr_tone_map {
-                Some(_) => Some(
-                    self.video_context
-                        .cast()
-                        .map_err(|_| crate::render::hdr::HdrError::VideoContext1Unavailable)?,
-                ),
-                None => None,
-            };
-
             let mut streams = [stream];
             let blt_result = {
                 let _lock = self.context_lock.lock().unwrap_or_else(|e| e.into_inner());
-                match (surface.hdr_tone_map, &video_context1) {
-                    // HDR→SDR: tag the stream with its decoded HDR color space
-                    // (PQ or HLG) and the output as sRGB, and the video
-                    // processor tone-maps into the 8-bit SDR backbuffer. The
-                    // format-conversion capability was proven at cache
-                    // creation above.
-                    (Some(input_color_space), Some(vc1)) => {
-                        vc1.VideoProcessorSetStreamColorSpace1(
-                            &cache.processor,
-                            0,
-                            input_color_space,
-                        );
-                        vc1.VideoProcessorSetOutputColorSpace1(
-                            &cache.processor,
-                            crate::render::hdr::tone_map_output_color_space(),
-                        );
-                    }
-                    // SDR: the pixel-verified legacy path, byte-for-byte
-                    // unchanged. Without an explicit color space the driver
-                    // guesses the YCbCr matrix and nominal range; guessing
-                    // wrong (e.g. treating limited-range 16–235 video as full
-                    // range) washes out blacks and dulls color.
-                    // D3D11_VIDEO_PROCESSOR_COLOR_SPACE is a bitfield, LSB
-                    // first: Usage:1 RGB_Range:1 YCbCr_Matrix:1 YCbCr_xvYCC:1
-                    // Nominal_Range:2. YCbCr_Matrix 1 = BT.709, 0 = BT.601;
-                    // Nominal_Range 1 = 16–235, 2 = 0–255.
-                    _ => {
-                        let input_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-                            _bitfield: ((surface.color.bt709 as u32) << 2)
-                                | (if surface.color.full_range { 2 } else { 1 } << 4),
-                        };
-                        // Output is the BGRA backbuffer: playback usage,
-                        // full-range RGB. Full-range output is coupled to the
-                        // 8-bit B8G8R8A8_UNORM swapchain format (see dxgi.rs);
-                        // a future 10-bit/HDR backbuffer must update this color
-                        // space in lockstep.
-                        let output_color_space =
-                            D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
-                        self.video_context.VideoProcessorSetStreamColorSpace(
-                            &cache.processor,
-                            0,
-                            &input_color_space,
-                        );
-                        self.video_context.VideoProcessorSetOutputColorSpace(
-                            &cache.processor,
-                            &output_color_space,
-                        );
-                    }
-                }
+                // The pixel-verified SDR configuration. Without an explicit
+                // color space the driver guesses the YCbCr matrix and nominal
+                // range; guessing wrong (e.g. treating limited-range 16–235
+                // video as full range) washes out blacks and dulls color.
+                // D3D11_VIDEO_PROCESSOR_COLOR_SPACE is a bitfield, LSB
+                // first: Usage:1 RGB_Range:1 YCbCr_Matrix:1 YCbCr_xvYCC:1
+                // Nominal_Range:2. YCbCr_Matrix 1 = BT.709, 0 = BT.601;
+                // Nominal_Range 1 = 16–235, 2 = 0–255.
+                let input_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                    _bitfield: ((surface.color.bt709 as u32) << 2)
+                        | (if surface.color.full_range { 2 } else { 1 } << 4),
+                };
+                // Output is the BGRA backbuffer: playback usage, full-range
+                // RGB. Full-range output is coupled to the 8-bit
+                // B8G8R8A8_UNORM swapchain format (see dxgi.rs); a future
+                // 10-bit/HDR backbuffer must update this color space in
+                // lockstep.
+                let output_color_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+                self.video_context.VideoProcessorSetStreamColorSpace(
+                    &cache.processor,
+                    0,
+                    &input_color_space,
+                );
+                self.video_context
+                    .VideoProcessorSetOutputColorSpace(&cache.processor, &output_color_space);
                 self.video_context.VideoProcessorSetStreamOutputRate(
                     &cache.processor,
                     0,
@@ -1096,6 +1099,326 @@ impl D3D11Device {
                 flog!("VideoProcessorBlt failed: {error}");
             }
             blt_result?;
+        }
+
+        Ok(())
+    }
+
+    /// Open-time gate for the HDR→SDR tone-map path: can a pixel shader
+    /// actually sample the frames this decoder will produce?
+    ///
+    /// D3D11 exposes NV12/P010 to shaders only through per-plane views, and
+    /// that is the one capability the shader path needs beyond a working
+    /// device. Probed here on throwaway textures, at open, so an incapable
+    /// device declines the file cleanly — a failure raised later, at the first
+    /// draw, is misread by device recovery as device-lost and crash-loops.
+    ///
+    /// Both decode formats are required rather than only the one this file
+    /// will use: the stream's bit depth is not reliably known at open
+    /// (`bits_per_raw_sample` may be 0, and FFmpeg's pixel-format descriptors
+    /// are not bound), and a hardware path can fall back to software mid-file,
+    /// switching P010 to NV12 under us. Requiring both keeps the gate honest
+    /// without guessing, and costs nothing real: NV12 plane views are
+    /// universal, and any GPU that can decode 10-bit HEVC exposes P010 ones.
+    pub(crate) fn supports_hdr_shader_tone_map(&self) -> bool {
+        [DXGI_FORMAT_P010, DXGI_FORMAT_NV12]
+            .into_iter()
+            .all(|format| self.supports_plane_shader_views(format))
+    }
+
+    fn supports_plane_shader_views(&self, format: DXGI_FORMAT) -> bool {
+        let Ok((luma_format, chroma_format)) = plane_srv_formats(format) else {
+            return false;
+        };
+
+        // Even dimensions: chroma is half-resolution in both axes.
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 64,
+            Height: 64,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_DECODER.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+
+        // SAFETY: descriptor is fully initialized; the texture and any views
+        // are local and dropped on return.
+        let mut texture = None;
+        unsafe {
+            if self
+                .device
+                .CreateTexture2D(&desc, None, Some(&mut texture))
+                .is_err()
+            {
+                return false;
+            }
+        }
+        let Some(texture) = texture else {
+            return false;
+        };
+
+        [luma_format, chroma_format]
+            .into_iter()
+            .all(|format| create_plane_srv(&self.device, &texture, format).is_ok())
+    }
+
+    pub(crate) fn create_hdr_tone_map_renderer(
+        &self,
+    ) -> Result<HdrToneMapRenderer, Box<dyn Error>> {
+        let vertex_blob = compile_shader(HDR_TONE_MAP_VERTEX_SHADER, b"main\0", b"vs_4_0\0")?;
+        let pixel_blob = compile_shader(HDR_TONE_MAP_PIXEL_SHADER, b"main\0", b"ps_4_0\0")?;
+
+        let input_elements = [
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: PCSTR(b"POSITION\0".as_ptr()),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32B32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 0,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: PCSTR(b"TEXCOORD\0".as_ptr()),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 12,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+        ];
+
+        // Bilinear: this is what upsamples the half-resolution chroma plane.
+        let sampler_desc = D3D11_SAMPLER_DESC {
+            Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+            AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+            AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+            AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+            ComparisonFunc: Default::default(),
+            MinLOD: 0.0,
+            MaxLOD: f32::MAX,
+            ..Default::default()
+        };
+
+        let vertex_buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: (size_of::<SubtitleVertex>() * 6) as u32,
+            Usage: D3D11_USAGE_DYNAMIC,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+        let constant_buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: size_of::<ToneMapParams>() as u32,
+            Usage: D3D11_USAGE_DYNAMIC,
+            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+
+        let vertex_bytecode = shader_blob_bytes(&vertex_blob);
+        let pixel_bytecode = shader_blob_bytes(&pixel_blob);
+
+        let mut vertex_shader = None;
+        let mut pixel_shader = None;
+        let mut input_layout = None;
+        let mut sampler = None;
+        let mut vertex_buffer = None;
+        let mut constant_buffer = None;
+
+        // SAFETY: all descriptors are fully initialized, the bytecode slices
+        // outlive the calls that consume them, and every out-pointer targets a
+        // local that lives for the duration of the call.
+        unsafe {
+            self.device
+                .CreateVertexShader(vertex_bytecode, None, Some(&mut vertex_shader))?;
+            self.device
+                .CreatePixelShader(pixel_bytecode, None, Some(&mut pixel_shader))?;
+            self.device.CreateInputLayout(
+                &input_elements,
+                vertex_bytecode,
+                Some(&mut input_layout),
+            )?;
+            self.device
+                .CreateSamplerState(&sampler_desc, Some(&mut sampler))?;
+            self.device
+                .CreateBuffer(&vertex_buffer_desc, None, Some(&mut vertex_buffer))?;
+            self.device
+                .CreateBuffer(&constant_buffer_desc, None, Some(&mut constant_buffer))?;
+        }
+
+        Ok(HdrToneMapRenderer {
+            vertex_shader: vertex_shader
+                .ok_or(D3D11Error("CreateVertexShader returned no tone-map shader"))?,
+            pixel_shader: pixel_shader
+                .ok_or(D3D11Error("CreatePixelShader returned no tone-map shader"))?,
+            input_layout: input_layout
+                .ok_or(D3D11Error("CreateInputLayout returned no tone-map layout"))?,
+            sampler: sampler.ok_or(D3D11Error(
+                "CreateSamplerState returned no tone-map sampler",
+            ))?,
+            vertex_buffer: vertex_buffer.ok_or(D3D11Error(
+                "CreateBuffer returned no tone-map vertex buffer",
+            ))?,
+            constant_buffer: constant_buffer.ok_or(D3D11Error(
+                "CreateBuffer returned no tone-map constant buffer",
+            ))?,
+        })
+    }
+
+    /// Present one HDR frame by tone-mapping it to SDR in a pixel shader.
+    ///
+    /// The SDR counterpart of this is [`Self::render_video_surface`], which
+    /// blts through the video processor. Both compute their geometry the same
+    /// way (aspect fit → zoom/pan → rotation), so an HDR and an SDR file of
+    /// the same dimensions land on exactly the same pixels.
+    pub(crate) fn render_video_surface_tone_mapped(
+        &self,
+        surface: &VideoSurface,
+        renderer: &HdrToneMapRenderer,
+        render_target: &RenderTargetView,
+        output_width: u32,
+        output_height: u32,
+        view: &crate::render::ViewTransform,
+    ) -> Result<(), Box<dyn Error>> {
+        let color_space = surface.hdr_tone_map.ok_or(D3D11Error(
+            "tone-map render path called with an SDR surface",
+        ))?;
+        let signal = crate::render::hdr::tone_map_signal(color_space)?;
+
+        // SAFETY: `surface.texture` is a live texture owned by the surface.
+        let mut texture_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { surface.texture.GetDesc(&mut texture_desc) };
+
+        let (luma_format, chroma_format) = plane_srv_formats(texture_desc.Format)?;
+        let luma_view = create_plane_srv(&self.device, &surface.texture, luma_format)?;
+        let chroma_view = create_plane_srv(&self.device, &surface.texture, chroma_format)?;
+        let params = ToneMapParams::new(signal, texture_desc.Format == DXGI_FORMAT_P010);
+
+        // Geometry, identical to the video-processor path.
+        let rotation_quarter_turns = view.rotation_quarter_turns % 4;
+        let (disp_w, disp_h) = surface.display_size();
+        let (display_width, display_height) = if rotation_quarter_turns % 2 == 1 {
+            (disp_h, disp_w)
+        } else {
+            (disp_w, disp_h)
+        };
+        let base_rect = aspect_fit_rect(display_width, display_height, output_width, output_height);
+        let (source_rect, dest_rect) = compute_zoomed_rects(
+            &base_rect,
+            view,
+            surface.width,
+            surface.height,
+            output_width,
+            output_height,
+        );
+        let vertices = tone_map_quad_vertices(
+            &source_rect,
+            &dest_rect,
+            surface.width,
+            surface.height,
+            output_width,
+            output_height,
+            rotation_quarter_turns,
+        );
+
+        let viewport = D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: output_width.max(1) as f32,
+            Height: output_height.max(1) as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
+        let strides = [size_of::<SubtitleVertex>() as u32];
+        let offsets = [0u32];
+
+        // The context_lock serialises use of the immediate context with the
+        // decode worker's CopySubresourceRegion — same contract as the video
+        // processor path.
+        let _lock = self.lock_context();
+
+        // SAFETY:
+        // - both plane views reference `surface.texture`, alive for this call
+        // - the mapped writes copy exactly the buffers' declared byte widths
+        // - every bound object belongs to this device
+        unsafe {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context.Map(
+                &renderer.vertex_buffer,
+                0,
+                D3D11_MAP_WRITE_DISCARD,
+                0,
+                Some(&mut mapped),
+            )?;
+            std::ptr::copy_nonoverlapping(
+                vertices.as_ptr(),
+                mapped.pData.cast::<SubtitleVertex>(),
+                vertices.len(),
+            );
+            self.context.Unmap(&renderer.vertex_buffer, 0);
+
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context.Map(
+                &renderer.constant_buffer,
+                0,
+                D3D11_MAP_WRITE_DISCARD,
+                0,
+                Some(&mut mapped),
+            )?;
+            std::ptr::copy_nonoverlapping(&params, mapped.pData.cast::<ToneMapParams>(), 1);
+            self.context.Unmap(&renderer.constant_buffer, 0);
+
+            // The quad covers only the dest rect, so the letterbox bars are
+            // this clear. (The video processor filled them itself, from the
+            // output target rect.)
+            self.context
+                .OMSetRenderTargets(Some(&[Some(render_target.view.clone())]), None);
+            self.context
+                .ClearRenderTargetView(&render_target.view, &[0.0, 0.0, 0.0, 1.0]);
+
+            // Zoom/pan can push the picture entirely off-screen; the cleared
+            // backbuffer is then the whole (correct) frame.
+            if dest_rect.right <= dest_rect.left || dest_rect.bottom <= dest_rect.top {
+                return Ok(());
+            }
+
+            self.context.RSSetViewports(Some(&[viewport]));
+            self.context
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            self.context.IASetInputLayout(Some(&renderer.input_layout));
+            self.context.IASetVertexBuffers(
+                0,
+                1,
+                Some([Some(renderer.vertex_buffer.clone())].as_ptr()),
+                Some(strides.as_ptr()),
+                Some(offsets.as_ptr()),
+            );
+            self.context
+                .VSSetShader(Some(&renderer.vertex_shader), None);
+            self.context.PSSetShader(Some(&renderer.pixel_shader), None);
+            self.context
+                .PSSetSamplers(0, Some(&[Some(renderer.sampler.clone())]));
+            self.context
+                .PSSetShaderResources(0, Some(&[Some(luma_view), Some(chroma_view)]));
+            self.context
+                .PSSetConstantBuffers(0, Some(&[Some(renderer.constant_buffer.clone())]));
+            self.context
+                .OMSetBlendState(None, Some(&[0.0, 0.0, 0.0, 0.0]), u32::MAX);
+            self.context.Draw(6, 0);
+
+            // Unbind the planes: the next frame copies into a texture the
+            // driver must not still see bound as a shader resource.
+            self.context.PSSetShaderResources(0, Some(&[None, None]));
         }
 
         Ok(())
@@ -1874,6 +2197,249 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             hdr_tone_map,
         })
     }
+}
+
+/// Vertex shader for the tone-map quad. Positions arrive already in NDC and
+/// texcoords already in texture space — both are computed on the CPU from the
+/// same rects the video-processor path uses — so there is nothing to transform.
+const HDR_TONE_MAP_VERTEX_SHADER: &[u8] = b"
+struct VSInput {
+    float3 pos : POSITION;
+    float2 uv : TEXCOORD0;
+};
+struct PSInput {
+    float4 pos : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+PSInput main(VSInput input) {
+    PSInput output;
+    output.pos = float4(input.pos, 1.0f);
+    output.uv = input.uv;
+    return output;
+}
+\0";
+
+/// The HDR→SDR tone-map pixel shader: YCbCr → R'G'B' → linear light → tone
+/// curve → BT.709 → sRGB encode, sampling the decoded frame's luma and chroma
+/// planes directly.
+///
+/// Luminance is normalized so that 1.0 is diffuse ("graphics") white, which
+/// BT.2408 puts at 203 cd/m². That is what makes the two transfers
+/// comparable: a PQ signal is absolute (1.0 = 10 000 cd/m²) while an HLG
+/// signal is scene-referred and only becomes display light after the OOTF.
+/// Once both are in units of diffuse white, one tone curve serves both.
+const HDR_TONE_MAP_PIXEL_SHADER: &[u8] = b"
+Texture2D<float>  luma_tex   : register(t0);
+Texture2D<float2> chroma_tex : register(t1);
+SamplerState      samp       : register(s0);
+
+cbuffer ToneMapParams : register(b0) {
+    float4 range;   // y_offset, y_scale, c_offset, c_scale
+    float4 params;  // sample_scale, transfer (0 = PQ, 1 = HLG), knee, unused
+};
+
+// BT.2020 non-constant-luminance luma coefficients.
+static const float3 LUMA_BT2020 = float3(0.2627f, 0.6780f, 0.0593f);
+
+static const float PQ_PEAK_NITS = 10000.0f;
+static const float HLG_PEAK_NITS = 1000.0f;
+static const float DIFFUSE_WHITE_NITS = 203.0f;
+
+// SMPTE ST 2084 EOTF. Returns [0,1], where 1.0 is PQ_PEAK_NITS.
+float3 pq_eotf(float3 signal) {
+    const float m1 = 0.1593017578125f;
+    const float m2 = 78.84375f;
+    const float c1 = 0.8359375f;
+    const float c2 = 18.8515625f;
+    const float c3 = 18.6875f;
+    float3 encoded = pow(max(signal, 0.0f), 1.0f / m2);
+    float3 numerator = max(encoded - c1, 0.0f);
+    float3 denominator = max(c2 - c3 * encoded, 1e-6f);
+    return pow(numerator / denominator, 1.0f / m1);
+}
+
+// BT.2100 HLG inverse OETF: signal -> scene light in [0,1].
+float3 hlg_inverse_oetf(float3 signal) {
+    const float a = 0.17883277f;
+    const float b = 0.28466892f;
+    const float c = 0.55991073f;
+    float3 lower = (signal * signal) / 3.0f;
+    float3 upper = (exp((signal - c) / a) + b) / 12.0f;
+    return lerp(lower, upper, step(0.5f, signal));
+}
+
+// Highlight roll-off. Identity below the knee -- so midtones, skin, and sky
+// pass through untouched -- then an exponential shoulder that is
+// C1-continuous at the knee and asymptotic to 1.0, so however bright the
+// input, it compresses rather than clipping to a flat white.
+float tone_curve(float value, float knee) {
+    if (value <= knee) {
+        return value;
+    }
+    float headroom = 1.0f - knee;
+    return knee + headroom * (1.0f - exp(-(value - knee) / headroom));
+}
+
+float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
+    float luma_sample = luma_tex.Sample(samp, uv).x * params.x;
+    float2 chroma_sample = chroma_tex.Sample(samp, uv).xy * params.x;
+
+    float luma = (luma_sample - range.x) * range.y;
+    float cb = (chroma_sample.x - range.z) * range.w;
+    float cr = (chroma_sample.y - range.z) * range.w;
+
+    // BT.2020 NCL YCbCr -> nonlinear R'G'B'.
+    float3 signal;
+    signal.r = luma + 1.47460f * cr;
+    signal.g = luma - 0.16455f * cb - 0.57135f * cr;
+    signal.b = luma + 1.88140f * cb;
+    signal = saturate(signal);
+
+    // Transfer -> linear light, in units of diffuse white.
+    float3 linear_rgb;
+    if (params.y < 0.5f) {
+        linear_rgb = pq_eotf(signal) * (PQ_PEAK_NITS / DIFFUSE_WHITE_NITS);
+    } else {
+        float3 scene = hlg_inverse_oetf(signal);
+        // HLG OOTF: scene light -> display light, system gamma 1.2 at the
+        // 1000-nit nominal peak. Driven by scene luminance so it scales the
+        // channels together instead of shifting hue.
+        float scene_luma = max(dot(scene, LUMA_BT2020), 1e-6f);
+        linear_rgb = scene * pow(scene_luma, 0.2f) * (HLG_PEAK_NITS / DIFFUSE_WHITE_NITS);
+    }
+
+    // Per-channel roll-off. Highlights desaturate toward white, the way film
+    // does, and no channel can leave [0,1]. Scaling by a luminance ratio
+    // instead would preserve hue but leave individual channels above 1.0, and
+    // clipping those shifts hue anyway -- worse, and unevenly.
+    float3 mapped;
+    mapped.r = tone_curve(linear_rgb.r, params.z);
+    mapped.g = tone_curve(linear_rgb.g, params.z);
+    mapped.b = tone_curve(linear_rgb.b, params.z);
+
+    // BT.2020 -> BT.709 primaries, in linear light. Colors outside the BT.709
+    // gamut go negative here and are clipped by the saturate.
+    float3 rgb709;
+    rgb709.r =  1.66049f * mapped.r - 0.58764f * mapped.g - 0.07285f * mapped.b;
+    rgb709.g = -0.12455f * mapped.r + 1.13290f * mapped.g - 0.00835f * mapped.b;
+    rgb709.b = -0.01824f * mapped.r - 0.10057f * mapped.g + 1.11881f * mapped.b;
+    rgb709 = saturate(rgb709);
+
+    // sRGB encode: the transfer the 8-bit SDR backbuffer is scanned out with
+    // (DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709).
+    float3 encoded = (rgb709 <= 0.0031308f)
+        ? rgb709 * 12.92f
+        : 1.055f * pow(rgb709, 1.0f / 2.4f) - 0.055f;
+
+    return float4(encoded, 1.0f);
+}
+\0";
+
+/// The SRV formats that address a planar video texture's two planes. D3D11
+/// does not let a shader sample NV12/P010 directly: it exposes each plane as
+/// its own view, the luma plane at full resolution and the chroma plane at
+/// half in both axes. Normalized texture coordinates address both, so the
+/// chroma view's bilinear filter *is* the chroma upsampler.
+fn plane_srv_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT), Box<dyn Error>> {
+    if format == DXGI_FORMAT_P010 {
+        Ok((DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM))
+    } else if format == DXGI_FORMAT_NV12 {
+        Ok((DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM))
+    } else {
+        Err(Box::new(D3D11Error(
+            "HDR tone mapping needs an NV12 or P010 decoded frame",
+        )))
+    }
+}
+
+fn create_plane_srv(
+    device: &ID3D11Device,
+    texture: &ID3D11Texture2D,
+    format: DXGI_FORMAT,
+) -> Result<ID3D11ShaderResourceView, Box<dyn Error>> {
+    let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+        Format: format,
+        ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
+        Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+            Texture2D: D3D11_TEX2D_SRV {
+                MostDetailedMip: 0,
+                MipLevels: 1,
+            },
+        },
+    };
+
+    // SAFETY: the descriptor is fully initialized and `texture` belongs to
+    // `device`; `view` targets a local that outlives the call.
+    let mut view = None;
+    unsafe {
+        device.CreateShaderResourceView(texture, Some(&desc), Some(&mut view))?;
+    }
+    view.ok_or_else(|| {
+        Box::new(D3D11Error(
+            "CreateShaderResourceView returned no plane view",
+        )) as Box<dyn Error>
+    })
+}
+
+/// Two triangles covering `dest_rect` of the output, textured from
+/// `source_rect` of the decoded frame.
+///
+/// Rotation is applied by permuting which source corner each destination
+/// corner samples, which is the shader-path equivalent of the video
+/// processor's `VideoProcessorSetStreamRotation`.
+fn tone_map_quad_vertices(
+    source_rect: &RECT,
+    dest_rect: &RECT,
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    rotation_quarter_turns: u8,
+) -> [SubtitleVertex; 6] {
+    let output_width = output_width.max(1) as f32;
+    let output_height = output_height.max(1) as f32;
+    let source_width = source_width.max(1) as f32;
+    let source_height = source_height.max(1) as f32;
+
+    let left = dest_rect.left as f32 / output_width * 2.0 - 1.0;
+    let right = dest_rect.right as f32 / output_width * 2.0 - 1.0;
+    let top = 1.0 - dest_rect.top as f32 / output_height * 2.0;
+    let bottom = 1.0 - dest_rect.bottom as f32 / output_height * 2.0;
+
+    let u0 = source_rect.left as f32 / source_width;
+    let u1 = source_rect.right as f32 / source_width;
+    let v0 = source_rect.top as f32 / source_height;
+    let v1 = source_rect.bottom as f32 / source_height;
+
+    // Destination corners, and the source corners they sample at zero
+    // rotation, both clockwise from the top-left.
+    let positions = [
+        [left, top, 0.0],
+        [right, top, 0.0],
+        [right, bottom, 0.0],
+        [left, bottom, 0.0],
+    ];
+    let source_corners = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+
+    // Rotating the picture `r` quarter-turns clockwise puts the source's
+    // top-left corner `r` places clockwise around the destination, so each
+    // destination corner samples the source corner `r` places back.
+    let r = (rotation_quarter_turns % 4) as usize;
+    let vertex = |corner: usize| SubtitleVertex {
+        position: positions[corner],
+        texcoord: source_corners[(corner + 4 - r) % 4],
+    };
+
+    // Winding matches subtitle_quad_vertices, which the rasterizer's default
+    // state already accepts.
+    [
+        vertex(0),
+        vertex(1),
+        vertex(3),
+        vertex(3),
+        vertex(1),
+        vertex(2),
+    ]
 }
 
 fn subtitle_quad_vertices(
@@ -3457,4 +4023,163 @@ fn blend_pixel(dest: &mut [u8], src: [u8; 4]) {
         dest[i] = ((src[i] as u32 * sa + dest[i] as u32 * da * (255 - sa) / 255) / out_a) as u8;
     }
     dest[3] = out_a as u8;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::hdr::{HdrToneMapSignal, HdrTransfer};
+
+    /// Apply the constant buffer's level math exactly as the shader's first
+    /// three lines do, so these tests pin the numbers the GPU actually uses.
+    fn decode_levels(params: &ToneMapParams, luma_code: f32, chroma_code: f32) -> (f32, f32) {
+        let [y_offset, y_scale, c_offset, c_scale] = params.range;
+        let scale = params.params[0];
+        let luma = (luma_code * scale - y_offset) * y_scale;
+        let chroma = (chroma_code * scale - c_offset) * c_scale;
+        (luma, chroma)
+    }
+
+    fn signal(transfer: HdrTransfer, full_range: bool) -> HdrToneMapSignal {
+        HdrToneMapSignal {
+            transfer,
+            full_range,
+        }
+    }
+
+    #[test]
+    fn studio_10_bit_levels_map_video_black_and_white_to_0_and_1() {
+        let params = ToneMapParams::new(signal(HdrTransfer::Hlg, false), true);
+
+        // P010 puts the 10-bit code in the high bits of a 16-bit word, so a
+        // UNORM fetch of code C returns C * 64 / 65535 — that is what the
+        // shader samples, and sample_scale must undo it.
+        let fetch = |code_10bit: f32| code_10bit * 64.0 / 65535.0;
+
+        // Studio range: 64 is video black, 940 nominal white, 512 neutral.
+        let (black, neutral) = decode_levels(&params, fetch(64.0), fetch(512.0));
+        assert!(
+            black.abs() < 1e-4,
+            "video black must decode to 0.0, got {black}"
+        );
+        assert!(
+            neutral.abs() < 1e-4,
+            "neutral chroma must decode to 0.0, got {neutral}"
+        );
+
+        let (white, _) = decode_levels(&params, fetch(940.0), fetch(512.0));
+        assert!(
+            (white - 1.0).abs() < 1e-4,
+            "nominal white must decode to 1.0, got {white}"
+        );
+
+        // Chroma extremes land on ±0.5 (the Cb/Cr range the matrix expects).
+        let (_, high) = decode_levels(&params, fetch(64.0), fetch(960.0));
+        assert!(
+            (high - 0.5).abs() < 1e-3,
+            "chroma 960 must be +0.5, got {high}"
+        );
+    }
+
+    #[test]
+    fn studio_8_bit_levels_map_video_black_and_white_to_0_and_1() {
+        // NV12: the UNORM fetch already normalizes against 255, so no rescale.
+        let params = ToneMapParams::new(signal(HdrTransfer::Pq, false), false);
+        assert_eq!(params.params[0], 1.0, "8-bit needs no sample rescale");
+
+        let (black, _) = decode_levels(&params, 16.0 / 255.0, 128.0 / 255.0);
+        let (white, _) = decode_levels(&params, 235.0 / 255.0, 128.0 / 255.0);
+        assert!(
+            black.abs() < 1e-4,
+            "video black must decode to 0.0, got {black}"
+        );
+        assert!(
+            (white - 1.0).abs() < 1e-4,
+            "nominal white must decode to 1.0, got {white}"
+        );
+    }
+
+    #[test]
+    fn full_range_levels_pass_luma_through_and_center_chroma() {
+        let params = ToneMapParams::new(signal(HdrTransfer::Hlg, true), true);
+        let fetch = |code_10bit: f32| code_10bit * 64.0 / 65535.0;
+
+        // Full range: code 0 is black and 1023 is white, with no footroom.
+        let (black, neutral) = decode_levels(&params, fetch(0.0), fetch(512.0));
+        let (white, _) = decode_levels(&params, fetch(1023.0), fetch(512.0));
+        assert!(
+            black.abs() < 1e-4,
+            "full-range black must be 0.0, got {black}"
+        );
+        assert!(
+            (white - 1.0).abs() < 1e-4,
+            "full-range white must be 1.0, got {white}"
+        );
+        assert!(
+            neutral.abs() < 1e-4,
+            "full-range neutral chroma must be 0.0, got {neutral}"
+        );
+    }
+
+    #[test]
+    fn transfer_selector_distinguishes_pq_from_hlg() {
+        // The shader branches on this float; swapping the two applies the
+        // wrong EOTF, which is a gross error rather than a shade of grading.
+        let pq = ToneMapParams::new(signal(HdrTransfer::Pq, false), true);
+        let hlg = ToneMapParams::new(signal(HdrTransfer::Hlg, false), true);
+        assert_eq!(pq.params[1], 0.0);
+        assert_eq!(hlg.params[1], 1.0);
+    }
+
+    #[test]
+    fn rotation_permutes_which_source_corner_each_dest_corner_samples() {
+        let source = RECT {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 50,
+        };
+        let dest = RECT {
+            left: 0,
+            top: 0,
+            right: 200,
+            bottom: 100,
+        };
+        // Vertex 0 is the destination's top-left corner (see the winding).
+        let top_left_uv = |turns: u8| {
+            tone_map_quad_vertices(&source, &dest, 100, 50, 200, 100, turns)[0].texcoord
+        };
+
+        // Unrotated, the destination's top-left samples the source's top-left.
+        assert_eq!(top_left_uv(0), [0.0, 0.0]);
+        // Rotating the picture 180° puts the source's bottom-right there.
+        assert_eq!(top_left_uv(2), [1.0, 1.0]);
+        // 90° clockwise puts the source's bottom-left there, 270° its top-right.
+        assert_eq!(top_left_uv(1), [0.0, 1.0]);
+        assert_eq!(top_left_uv(3), [1.0, 0.0]);
+    }
+
+    #[test]
+    fn quad_maps_the_dest_rect_onto_normalized_device_coordinates() {
+        // A letterboxed dest rect must land where the video processor would
+        // have put it: the two paths must not disagree by a pixel.
+        let source = RECT {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let dest = RECT {
+            left: 50,
+            top: 0,
+            right: 150,
+            bottom: 100,
+        };
+        let quad = tone_map_quad_vertices(&source, &dest, 100, 100, 200, 100, 0);
+
+        // x = 50 of 200 -> -0.5 in NDC; y = 0 -> +1.0 (NDC y is up).
+        assert_eq!(quad[0].position, [-0.5, 1.0, 0.0]);
+        // The opposite corner: x = 150 -> +0.5, y = 100 -> -1.0.
+        assert_eq!(quad[5].position, [0.5, -1.0, 0.0]);
+    }
 }

@@ -350,28 +350,22 @@ impl DecodeSession {
                 }
                 VideoPresentationPath::HdrToSdrToneMapRequired => {
                     // Present HDR (PQ or HLG) through the verified SDR
-                    // swapchain: resolve the decoded stream's DXGI input color
-                    // space and stamp every surface with it, so the render
-                    // path drives the video processor's HDR→SDR tone-mapping
-                    // (ID3D11VideoContext1 + sRGB output). Resolution can still
-                    // reject non-standard signals (full-range PQ, CL matrices)
-                    // as typed errors — better a clean open failure than a
-                    // mis-tone-mapped frame.
-                    let input_color_space =
-                        tone_map_stream_color_space(&video.content_color).map_err(|e| e.to_string())?;
-                    // Gate on the GPU's real capability *now*, at open, so an
-                    // unsupported HDR combination fails the open cleanly. Not
-                    // every video processor can convert HDR straight to 8-bit
-                    // SDR in one pass (some only reach a PQ or float target);
-                    // deferring this to the first blt would surface as a
-                    // present error that device recovery misreads as
-                    // device-lost and retries forever.
-                    let (probe_w, probe_h) = video_coded_dimensions(input.0, video.stream_index);
-                    let supported = device
-                        .supports_hdr_tone_map(probe_w, probe_h, input_color_space)
+                    // swapchain by tone-mapping it in our own pixel shader
+                    // (see HdrToneMapRenderer). Resolve the stream's DXGI color
+                    // space and stamp every surface with it: it is what the
+                    // renderer decodes into shader inputs, and resolving it
+                    // here still rejects non-standard signals (full-range PQ,
+                    // constant-luminance matrices) as typed errors — better a
+                    // clean open failure than a mis-tone-mapped frame.
+                    let input_color_space = tone_map_stream_color_space(&video.content_color)
                         .map_err(|e| e.to_string())?;
-                    if !supported {
-                        return Err(HdrError::HdrFormatConversionUnsupported.to_string());
+                    // Gate on the GPU's real capability *now*, at open, so an
+                    // incapable device fails the open cleanly; deferring it to
+                    // the first draw would surface as a render error that
+                    // device recovery misreads as device-lost and retries
+                    // forever.
+                    if !device.supports_hdr_shader_tone_map() {
+                        return Err(HdrError::HdrToneMapUnavailable.to_string());
                     }
                     video.tone_map_input = Some(input_color_space);
                 }
