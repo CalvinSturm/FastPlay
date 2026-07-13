@@ -964,6 +964,7 @@ impl D3D11Device {
                 surface.height,
                 output_width,
                 output_height,
+                rotation_quarter_turns,
             );
 
             let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
@@ -1320,6 +1321,7 @@ impl D3D11Device {
             surface.height,
             output_width,
             output_height,
+            rotation_quarter_turns,
         );
         let vertices = tone_map_quad_vertices(
             &source_rect,
@@ -2653,12 +2655,20 @@ fn aspect_fit_rect(
     }
 }
 
-/// Computes clamped source and dest rects for the D3D11 video processor.
+/// Computes clamped source and dest rects for the render paths.
 ///
-/// The video processor requires both rects to stay within their respective
-/// texture bounds. When the view transform would push the dest rect outside
-/// the output, we clip it and adjust the source rect proportionally so only
-/// the visible portion of the video is sampled.
+/// Both rects must stay within their respective texture bounds. When the view
+/// transform would push the dest rect outside the output, we clip it and adjust
+/// the source rect proportionally so only the visible portion of the video is
+/// sampled.
+///
+/// `rotation_quarter_turns` is the display rotation applied *after* this crop
+/// (by the video processor's stream rotation, or by the tone-map shader's
+/// corner permutation). It is needed here because the destination axes are the
+/// source axes only at 0°: at 90°/270° a horizontal span of the *presented*
+/// picture is a vertical span of the source texture. Cropping on the wrong axis
+/// takes a region of the wrong shape, which the rotate-then-fit stretches to
+/// fill the dest rect — so zooming a rotated video used to smear it.
 fn compute_zoomed_rects(
     base: &RECT,
     view: &crate::render::ViewTransform,
@@ -2666,6 +2676,7 @@ fn compute_zoomed_rects(
     source_height: u32,
     output_width: u32,
     output_height: u32,
+    rotation_quarter_turns: u8,
 ) -> (RECT, RECT) {
     let full_source = RECT {
         left: 0,
@@ -2715,19 +2726,30 @@ fn compute_zoomed_rects(
         );
     }
 
-    // Map the clipped region back to source texture coordinates.
+    // The fractions of the *presented* (already-rotated) picture that survive
+    // the clip, along the destination's own axes.
+    let u0 = ((cl - vl) / vw).clamp(0.0, 1.0);
+    let u1 = ((cr - vl) / vw).clamp(0.0, 1.0);
+    let v0 = ((ct - vt) / vh).clamp(0.0, 1.0);
+    let v1 = ((cb - vt) / vh).clamp(0.0, 1.0);
+
+    // Undo the rotation to get the same region in the source texture's axes.
+    // Rotating the picture r quarter-turns clockwise maps source (su, sv) to
+    // destination (u, v); inverting that per r gives the source span.
+    let (su0, su1, sv0, sv1) = match rotation_quarter_turns % 4 {
+        1 => (v0, v1, 1.0 - u1, 1.0 - u0),
+        2 => (1.0 - u1, 1.0 - u0, 1.0 - v1, 1.0 - v0),
+        3 => (1.0 - v1, 1.0 - v0, u0, u1),
+        _ => (u0, u1, v0, v1),
+    };
+
     let sw = source_width as f32;
     let sh = source_height as f32;
-    let sl = ((cl - vl) / vw) * sw;
-    let st = ((ct - vt) / vh) * sh;
-    let sr = ((cr - vl) / vw) * sw;
-    let sb = ((cb - vt) / vh) * sh;
-
     let source_rect = RECT {
-        left: (sl.round() as i32).clamp(0, source_width as i32),
-        top: (st.round() as i32).clamp(0, source_height as i32),
-        right: (sr.round() as i32).clamp(1, source_width as i32),
-        bottom: (sb.round() as i32).clamp(1, source_height as i32),
+        left: ((su0 * sw).round() as i32).clamp(0, source_width as i32),
+        top: ((sv0 * sh).round() as i32).clamp(0, source_height as i32),
+        right: ((su1 * sw).round() as i32).clamp(1, source_width as i32),
+        bottom: ((sv1 * sh).round() as i32).clamp(1, source_height as i32),
     };
 
     let dest_rect = RECT {
@@ -4157,6 +4179,106 @@ mod tests {
         // 90° clockwise puts the source's bottom-left there, 270° its top-right.
         assert_eq!(top_left_uv(1), [0.0, 1.0]);
         assert_eq!(top_left_uv(3), [1.0, 0.0]);
+    }
+
+    /// Aspect of the picture as presented: the source crop, rotated.
+    fn presented_aspect(source: &RECT, rotation_quarter_turns: u8) -> f32 {
+        let w = (source.right - source.left) as f32;
+        let h = (source.bottom - source.top) as f32;
+        if rotation_quarter_turns % 2 == 1 {
+            h / w
+        } else {
+            w / h
+        }
+    }
+
+    fn aspect(rect: &RECT) -> f32 {
+        (rect.right - rect.left) as f32 / (rect.bottom - rect.top) as f32
+    }
+
+    #[test]
+    fn zooming_a_rotated_video_crops_on_the_rotated_axes() {
+        // A 16:9 source turned a quarter-turn and zoomed into a landscape
+        // window. The destination's horizontal axis is the source's *vertical*
+        // one here, so cropping on the source's own axes takes a region of the
+        // wrong shape — and the rotate-then-fit stretches it to fill the dest.
+        // That was the bug: zoom after rotate smeared the picture.
+        let view = crate::render::ViewTransform {
+            zoom: 2.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            rotation_quarter_turns: 1,
+        };
+        // Rotated display is 900x1600, aspect-fit into 1920x1080 => pillarboxed.
+        let base = aspect_fit_rect(900, 1600, 1920, 1080);
+        let (source, dest) = compute_zoomed_rects(&base, &view, 1600, 900, 1920, 1080, 1);
+
+        // The clip is full-width but only the middle half of the height of the
+        // presented picture, so the source keeps its full height and half its
+        // width — 800x900, not 1600x450.
+        assert_eq!(source.right - source.left, 800, "source crop width");
+        assert_eq!(source.bottom - source.top, 900, "source crop height");
+
+        // The real invariant: once rotated, the crop must match the shape of
+        // the rect it is fitted into, or it is being stretched.
+        let error = (presented_aspect(&source, 1) - aspect(&dest)).abs();
+        assert!(
+            error < 0.01,
+            "presented aspect {} must match dest aspect {}",
+            presented_aspect(&source, 1),
+            aspect(&dest)
+        );
+    }
+
+    #[test]
+    fn zooming_preserves_aspect_at_every_rotation() {
+        // Same invariant across all four rotations and both window shapes: the
+        // rotated crop must always match the destination it is fitted into.
+        for turns in 0..4u8 {
+            for (out_w, out_h) in [(1920u32, 1080u32), (1080, 1920)] {
+                let view = crate::render::ViewTransform {
+                    zoom: 1.8,
+                    pan_x: 40.0,
+                    pan_y: -25.0,
+                    rotation_quarter_turns: turns,
+                };
+                let (dw, dh) = if turns % 2 == 1 {
+                    (900, 1600)
+                } else {
+                    (1600, 900)
+                };
+                let base = aspect_fit_rect(dw, dh, out_w, out_h);
+                let (source, dest) =
+                    compute_zoomed_rects(&base, &view, 1600, 900, out_w, out_h, turns);
+
+                let error = (presented_aspect(&source, turns) - aspect(&dest)).abs();
+                assert!(
+                    error < 0.02,
+                    "turns={turns} out={out_w}x{out_h}: presented {} vs dest {}",
+                    presented_aspect(&source, turns),
+                    aspect(&dest)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unrotated_zoom_is_unchanged() {
+        // The 0-turn path must keep its pre-existing behavior exactly: this is
+        // the pixel-verified case that shipped.
+        let view = crate::render::ViewTransform {
+            zoom: 2.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            rotation_quarter_turns: 0,
+        };
+        let base = aspect_fit_rect(1600, 900, 1920, 1080);
+        let (source, _) = compute_zoomed_rects(&base, &view, 1600, 900, 1920, 1080, 0);
+        // Zoom 2x centered keeps the middle half of each axis.
+        assert_eq!(source.left, 400);
+        assert_eq!(source.right, 1200);
+        assert_eq!(source.top, 225);
+        assert_eq!(source.bottom, 675);
     }
 
     #[test]
