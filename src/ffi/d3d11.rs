@@ -490,13 +490,24 @@ impl D3D11Device {
         &self.device
     }
 
-    pub(crate) fn raw_device_ptr(&self) -> *mut c_void {
-        // SAFETY: as_raw() borrows the COM pointer without incrementing
-        // the reference count.  FFmpeg's av_hwdevice_ctx_init calls
-        // AddRef internally on the device it receives, so handing it
-        // an un-AddRef'd pointer is correct — the previous clone()
-        // + into_raw() leaked one COM reference per call.
-        self.device.as_raw()
+    /// An **owned** reference to the D3D11 device, for FFmpeg's D3D11VA
+    /// hardware-device context.
+    ///
+    /// `AVD3D11VADeviceContext` takes ownership of the `device` it is given:
+    /// its uninit calls `ID3D11Device::Release` on it when the decoder is torn
+    /// down. It does not AddRef on init. So the caller must hand over a
+    /// reference it owns — `clone()` AddRefs, `into_raw()` transfers it.
+    ///
+    /// Passing a borrowed pointer (`as_raw()`) instead makes every decoder
+    /// teardown release the shared device against an AddRef that never
+    /// happened. One open survives that, because the device has many other
+    /// references; but each open/teardown cycle nets one release, so rapid
+    /// file switching (spamming PageUp/PageDown through a queue) walks the
+    /// refcount to zero, frees the device out from under everyone, and the
+    /// next call faults inside d3d11.dll — reached from avutil, as the D3D11VA
+    /// frames pool tears down against the corpse.
+    pub(crate) fn owned_device_ptr(&self) -> *mut c_void {
+        ID3D11Device::into_raw(self.device.clone())
     }
 
     /// Whether the device exposes `ID3D11VideoContext1` (required for the
