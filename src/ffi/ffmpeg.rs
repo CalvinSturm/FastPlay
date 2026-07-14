@@ -1862,8 +1862,16 @@ unsafe fn configure_hw_device(
         return Err("D3D11 hwctx was null".into());
     }
 
-    (*d3d11_ctx).device = device.raw_device_ptr().cast();
-    ffmpeg_check(av_hwdevice_ctx_init(hw_device), "av_hwdevice_ctx_init")?;
+    // Hand over a reference FFmpeg owns: the D3D11VA hwdevice context releases
+    // this device when the decoder is torn down (see `owned_device_ptr`).
+    (*d3d11_ctx).device = device.owned_device_ptr().cast();
+    // On failure, unref the buffer rather than returning early: freeing it runs
+    // FFmpeg's uninit, which releases the device reference transferred above.
+    // Leaking it here would turn a failed open into a permanently pinned device.
+    if let Err(error) = ffmpeg_check(av_hwdevice_ctx_init(hw_device), "av_hwdevice_ctx_init") {
+        av_buffer_unref(&mut hw_device);
+        return Err(error);
+    }
     (*codec_context).hw_device_ctx = av_buffer_ref(hw_device);
     av_buffer_unref(&mut hw_device);
     if (*codec_context).hw_device_ctx.is_null() {
