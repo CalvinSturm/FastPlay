@@ -31,10 +31,11 @@ pub(crate) enum RendererConstructor {
     /// swapchain with the verified HDR10 color space, but is not yet wired
     /// into the production render path (passthrough commit).
     Hdr10Skeleton,
-    /// The HDR-to-SDR tone-mapping path. Tone-mapping is performed by the
-    /// video processor at blt time (see `render_video_surface`), writing SDR
-    /// sRGB into the ordinary 8-bit backbuffer, so this dispatches to the
-    /// same verified SDR swapchain constructor — no distinct HDR swapchain.
+    /// The HDR-to-SDR tone-mapping path. Tone-mapping is performed by our own
+    /// pixel shader at draw time (`HdrToneMapRenderer`, see
+    /// `render_video_surface_tone_mapped`), writing SDR sRGB into the ordinary
+    /// 8-bit backbuffer, so this dispatches to the same verified SDR swapchain
+    /// constructor — no distinct HDR swapchain.
     HdrToSdrToneMap(HdrToSdrRendererCtor),
 }
 
@@ -55,14 +56,16 @@ pub(crate) fn renderer_constructor_for_path(
     }
 }
 
-/// HDR-to-SDR tone-mapping renderer. The conversion is done by the GPU
-/// video processor during `render_video_surface` (it tags the decoded HDR
-/// stream color space and an sRGB output space, and the driver tone-maps),
-/// writing SDR sRGB straight into the ordinary 8-bit backbuffer. The
-/// swapchain is therefore the verified SDR swapchain — this delegates to the
-/// same `SwapChainPresenter::new` the SDR path uses. `content`/`capabilities`
-/// are unused here because the per-frame color spaces are resolved from the
-/// surface's tone-map tag at blt time, not baked into the swapchain.
+/// HDR-to-SDR tone-mapping renderer. The conversion is done by our own pixel
+/// shader during `render_video_surface_tone_mapped` (`HdrToneMapRenderer`
+/// samples the decoded planes and performs the transfer, tone-curve, and
+/// gamut math itself — the GPU video processor cannot do this conversion; see
+/// that type's docs), writing SDR sRGB straight into the ordinary 8-bit
+/// backbuffer. The swapchain is therefore the verified SDR swapchain — this
+/// delegates to the same `SwapChainPresenter::new` the SDR path uses.
+/// `content`/`capabilities` are unused here because the per-frame shader
+/// inputs are resolved from the surface's tone-map tag at draw time, not
+/// baked into the swapchain.
 pub(crate) fn create_hdr_to_sdr_renderer(
     window: &NativeWindow,
     device: &D3D11Device,
@@ -96,8 +99,9 @@ impl SwapChainPresenter {
     /// the HDR processor color spaces (the device's HDR processor
     /// configuration is unwired); tone mapping stays a typed error.
     ///
-    /// Not yet called by presenter.rs — startup and device recovery are
-    /// always SDR today, and HDR files dead-end at open with a typed error.
+    /// Not yet called by presenter.rs — startup and device recovery always
+    /// build the SDR swapchain today, which is also what the tone-map path
+    /// presents through; only `UnsupportedHdr` content dead-ends at open.
     /// The HDR passthrough commit migrates presenter.rs here, keyed on the
     /// selected [`VideoPresentationPath`].
     ///

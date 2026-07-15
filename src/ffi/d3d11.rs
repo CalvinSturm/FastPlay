@@ -129,7 +129,10 @@ pub(crate) struct SubtitleRenderer {
 ///
 /// The vertex and constant buffers are `DYNAMIC` and rewritten each frame
 /// (geometry follows the window/zoom/rotation; the constants follow the
-/// stream), so the whole path allocates nothing per frame.
+/// stream). The two per-plane shader-resource views are still created per
+/// frame in `render_video_surface_tone_mapped` — every decoded frame arrives
+/// in a freshly allocated texture, so there is no stable identity to cache
+/// them against.
 pub(crate) struct HdrToneMapRenderer {
     vertex_shader: ID3D11VertexShader,
     pixel_shader: ID3D11PixelShader,
@@ -228,9 +231,9 @@ pub(crate) struct VideoSurface {
     pub(crate) sar_den: u32,
     pub(crate) color: SurfaceColor,
     /// When `Some`, this frame carries HDR content that must be tone-mapped
-    /// to SDR by the video processor: the value is the decoded stream's DXGI
-    /// input color space (PQ or HLG), set through `ID3D11VideoContext1`
-    /// with an sRGB output space so the driver performs HDR→SDR conversion.
+    /// to SDR by our own pixel shader ([`HdrToneMapRenderer`]): the value is
+    /// the decoded stream's DXGI input color space (PQ or HLG), decoded into
+    /// shader inputs by `render::hdr::tone_map_signal` at draw time.
     /// `None` is the pixel-verified SDR path, where `color` alone drives the
     /// legacy matrix/range configuration. Constant for every frame of one
     /// opened file (resolved once at decoder open).

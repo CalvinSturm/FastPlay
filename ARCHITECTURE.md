@@ -33,7 +33,7 @@ The following are explicitly **out of scope** for initial implementation:
 - browser/web UI
 - plugin system
 - advanced subtitle styling engine
-- HDR tone mapping
+- native HDR passthrough (HDR *is* tone-mapped to SDR since v0.4.2 — see §21)
 - frame interpolation
 - AI enhancement during playback
 - cross-platform support
@@ -641,7 +641,7 @@ Fail open with visible error when no sane path exists.
 
 ## 21. Color / HDR Policy
 
-v1 prioritizes correctness and stability over ambitious HDR handling.
+Correctness and stability take priority over ambitious HDR handling.
 
 ### Supported-first policy
 
@@ -650,9 +650,30 @@ v1 prioritizes correctness and stability over ambitious HDR handling.
 * P010 accepted conservatively
 * preserve range metadata where possible
 
+### Shipped HDR behavior (v0.4.2)
+
+* HDR10 PQ and HLG play, tone-mapped to SDR. The active conversion is
+  FastPlay's own pixel shader (`HdrToneMapRenderer`, `src/ffi/d3d11.rs`) — not
+  the GPU video processor, whose HDR→8-bit-SDR conversion is unavailable on
+  real hardware (probed on NVIDIA; see `docs/release-notes-v0.4.2.md`).
+* Output stays the ordinary SDR `B8G8R8A8` swap chain. Production never calls
+  `SetColorSpace1` or `SetHDRMetaData`.
+* Native HDR passthrough is not enabled. `display_hdr_active` (in
+  `HdrPresentationCapabilities`) stays false pending separate passthrough
+  validation, so the passthrough path is unreachable in production.
+* The tone map is fixed (203 cd/m² diffuse white, knee 0.75), not
+  metadata-driven: mastering-display and content-light metadata are not used
+  to drive the curve.
+* Software decoding may reduce 10-bit HDR to 8-bit NV12 before tone mapping,
+  which can introduce banding.
+* Classification is conservative: contradictory or incomplete HDR signalling
+  is declined at open with a typed error, never guessed into a path.
+
 ### Deferred
 
-* advanced HDR tone mapping
+* native HDR passthrough (skeleton exists; gated off)
+* metadata-aware tone mapping
+* validation on an HDR-active Windows desktop
 * wide gamut correctness polish
 * full HDR UX
 

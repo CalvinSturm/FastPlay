@@ -133,6 +133,32 @@ These stay out of scope (consistent with `ARCHITECTURE.md §2` and `AGENTS.md`):
 - Making `PlaybackSession` a trait, or introducing a second coordinator.
 - Workspace / multi-crate split.
 - Streaming, playlists / media library, plugins, web UI.
-- HDR tone mapping, frame interpolation, extra hw decode backends.
+- Native HDR passthrough and metadata-driven tone mapping (HDR10 PQ/HLG
+  already tone-map to SDR in a pixel shader as of v0.4.2; see
+  `ARCHITECTURE.md` §21), frame interpolation, extra hw decode backends.
 - Cross-platform abstractions.
 - Any change to steady-state playback behavior in the name of "cleanup".
+
+---
+
+## 6. HDR follow-ups (recorded 2026-07-14, not scheduled)
+
+From `docs/audits/2026-07-14-hdr-final-audit.md`. None block v0.4.2; none may
+change production HDR behavior without their own validation:
+
+1. The `Hdr10Passthrough` arm in `DecodeSession::open` returns an open
+   *failure* if ever selected. Before `display_hdr_active` detection is
+   enabled, that arm must fall back to the tone-map path (or passthrough must
+   be implemented) — otherwise HDR-on-HDR-display regresses from "plays
+   tone-mapped" to "fails to open".
+2. Open-time diagnostics: log detected color metadata, chosen classification,
+   selected presentation path, and resolved color space in `session.log`.
+3. A scripted entry point for mixed HDR/SDR queue validation (queues are only
+   reachable via OLE drag-drop today; the CLI seeds a single-file queue).
+4. Decide the fate of the dead frame-metadata refinement functions in
+   `src/ffi/ffmpeg.rs` (`refine_color_from_first_frame`,
+   `extract_hdr_metadata_from_frame`) — hidden by the module-wide
+   `allow(dead_code)`, and the latter errors when metadata is present if ever
+   wired as its comment describes.
+5. Visual validation of the tone-mapped SDR output on an HDR-active Windows
+   desktop.
