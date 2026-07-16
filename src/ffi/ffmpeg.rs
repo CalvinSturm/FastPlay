@@ -186,8 +186,9 @@ pub(crate) enum StreamStatus {
 /// Outcome of [`DecodeSession::open`]. The video worker acts on each variant:
 /// run the decode loop, exit quietly, or hand the file to the audio-only path.
 pub(crate) enum VideoOpen {
-    /// A video decode session is ready.
-    Ready(DecodeSession),
+    /// A video decode session is ready. Boxed because the session is far
+    /// larger than the other variants (clippy::large_enum_variant).
+    Ready(Box<DecodeSession>),
     /// Cancellation was signalled during the (expensive) open, so no decode
     /// work should begin.
     Cancelled,
@@ -207,8 +208,9 @@ pub(crate) enum VideoOpen {
 /// file, because the coordinator keeps sending seeks to a control channel that
 /// outlives the thread and so never learns the worker is gone.
 pub(crate) enum AudioOpen {
-    /// An audio decode session is ready.
-    Ready(AudioDecodeSession),
+    /// An audio decode session is ready. Boxed because the session is far
+    /// larger than the other variants (clippy::large_enum_variant).
+    Ready(Box<AudioDecodeSession>),
     /// The file has no audio stream. The coordinator plays video alone.
     NoAudioStream,
     /// A newer command (always a seek) arrived while the open was in flight.
@@ -446,7 +448,7 @@ impl DecodeSession {
         }
         let frame = Frame(frame);
 
-        Ok(VideoOpen::Ready(Self {
+        Ok(VideoOpen::Ready(Box::new(Self {
             input,
             video,
             audio,
@@ -456,7 +458,7 @@ impl DecodeSession {
             summary,
             position: start_position,
             interrupt,
-        }))
+        })))
     }
 
     /// Seek within the already-open file to `target` and flush the decoders,
@@ -765,7 +767,7 @@ impl AudioDecodeSession {
         }
         let frame = Frame(frame);
 
-        Ok(AudioOpen::Ready(Self {
+        Ok(AudioOpen::Ready(Box::new(Self {
             input,
             audio,
             audio_batch,
@@ -773,7 +775,7 @@ impl AudioDecodeSession {
             frame,
             produced_audio_frames: 0,
             interrupt,
-        }))
+        })))
     }
 
     /// Seek within the already-open file to `target` and flush the audio
