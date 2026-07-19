@@ -730,13 +730,10 @@ impl DxgiSwapChain {
                 | (Some(HdrShaderOutput::PqPassthrough), SwapchainKind::Hdr10Pq)
         );
         if !mode_matches_chain {
-            return Err(Box::new(DxgiError(
-                format!(
-                    "surface output mode {surface_mode:?} does not match the live {:?} swapchain",
-                    self.kind
-                )
-                .into(),
-            )));
+            return Err(Box::new(DxgiError(format!(
+                "surface output mode {surface_mode:?} does not match the live {:?} swapchain",
+                self.kind
+            ))));
         }
 
         if surface.hdr_shader.is_some() {
