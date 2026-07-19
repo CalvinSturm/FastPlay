@@ -101,6 +101,8 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 - FFmpeg-based demux and decode
 - hardware video decode on the preferred D3D11 path
 - software video decode fallback with D3D11 upload and present
+- native HDR output on HDR displays (HDR10 PQ and HLG, including iPhone recordings, on a 10-bit PQ swapchain with static metadata), with pixel-shader tone mapping to SDR on SDR displays
+- high-frame-rate playback (120 fps at full cadence on high-refresh displays)
 - WASAPI shared-mode audio playback
 - audio-master playback timing when audio exists
 - audio-only file playback (e.g. `.mp3`, `.flac`, `.wav`, `.m4a`, `.opus`) with the idle background shown while audio plays
@@ -147,7 +149,7 @@ FastPlay does **not** currently aim to provide:
 * plugin support
 * browser or web UI
 * advanced subtitle styling or embedded subtitle track selection
-* HDR passthrough to an HDR display (HDR is tone-mapped to SDR; see Known limitations)
+* metadata-driven (dynamic) tone mapping or exposure/curve controls
 * extra hardware backends beyond the current D3D11-first design
 
 Lightweight queue/folder playback is implemented (see Features); full playlists, persistent playlist files, and media-library behavior remain non-goals.
@@ -162,7 +164,7 @@ These are current real-world caveats, separate from the deliberate non-goals abo
 * **Queue is in-memory and session-only.** Dropping multiple files or a folder builds a play queue you can step through (`PageUp` / `PageDown`) with auto-advance at end of file, but the queue is not saved between runs, there are no persistent playlist files, folder scanning is non-recursive, and there is no shuffle, repeat, or in-window queue list.
 * **No streaming or network sources.** Local files only.
 * **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
-* **HDR is tone-mapped to SDR, never passed through.** HDR-tagged video (HDR10 PQ and HLG, e.g. iPhone recordings) plays, tone-mapped to SDR in a pixel shader: highlights above diffuse white are rolled off, and the BT.2020 gamut is converted to BT.709. On an HDR display it is still shown as SDR — native HDR passthrough is not implemented, so HDR content will not use the display's full brightness or gamut. Tone mapping is fixed (no exposure or curve controls) and ignores mastering-display/content-light metadata, so grading choices in the source are not honored exactly.
+* **HDR output follows the monitor the window opens on.** With Windows HDR enabled, HDR video (HDR10 PQ and HLG — including iPhone recordings and full-range PQ exports) presents natively in HDR, with the stream's HDR10 static metadata passed to the display. On an SDR display (or with HDR off) the same content is tone-mapped to SDR in a pixel shader with a fixed curve (no exposure controls). The HDR-or-SDR decision is made per file open for the monitor the window is on: dragging a playing HDR window onto a non-HDR monitor mid-play looks washed out until the file is reopened.
 * **Early release.** Behavior, shortcuts, and metrics are still changing between versions.
 
 ## Requirements

@@ -501,6 +501,14 @@ Queue sizes are **defaults**, not architecture constants.
 * audio is master clock when audio exists
 * video is master clock for silent video
 
+The audio position is derived from WASAPI's buffered-frames counter, which
+shared mode only updates once per audio engine period (~10 ms) — a
+staircase. It is smoothed by wall-time extrapolation between counter
+advances (`AudioController::smooth_played`: 12 ms clamp, monotonic, reset
+with the clock) so frame cadences shorter than one tread — anything above
+100 fps — schedule one frame at a time instead of two-due-at-once, which
+the catch-up path would otherwise thin by ~17%.
+
 ### Video behavior
 
 * early frame: hold
@@ -673,9 +681,18 @@ Correctness and stability take priority over ambitious HDR handling.
 * The capability snapshot (`HdrPresentationCapabilities`) is taken on the
   main thread at open from the live swap chain's containing output;
   `display_hdr_active` = the output's desktop color space is G2084/P2020.
+* HDR10 static metadata (mastering display, MaxCLL/MaxFALL) is read from the
+  first decoded frame's side data and applied to the HDR chain via
+  `SetHDRMetaData` (units unit-tested against the MSDN worked example).
+  Strictly advisory: absence or failure never gates playback.
 * The tone map / HLG OOTF are fixed (203 cd/m² diffuse white, knee 0.75,
-  1000-nit HLG peak), not metadata-driven. `SetHDRMetaData` is not called
-  (static metadata is a recorded follow-up; DWM composites without it).
+  1000-nit HLG peak); static metadata is forwarded to the display but does
+  not drive the curve.
+* The stream's colorimetry is carried as a validated shader signal
+  (`HdrToneMapSignal`: transfer + range), not a DXGI color space — DXGI's
+  enum has no full-range-PQ variant, but full-range PQ exists in the wild
+  (Topaz Video AI "HDR Enhanced" 8-bit H.264 exports) and plays; the matrix
+  validation (BT.2020 NCL or unspecified only) is unchanged.
 * Software decoding may reduce 10-bit HDR to 8-bit NV12 before conversion,
   which can introduce banding.
 * Classification is conservative: contradictory or incomplete HDR signalling
@@ -683,8 +700,9 @@ Correctness and stability take priority over ambitious HDR handling.
 
 ### Deferred
 
-* HDR10 static metadata (`SetHDRMetaData`)
 * metadata-aware / display-peak-adaptive tone mapping
+* auto-reopen when the window's monitor or HDR state changes mid-play
+  (today the decision is per open; see `docs/TECH_DEBT.md` §6)
 * wide gamut correctness polish
 * full HDR UX
 
