@@ -280,6 +280,19 @@ impl Presenter {
         &self.device
     }
 
+    /// Apply HDR10 static metadata to the live HDR swapchain. Callers
+    /// treat failure as advisory (logged, never fatal): DWM composites the
+    /// PQ chain correctly without metadata.
+    pub fn apply_hdr10_metadata(
+        &self,
+        metadata: &windows::Win32::Graphics::Dxgi::DXGI_HDR_METADATA_HDR10,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(sc) = self.swap_chain.as_ref() else {
+            return Err("swap chain unavailable".into());
+        };
+        sc.apply_hdr10_metadata(metadata)
+    }
+
     /// Snapshot the display/swapchain/device capabilities that gate HDR
     /// presentation. Must run on the main thread, where the window's swap
     /// chain lives: `GetContainingOutput` on that chain identifies the

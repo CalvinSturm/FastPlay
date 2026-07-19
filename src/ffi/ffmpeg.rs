@@ -25,7 +25,7 @@ use crate::{
     render::hdr::{
         classify_color_tags, select_video_presentation_path, tone_map_stream_color_space,
         ContentColorInfo, ContentColorMode, ContentLightMetadata, HdrError,
-        HdrPresentationCapabilities, HdrShaderOutput, MasteringDisplayMetadata,
+        HdrPresentationCapabilities, HdrRational, HdrShaderOutput, MasteringDisplayMetadata,
         VideoPresentationPath,
     },
 };
@@ -229,6 +229,10 @@ pub(crate) struct DecodeSession {
     /// Position the decoder is currently seeked to (None = start of stream).
     /// Used to restart decoding after a mid-stream hardware→software fallback.
     position: Option<Duration>,
+    /// The one-shot `on_hdr_metadata` report has fired (see `run_to_eof`);
+    /// survives seeks and the HW→SW decoder swap so the session is told
+    /// about the stream's static metadata exactly once per open.
+    hdr_metadata_reported: bool,
     /// Backs the format context's interrupt callback. Declared last so it is
     /// dropped *after* `input` (whose teardown could otherwise reference a
     /// freed callback opaque pointer). The `AVFormatContext` holds a raw
@@ -485,6 +489,7 @@ impl DecodeSession {
             frame,
             summary,
             position: start_position,
+            hdr_metadata_reported: false,
             interrupt,
         })))
     }
@@ -517,6 +522,10 @@ impl DecodeSession {
         op_id: OperationId,
         should_cancel: &impl Fn() -> bool,
         on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
+        on_hdr_metadata: &mut impl FnMut(
+            Option<MasteringDisplayMetadata>,
+            Option<ContentLightMetadata>,
+        ) -> Result<(), String>,
         on_video: &mut impl FnMut(PendingVideoFrame) -> Result<(), String>,
         on_audio: &mut impl FnMut(PendingAudioFrame) -> Result<(), String>,
     ) -> Result<StreamStatus, String> {
@@ -568,8 +577,10 @@ impl DecodeSession {
                             // decoder swap: the stream's color space is
                             // unchanged by falling back to software, so its
                             // surfaces must keep the same input space and
-                            // output encode.
+                            // output encode. Same for the already-inspected
+                            // static metadata.
                             sw_decoder.hdr_shader = self.video.hdr_shader;
+                            sw_decoder.hdr_metadata = self.video.hdr_metadata.clone();
                             self.video = sw_decoder;
                             hw_mid_fallback_done = true;
                             self.summary.decode_mode = self.video.mode;
@@ -608,6 +619,18 @@ impl DecodeSession {
                     on_video,
                     &|| should_cancel(),
                 )?;
+                // One-shot: the first decoded frame on the PQ-output path
+                // recorded its static-metadata answer; hand it to the
+                // session (which owns the swapchain) exactly once per open,
+                // and only when there is something to apply.
+                if !self.hdr_metadata_reported {
+                    if let Some((mastering, content_light)) = self.video.hdr_metadata.clone() {
+                        self.hdr_metadata_reported = true;
+                        if mastering.is_some() || content_light.is_some() {
+                            on_hdr_metadata(mastering, content_light)?;
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -928,6 +951,14 @@ struct VideoDecoder {
     /// produced surface. `None` is the ordinary SDR path. Set once at open
     /// by the presentation-path fork; see `DecodeSession::open`.
     hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, HdrShaderOutput)>,
+    /// HDR10 static metadata from the first decoded frame's side data, on
+    /// the PQ-output path only. `None` = not yet inspected; `Some` = the
+    /// first frame's answer, including `(None, None)` for streams without
+    /// metadata. Read (and reported once) by `DecodeSession::run_to_eof`.
+    hdr_metadata: Option<(
+        Option<MasteringDisplayMetadata>,
+        Option<ContentLightMetadata>,
+    )>,
 }
 
 enum VideoDecoderOutput {
@@ -1097,6 +1128,7 @@ unsafe fn open_hardware_video_decoder(
         rotation_quarter_turns,
         content_color,
         hdr_shader: None,
+        hdr_metadata: None,
     })
 }
 
@@ -1155,6 +1187,7 @@ unsafe fn open_software_video_decoder(
         rotation_quarter_turns,
         content_color,
         hdr_shader: None,
+        hdr_metadata: None,
     })
 }
 
@@ -1297,80 +1330,83 @@ unsafe fn classify_stream_color(
     })
 }
 
-/// First-frame refinement of the stream-level classification.
+/// Extract HDR10 static metadata side data from a decoded frame, in
+/// FFmpeg's own unconverted representation (the DXGI unit conversion lives
+/// in [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata)).
 ///
-/// Precedence rule: valid, *specified* frame-level tags override
-/// stream-level tags; unspecified frame fields leave the stream-level
-/// values in place. Frame side data (mastering display, content light) is
-/// attached only here, never at stream level.
-///
-/// Integration point: runs ONLY on the HDR path, after the HDR swapchain
-/// exists, on a first frame that already flowed through the unchanged
-/// decode path (see the `HdrPqOutput` arm in `DecodeSession::open`).
-/// The verified SDR path never calls this and its first-frame handling is
-/// untouched.
-///
-/// HDR-VERIFY: the concrete field-by-field refinement (upgrading `mode`
-/// from frame-level trc/primaries, range/matrix overrides) is unresolved;
-/// today the stream classification passes through with side-data
-/// attachment only.
-///
-/// SAFETY contract: `frame` must be a live decoded `AVFrame` owned by the
-/// caller. Read-only access; nothing is retained beyond the call.
-unsafe fn refine_color_from_first_frame(
-    stream_info: ContentColorInfo,
-    frame: *const AVFrame,
-) -> Result<ContentColorInfo, String> {
-    if frame.is_null() {
-        return Err("first decoded frame was null during HDR color refinement".into());
-    }
-    let (mastering_display, content_light) = extract_hdr_metadata_from_frame(frame)?;
-    let mut refined = stream_info;
-    refined.mastering_display = mastering_display;
-    refined.content_light = content_light;
-    Ok(refined)
-}
-
-/// Locate HDR10 static metadata side data on a decoded frame.
-///
-/// Missing side data yields `None` and never fails playback. Side data
-/// that IS present cannot be parsed yet: the payload structs
-/// (`AVMasteringDisplayMetadata`, `AVContentLightMetadata`) are not on our
-/// bindgen allowlist, and their layouts must not be guessed — presence is
-/// a typed error so the verification commit cannot be skipped silently.
-///
-/// HDR-VERIFY: bind the payload structs and parse `data`/`size` into
-/// [`MasteringDisplayMetadata`] / [`ContentLightMetadata`].
+/// Missing, undersized, or null side data yields `None` — static metadata
+/// is advisory and its absence never fails playback.
 ///
 /// SAFETY contract: `frame` must be a live decoded `AVFrame`; the
-/// `side_data` entries are owned by the frame, and only the bound
-/// `AVFrameSideData` header (the `type_` tag) is read — never the payload.
+/// `side_data` entries and their payloads are owned by the frame and are
+/// only read for the duration of the call. Payload layouts come from the
+/// bindgen-generated `AVMasteringDisplayMetadata` /
+/// `AVContentLightMetadata` (libavutil/mastering_display_metadata.h in
+/// the shim header), guarded by a size check before the cast.
 unsafe fn extract_hdr_metadata_from_frame(
     frame: *const AVFrame,
-) -> Result<
-    (
-        Option<MasteringDisplayMetadata>,
-        Option<ContentLightMetadata>,
-    ),
-    String,
-> {
+) -> (
+    Option<MasteringDisplayMetadata>,
+    Option<ContentLightMetadata>,
+) {
     if frame.is_null() {
-        return Err("frame was null during HDR metadata extraction".into());
+        return (None, None);
     }
+    let rational = |r: AVRational| HdrRational {
+        num: r.num,
+        den: r.den,
+    };
+    let mut mastering = None;
+    let mut content_light = None;
     let count = (*frame).nb_side_data.max(0) as isize;
     for index in 0..count {
         let entry = *(*frame).side_data.offset(index);
-        if entry.is_null() {
+        if entry.is_null() || (*entry).data.is_null() {
             continue;
         }
         let side_data_type = (*entry).type_;
+        let size = (*entry).size as usize;
         if side_data_type == AVFrameSideDataType_AV_FRAME_DATA_MASTERING_DISPLAY_METADATA
-            || side_data_type == AVFrameSideDataType_AV_FRAME_DATA_CONTENT_LIGHT_LEVEL
+            && mastering.is_none()
+            && size >= size_of::<AVMasteringDisplayMetadata>()
         {
-            return Err(HdrError::HdrMetadataConversionUnverified.to_string());
+            let payload = &*((*entry).data as *const AVMasteringDisplayMetadata);
+            mastering = Some(MasteringDisplayMetadata {
+                display_primaries: [
+                    [
+                        rational(payload.display_primaries[0][0]),
+                        rational(payload.display_primaries[0][1]),
+                    ],
+                    [
+                        rational(payload.display_primaries[1][0]),
+                        rational(payload.display_primaries[1][1]),
+                    ],
+                    [
+                        rational(payload.display_primaries[2][0]),
+                        rational(payload.display_primaries[2][1]),
+                    ],
+                ],
+                white_point: [
+                    rational(payload.white_point[0]),
+                    rational(payload.white_point[1]),
+                ],
+                min_luminance: rational(payload.min_luminance),
+                max_luminance: rational(payload.max_luminance),
+                has_primaries: payload.has_primaries != 0,
+                has_luminance: payload.has_luminance != 0,
+            });
+        } else if side_data_type == AVFrameSideDataType_AV_FRAME_DATA_CONTENT_LIGHT_LEVEL
+            && content_light.is_none()
+            && size >= size_of::<AVContentLightMetadata>()
+        {
+            let payload = &*((*entry).data as *const AVContentLightMetadata);
+            content_light = Some(ContentLightMetadata {
+                max_content_light_level: Some(payload.MaxCLL),
+                max_frame_average_light_level: Some(payload.MaxFALL),
+            });
         }
     }
-    Ok((None, None))
+    (mastering, content_light)
 }
 
 /// Reduce a decoded frame's colorimetry tags to the matrix/range pair the
@@ -1442,6 +1478,18 @@ where
         if should_cancel() {
             av_frame_unref(frame);
             return Ok(());
+        }
+
+        // On the PQ-output path, inspect the first decoded frame's side
+        // data for HDR10 static metadata (mastering display + content
+        // light). Recorded once; run_to_eof reports it to the session.
+        if video.hdr_metadata.is_none()
+            && matches!(
+                video.hdr_shader,
+                Some((_, crate::render::hdr::HdrShaderOutput::PqPassthrough))
+            )
+        {
+            video.hdr_metadata = Some(extract_hdr_metadata_from_frame(frame));
         }
 
         // Copied out before the `&mut video.output` borrow so both arms can

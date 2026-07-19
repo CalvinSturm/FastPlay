@@ -4,7 +4,7 @@ use crate::playback::generations::{OpenGeneration, OperationId, SeekGeneration};
 use crate::{
     ffi::ffmpeg::{PendingAudioFrame, PendingVideoFrame},
     media::video::VideoDecodeMode,
-    render::hdr::VideoPresentationPath,
+    render::hdr::{ContentLightMetadata, MasteringDisplayMetadata, VideoPresentationPath},
 };
 
 /// All asynchronous completions flow through this enum so the coordinator stays
@@ -36,6 +36,17 @@ pub enum SessionEvent {
         seek_gen: SeekGeneration,
         op_id: OperationId,
         path: VideoPresentationPath,
+    },
+    /// HDR10 static metadata found on the first decoded frame of a
+    /// PQ-output open (emitted at most once per open, and only when at
+    /// least one block is present). The coordinator converts and applies
+    /// it to the HDR swapchain; it is advisory and never gates playback.
+    HdrMetadataKnown {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        mastering: Option<MasteringDisplayMetadata>,
+        content_light: Option<ContentLightMetadata>,
     },
     VideoFrameReady(PendingVideoFrame),
     AudioFrameReady(PendingAudioFrame),
