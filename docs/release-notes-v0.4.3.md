@@ -17,6 +17,7 @@ coordinator.
 - **Overlays and screenshots are HDR-aware**: subtitles/OSD render correctly
   on the HDR chain, and screenshots of HDR playback come out as normal SDR
   images.
+- Fixed audio occasionally staying silent after scrubbing plus pause/play.
 - Fixed the app icon losing its transparency.
 
 ## Features
@@ -69,6 +70,19 @@ it, or with malformed values, play exactly as before.
   right in ordinary viewers.
 
 ## Fixes
+
+### Audio silent after scrubbing plus pause/play
+
+Scrub seeks deliberately pause the audio sink without clearing its buffer
+(rapid per-target resets destabilize WASAPI), and every seek discards the
+audio clock anchor. Resuming from pause in that state relied on the next
+audio submission to auto-restart the sink — but that restart requires a
+successful write, and a stopped WASAPI sink never drains its buffer. If
+the buffer happened to be exactly full at the pause, every write returned
+"no room" and audio stayed silent for the rest of the file while video
+played on. The un-anchored resume now clears the sink first (its contents
+were pre-seek audio that must not play at the new position anyway — which
+also fixes a brief burst of old-position audio on such resumes).
 
 ### App icon transparency
 
