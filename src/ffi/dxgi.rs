@@ -675,6 +675,25 @@ impl DxgiSwapChain {
         self.kind
     }
 
+    /// Apply HDR10 static metadata to this chain. Only meaningful on the
+    /// HDR10 kind — metadata on the SDR chain is a caller bug and errors
+    /// rather than silently informing DWM about pixels that are not PQ.
+    pub fn apply_hdr10_metadata(
+        &self,
+        metadata: &DXGI_HDR_METADATA_HDR10,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.kind != SwapchainKind::Hdr10Pq {
+            return Err(Box::new(DxgiError(
+                "HDR10 metadata applied to a non-HDR swapchain".into(),
+            )));
+        }
+        let swap_chain3: IDXGISwapChain3 = self
+            .swap_chain
+            .cast()
+            .map_err(|_| HdrError::SwapChain4Unavailable)?;
+        apply_hdr10_metadata(&swap_chain3, metadata)
+    }
+
     /// Release all resources derived from the swap chain's backbuffer so
     /// that the swap chain's COM refcount can reach zero.  Must be called
     /// before dropping the struct when another swap chain will be created
@@ -1406,10 +1425,8 @@ pub fn query_hdr_presentation_capabilities(
 
 /// Apply HDR10 static metadata to an HDR swapchain. Called only on the
 /// `HdrPqOutput` path; the metadata itself comes from
-/// [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata),
-/// which is a typed error until its unit conversion is verified.
-// Wired by the HDR passthrough commit.
-#[allow(dead_code)]
+/// [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata)
+/// (units unit-tested against the MSDN worked example).
 pub fn apply_hdr10_metadata(
     swap_chain3: &IDXGISwapChain3,
     metadata: &DXGI_HDR_METADATA_HDR10,

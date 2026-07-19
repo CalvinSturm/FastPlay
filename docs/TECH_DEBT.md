@@ -149,14 +149,13 @@ passthrough arm now plays (HdrPqOutput), `display_hdr_active` is real,
 open-time path/caps diagnostics are logged, and the tone-map-on-HDR-desktop
 question is moot (HDR desktops get PQ output). Still open:
 
-1. HDR10 static metadata (`SetHDRMetaData`): bind
-   `AVMasteringDisplayMetadata`/`AVContentLightMetadata` payload structs
-   (shim header lacks `libavutil/mastering_display_metadata.h`), implement
-   `build_dxgi_hdr10_metadata` with units resolved from CTA-861.3, wire
-   after HDR chain creation. Missing metadata must never fail playback.
-   Until then `extract_hdr_metadata_from_frame` /
-   `refine_color_from_first_frame` stay dead code (the former errors on
-   metadata presence if wired as-is).
+1. ~~HDR10 static metadata~~ — DONE: `SetHDRMetaData` is wired (first-frame
+   side data → `HdrMetadataKnown` event → `build_dxgi_hdr10_metadata`,
+   unit-tested against the MSDN worked example → HDR chain), verified
+   end-to-end by `bench/verify-hdr-metadata.ps1` with real x265 SEI.
+   Advisory only: absence or failure never gates playback.
+   `refine_color_from_first_frame` (frame-tag classification refinement)
+   was deleted; reintroduce from scratch if real-world files need it.
 2. A scripted entry point for mixed HDR/SDR queue validation (queues are only
    reachable via OLE drag-drop today; the CLI seeds a single-file queue).
    The SDR→HDR chain swap is exercised end-to-end by

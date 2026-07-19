@@ -1005,6 +1005,39 @@ impl PlaybackSession {
                 }
                 self.present_needed = true;
             }
+            SessionEvent::HdrMetadataKnown {
+                open_gen,
+                seek_gen,
+                op_id,
+                mastering,
+                content_light,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                // Advisory: DWM composites the PQ chain correctly without
+                // static metadata, so conversion or application failures
+                // are logged and never fail playback.
+                match crate::render::hdr::build_dxgi_hdr10_metadata(
+                    mastering.as_ref(),
+                    content_light.as_ref(),
+                ) {
+                    Some(metadata) => match self.presenter.apply_hdr10_metadata(&metadata) {
+                        Ok(()) => flog!(
+                            "[hdr_metadata] applied: maxMastering={} minMastering(0.0001nit)={} \
+                             maxCLL={} maxFALL={}",
+                            metadata.MaxMasteringLuminance,
+                            metadata.MinMasteringLuminance,
+                            metadata.MaxContentLightLevel,
+                            metadata.MaxFrameAverageLightLevel
+                        ),
+                        Err(error) => {
+                            flog!("[hdr_metadata] apply failed (non-fatal): {error}")
+                        }
+                    },
+                    None => flog!("[hdr_metadata] no convertible metadata; skipped"),
+                }
+            }
             SessionEvent::VideoFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen(), frame.seek_gen(), frame.op_id()) {
                     flog!(
@@ -1612,6 +1645,19 @@ impl PlaybackSession {
                     &sender,
                 )
             };
+            let mut on_hdr_metadata = |mastering, content_light| {
+                let (seek_gen, op_id) = gen_cell.get();
+                worker_send(
+                    SessionEvent::HdrMetadataKnown {
+                        open_gen,
+                        seek_gen,
+                        op_id,
+                        mastering,
+                        content_light,
+                    },
+                    &sender,
+                )
+            };
             let mut on_video = |frame| worker_send(SessionEvent::VideoFrameReady(frame), &sender);
             let mut on_audio =
                 |frame| worker_send(SessionEvent::AudioFrameReady(frame), &audio_sender);
@@ -1630,6 +1676,7 @@ impl PlaybackSession {
                         cur_op_id,
                         &cancelled,
                         &mut on_decode_mode,
+                        &mut on_hdr_metadata,
                         &mut on_video,
                         &mut on_audio,
                     )

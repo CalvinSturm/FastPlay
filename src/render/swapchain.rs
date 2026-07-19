@@ -86,6 +86,14 @@ impl SwapChainPresenter {
         self.swap_chain.raw_swap_chain()
     }
 
+    /// Apply HDR10 static metadata; valid only on the HDR10 chain.
+    pub fn apply_hdr10_metadata(
+        &self,
+        metadata: &windows::Win32::Graphics::Dxgi::DXGI_HDR_METADATA_HDR10,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.swap_chain.apply_hdr10_metadata(metadata)
+    }
+
     pub fn new(
         window: &NativeWindow,
         device: &D3D11Device,

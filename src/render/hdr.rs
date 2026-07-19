@@ -253,7 +253,6 @@ pub(crate) enum HdrError {
     #[allow(dead_code)]
     HdrFormatConversionUnsupported,
     HdrColorSpaceUnverified,
-    HdrMetadataConversionUnverified,
     SwapChain4Unavailable,
     /// The tone-map shader cannot sample the decoder's output format on this
     /// device (no NV12/P010 shader-resource views). Raised at open, never at
@@ -283,9 +282,6 @@ impl fmt::Display for HdrError {
             }
             Self::HdrColorSpaceUnverified => {
                 "HDR playback is not available yet: the HDR color-space mapping is unverified"
-            }
-            Self::HdrMetadataConversionUnverified => {
-                "HDR playback is not available yet: HDR metadata conversion is unverified"
             }
             Self::SwapChain4Unavailable => {
                 "HDR metadata requires IDXGISwapChain4, which this system does not expose"
@@ -701,19 +697,88 @@ pub(crate) fn pq10_capture_to_sdr_bgra(pixels: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Conversion boundary between FFmpeg-sourced metadata and DXGI.
+/// Convert FFmpeg-sourced HDR10 static metadata into
+/// `DXGI_HDR_METADATA_HDR10` for `SetHDRMetaData`.
 ///
-/// HDR-VERIFY: `DXGI_HDR_METADATA_HDR10` units, scaling, rounding, clamping,
-/// FFmpeg rational conversion, and the missing-value fallback policy are all
-/// unresolved. Mastering metadata must not become mandatory for HDR
-/// playback when this is implemented.
-// Wired to apply_hdr10_metadata by the passthrough commit.
-#[allow(dead_code)]
+/// Units per the MSDN definition (dxgi1_5.h, verified against its worked
+/// example in the unit tests): chromaticity coordinates are the CIE 1931
+/// xy values normalized to 50 000 (`u16`); `MaxMasteringLuminance` is in
+/// WHOLE nits (`u32`) while `MinMasteringLuminance` is in 0.0001-nit units
+/// (`u32`) — they deliberately differ; MaxCLL / MaxFALL are whole nits
+/// (`u16`). FFmpeg's side carries CIE xy rationals and cd/m² rationals
+/// (`AVMasteringDisplayMetadata`) and plain cd/m² integers
+/// (`AVContentLightMetadata`).
+///
+/// Zero means "unknown" throughout (CTA-861.3), so absent or invalid
+/// blocks (missing flags, zero-denominator rationals) stay zero rather
+/// than failing — static metadata is advisory and must never gate
+/// playback. Returns `None` when nothing at all is known, in which case
+/// `SetHDRMetaData` should not be called.
 pub(crate) fn build_dxgi_hdr10_metadata(
-    _mastering: Option<&MasteringDisplayMetadata>,
-    _content_light: Option<&ContentLightMetadata>,
-) -> Result<DXGI_HDR_METADATA_HDR10, HdrError> {
-    Err(HdrError::HdrMetadataConversionUnverified)
+    mastering: Option<&MasteringDisplayMetadata>,
+    content_light: Option<&ContentLightMetadata>,
+) -> Option<DXGI_HDR_METADATA_HDR10> {
+    fn rational(r: HdrRational) -> Option<f64> {
+        (r.den != 0).then(|| f64::from(r.num) / f64::from(r.den))
+    }
+    fn chromaticity(r: HdrRational) -> Option<u16> {
+        rational(r).map(|v| (v.clamp(0.0, 1.0) * 50000.0).round() as u16)
+    }
+    fn luminance(r: HdrRational, per_nit_units: f64, max: f64) -> Option<u32> {
+        rational(r).map(|v| ((v * per_nit_units).clamp(0.0, max)).round() as u32)
+    }
+
+    let mut metadata = DXGI_HDR_METADATA_HDR10::default();
+    let mut any = false;
+
+    if let Some(mastering) = mastering {
+        if mastering.has_primaries {
+            // All-or-nothing: a partially invalid primary set stays fully
+            // "unknown" rather than mixing real and zero coordinates.
+            let coords: Option<[[u16; 2]; 4]> = (|| {
+                let p = &mastering.display_primaries;
+                Some([
+                    [chromaticity(p[0][0])?, chromaticity(p[0][1])?],
+                    [chromaticity(p[1][0])?, chromaticity(p[1][1])?],
+                    [chromaticity(p[2][0])?, chromaticity(p[2][1])?],
+                    [
+                        chromaticity(mastering.white_point[0])?,
+                        chromaticity(mastering.white_point[1])?,
+                    ],
+                ])
+            })();
+            if let Some([red, green, blue, white]) = coords {
+                // FFmpeg documents display_primaries in r, g, b order.
+                metadata.RedPrimary = red;
+                metadata.GreenPrimary = green;
+                metadata.BluePrimary = blue;
+                metadata.WhitePoint = white;
+                any = true;
+            }
+        }
+        if mastering.has_luminance {
+            let max = luminance(mastering.max_luminance, 1.0, f64::from(u32::MAX));
+            let min = luminance(mastering.min_luminance, 10000.0, f64::from(u32::MAX));
+            if let (Some(max), Some(min)) = (max, min) {
+                metadata.MaxMasteringLuminance = max;
+                metadata.MinMasteringLuminance = min;
+                any = true;
+            }
+        }
+    }
+
+    if let Some(content_light) = content_light {
+        if let Some(max_cll) = content_light.max_content_light_level {
+            metadata.MaxContentLightLevel = max_cll.min(u32::from(u16::MAX)) as u16;
+            any |= max_cll != 0;
+        }
+        if let Some(max_fall) = content_light.max_frame_average_light_level {
+            metadata.MaxFrameAverageLightLevel = max_fall.min(u32::from(u16::MAX)) as u16;
+            any |= max_fall != 0;
+        }
+    }
+
+    any.then_some(metadata)
 }
 
 #[cfg(test)]
@@ -1465,10 +1530,91 @@ mod tests {
     }
 
     #[test]
-    fn metadata_conversion_remains_a_typed_error() {
-        assert!(matches!(
-            build_dxgi_hdr10_metadata(None, None),
-            Err(HdrError::HdrMetadataConversionUnverified)
-        ));
+    fn metadata_absent_builds_nothing() {
+        // No metadata at all → None: SetHDRMetaData must not be called
+        // with an all-unknown struct.
+        assert_eq!(build_dxgi_hdr10_metadata(None, None), None);
+    }
+
+    fn exact(num: i32, den: i32) -> HdrRational {
+        HdrRational { num, den }
+    }
+
+    /// The MSDN worked example for DXGI_HDR_METADATA_HDR10: DCI-P3
+    /// primaries, D65 white point, 1000-nit max / 0.001-nit min mastering
+    /// luminance, MaxCLL 2000, MaxFALL 500.
+    fn msdn_example_mastering() -> MasteringDisplayMetadata {
+        MasteringDisplayMetadata {
+            display_primaries: [
+                [exact(680, 1000), exact(320, 1000)],
+                [exact(265, 1000), exact(690, 1000)],
+                [exact(150, 1000), exact(60, 1000)],
+            ],
+            white_point: [exact(3127, 10000), exact(3290, 10000)],
+            min_luminance: exact(1, 1000),
+            max_luminance: exact(1000, 1),
+            has_primaries: true,
+            has_luminance: true,
+        }
+    }
+
+    #[test]
+    fn metadata_conversion_matches_the_msdn_worked_example() {
+        let content_light = ContentLightMetadata {
+            max_content_light_level: Some(2000),
+            max_frame_average_light_level: Some(500),
+        };
+        let metadata =
+            build_dxgi_hdr10_metadata(Some(&msdn_example_mastering()), Some(&content_light))
+                .expect("full metadata must build");
+        // Chromaticities ×50000.
+        assert_eq!(metadata.RedPrimary, [34000, 16000]);
+        assert_eq!(metadata.GreenPrimary, [13250, 34500]);
+        assert_eq!(metadata.BluePrimary, [7500, 3000]);
+        assert_eq!(metadata.WhitePoint, [15635, 16450]);
+        // Max in whole nits; min in 0.0001-nit units — deliberately
+        // different units per the DXGI definition.
+        assert_eq!(metadata.MaxMasteringLuminance, 1000);
+        assert_eq!(metadata.MinMasteringLuminance, 10);
+        // CLL/FALL in whole nits.
+        assert_eq!(metadata.MaxContentLightLevel, 2000);
+        assert_eq!(metadata.MaxFrameAverageLightLevel, 500);
+    }
+
+    #[test]
+    fn metadata_content_light_alone_builds_with_unknown_mastering() {
+        let content_light = ContentLightMetadata {
+            max_content_light_level: Some(1000),
+            max_frame_average_light_level: Some(400),
+        };
+        let metadata = build_dxgi_hdr10_metadata(None, Some(&content_light))
+            .expect("content light alone must build");
+        // Unknown blocks stay zero (CTA-861.3 "unknown"), known ones apply.
+        assert_eq!(metadata.RedPrimary, [0, 0]);
+        assert_eq!(metadata.MaxMasteringLuminance, 0);
+        assert_eq!(metadata.MinMasteringLuminance, 0);
+        assert_eq!(metadata.MaxContentLightLevel, 1000);
+        assert_eq!(metadata.MaxFrameAverageLightLevel, 400);
+    }
+
+    #[test]
+    fn metadata_invalid_rationals_never_partially_apply() {
+        // A zero-denominator primary invalidates the whole primaries
+        // block; with luminance also flagged off, nothing is known and no
+        // metadata is built.
+        let mut mastering = msdn_example_mastering();
+        mastering.display_primaries[1][0] = exact(265, 0);
+        mastering.has_luminance = false;
+        assert_eq!(build_dxgi_hdr10_metadata(Some(&mastering), None), None);
+        // With valid luminance still present, the luminance block applies
+        // and the broken primaries stay unknown.
+        let mut mastering = msdn_example_mastering();
+        mastering.display_primaries[1][0] = exact(265, 0);
+        let metadata = build_dxgi_hdr10_metadata(Some(&mastering), None)
+            .expect("valid luminance must still build");
+        assert_eq!(metadata.RedPrimary, [0, 0]);
+        assert_eq!(metadata.GreenPrimary, [0, 0]);
+        assert_eq!(metadata.MaxMasteringLuminance, 1000);
+        assert_eq!(metadata.MinMasteringLuminance, 10);
     }
 }
