@@ -2341,6 +2341,25 @@ impl PlaybackSession {
                 }
                 self.metrics.note_resume_requested(now);
                 if !self.audio.is_clock_anchored() {
+                    // Un-anchored resume: a seek happened while paused (or a
+                    // pause landed mid-seek). Those paths pause the sink
+                    // WITHOUT resetting it (deliberately, to avoid WASAPI
+                    // buffer churn during a scrub), so its buffer still holds
+                    // pre-seek samples — and a stopped client never drains
+                    // its padding. If the buffer was full when paused, every
+                    // write_frame returns 0, so the auto-resume in
+                    // submit_due_audio (which requires a successful write)
+                    // never fires and playback stays silent forever. Reset
+                    // the sink here: the buffered samples are from the
+                    // pre-seek position and must not play anyway, and a
+                    // cleared buffer lets the next submission write,
+                    // auto-start the sink, and re-anchor the audio clock.
+                    if let Some(sink) = self.audio_sink.as_mut() {
+                        if let Err(error) = sink.reset() {
+                            self.audio_sink_error = Some(error.to_string());
+                            self.audio_sink = None;
+                        }
+                    }
                     let resume_pts = self.paused_clock_position.unwrap_or(Duration::ZERO);
                     self.video_clock =
                         Some(PlaybackClock::new(now, resume_pts, self.playback_rate));
