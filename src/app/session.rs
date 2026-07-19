@@ -959,6 +959,28 @@ impl PlaybackSession {
                 }
                 self.media_duration = Some(duration);
             }
+            SessionEvent::PresentationPathSelected {
+                open_gen,
+                seek_gen,
+                op_id,
+                path,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                flog!("[presentation_path] open={} path={:?}", open_gen.0, path);
+                // Recreate the swapchain if this open's path needs the
+                // other kind. FIFO ordering places this event before any
+                // frame of the same generation, so the first frame always
+                // lands in the right chain. On failure the presenter has
+                // already restored the SDR chain; fail the open visibly
+                // with the typed error rather than presenting HDR wrong.
+                if let Err(error) = self.presenter.ensure_swapchain_for_path(&self.window, path) {
+                    self.fail_open(error.to_string());
+                    return Ok(());
+                }
+                self.present_needed = true;
+            }
             SessionEvent::VideoFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen(), frame.seek_gen(), frame.op_id()) {
                     flog!(
@@ -1477,6 +1499,18 @@ impl PlaybackSession {
                                 mode,
                                 hw_fallback_count,
                                 rotation_quarter_turns,
+                            },
+                            &sender,
+                        )
+                    },
+                    &mut |path| {
+                        let (seek_gen, op_id) = gen_cell.get();
+                        worker_send(
+                            SessionEvent::PresentationPathSelected {
+                                open_gen,
+                                seek_gen,
+                                op_id,
+                                path,
                             },
                             &sender,
                         )

@@ -74,7 +74,7 @@ use crate::{
     render::hdr::{
         display_hdr_state_from_descriptor, swapchain_format_for_path,
         verified_hdr10_swapchain_color_space, ContentColorInfo, HdrDisplayDescriptor, HdrError,
-        HdrPresentationCapabilities, VideoPresentationPath,
+        HdrPresentationCapabilities, SwapchainKind, VideoPresentationPath,
     },
 };
 
@@ -656,6 +656,10 @@ pub struct DxgiSwapChain {
     /// Built lazily on the first HDR frame, so SDR playback never compiles the
     /// tone-map shaders. Holds no backbuffer-derived resources.
     hdr_tone_map_renderer: Option<HdrToneMapRenderer>,
+    /// Which construction this chain came from — fixed at creation.
+    /// Resize and device recovery must rebuild the same kind; kind changes
+    /// happen only through the session's open-time swapchain swap.
+    kind: SwapchainKind,
 }
 
 impl DxgiSwapChain {
@@ -664,6 +668,11 @@ impl DxgiSwapChain {
     /// output of the window this chain presents to.
     pub fn raw_swap_chain(&self) -> &IDXGISwapChain1 {
         &self.swap_chain
+    }
+
+    /// Which construction this chain came from (SDR or HDR10).
+    pub fn kind(&self) -> SwapchainKind {
+        self.kind
     }
 
     /// Release all resources derived from the swap chain's backbuffer so
@@ -774,6 +783,7 @@ impl DxgiSwapChain {
             subtitle_renderer: None,
             vp_cache: None,
             hdr_tone_map_renderer: None,
+            kind: SwapchainKind::Sdr,
         })
     }
 
@@ -785,17 +795,13 @@ impl DxgiSwapChain {
     /// before any COM object is created — no swapchain is ever created and
     /// then abandoned, and nothing is recreated mid-playback.
     ///
-    /// Created once per HDR playback session, never by resizing or device
-    /// recovery of an SDR session.
-    // Wired by SwapChainPresenter::new_for_path; today reached only from
-    // the env-gated validation entry (render::hdr_validate). Production
-    // wiring is the passthrough commit.
-    #[allow(dead_code)]
+    /// Created once per HDR playback session (or by device/resize recovery
+    /// of an HDR session, which rebuilds the same kind), reached through
+    /// `SwapChainPresenter::new_for_path` and the env-gated validation
+    /// entry (`render::hdr_validate`).
     pub fn create_hdr10_skeleton(
         window: &NativeWindowInner,
         device: &D3D11Device,
-        _content: &ContentColorInfo,
-        _capabilities: &HdrPresentationCapabilities,
     ) -> Result<Self, Box<dyn Error>> {
         // Resolved: RGB_FULL_G2084_NONE_P2020, validated structurally
         // (CheckColorSpaceSupport + SetColorSpace1 below on a live HDR
@@ -852,6 +858,7 @@ impl DxgiSwapChain {
             subtitle_renderer: None,
             vp_cache: None,
             hdr_tone_map_renderer: None,
+            kind: SwapchainKind::Hdr10Pq,
         })
     }
 

@@ -4,20 +4,20 @@ use crate::{
         dxgi::{DxgiSwapChain, PresentResult},
     },
     platform::window::NativeWindow,
-    render::hdr::{ContentColorInfo, HdrError, HdrPresentationCapabilities, VideoPresentationPath},
+    render::hdr::{HdrError, SwapchainKind, VideoPresentationPath},
 };
 
 /// Signature of the verified SDR renderer constructor.
 type SdrRendererCtor =
     fn(&NativeWindow, &D3D11Device) -> Result<SwapChainPresenter, Box<dyn std::error::Error>>;
 
-/// Signature of the HDR-to-SDR tone-mapping renderer boundary.
-type HdrToSdrRendererCtor = fn(
-    &NativeWindow,
-    &D3D11Device,
-    &ContentColorInfo,
-    &HdrPresentationCapabilities,
-) -> Result<SwapChainPresenter, Box<dyn std::error::Error>>;
+/// Signature of the HDR-to-SDR tone-mapping renderer boundary. Same shape
+/// as the SDR constructor (the tone-map path presents through the same
+/// verified SDR swapchain; per-frame shader inputs come from the surface's
+/// tone-map tag, not the swapchain), but kept as a distinct named boundary
+/// so the dispatch test pins each path to its intended constructor.
+type HdrToSdrRendererCtor =
+    fn(&NativeWindow, &D3D11Device) -> Result<SwapChainPresenter, Box<dyn std::error::Error>>;
 
 /// Which renderer constructor a [`VideoPresentationPath`] dispatches to.
 /// Data-driven (function pointers) so the regression test can assert that
@@ -62,15 +62,12 @@ pub(crate) fn renderer_constructor_for_path(
 /// gamut math itself — the GPU video processor cannot do this conversion; see
 /// that type's docs), writing SDR sRGB straight into the ordinary 8-bit
 /// backbuffer. The swapchain is therefore the verified SDR swapchain — this
-/// delegates to the same `SwapChainPresenter::new` the SDR path uses.
-/// `content`/`capabilities` are unused here because the per-frame shader
-/// inputs are resolved from the surface's tone-map tag at draw time, not
-/// baked into the swapchain.
+/// delegates to the same `SwapChainPresenter::new` the SDR path uses; the
+/// per-frame shader inputs are resolved from the surface's tone-map tag at
+/// draw time, not baked into the swapchain.
 pub(crate) fn create_hdr_to_sdr_renderer(
     window: &NativeWindow,
     device: &D3D11Device,
-    _content: &ContentColorInfo,
-    _capabilities: &HdrPresentationCapabilities,
 ) -> Result<SwapChainPresenter, Box<dyn std::error::Error>> {
     SwapChainPresenter::new(window, device)
 }
@@ -98,51 +95,34 @@ impl SwapChainPresenter {
         })
     }
 
-    /// Presentation-path renderer fork. `ExistingSdr` delegates to the
-    /// unchanged [`Self::new`]. `HdrPqOutput` builds the validated
-    /// HDR10 swapchain skeleton, but its render path does not yet apply
-    /// the HDR processor color spaces (the device's HDR processor
-    /// configuration is unwired); tone mapping stays a typed error.
+    /// Which construction the underlying swapchain came from.
+    pub fn kind(&self) -> SwapchainKind {
+        self.swap_chain.kind()
+    }
+
+    /// Presentation-path renderer fork. `ExistingSdr` (and the tone-map
+    /// path, which presents through the same verified SDR chain) delegates
+    /// to the unchanged [`Self::new`]; `HdrPqOutput` builds the validated
+    /// HDR10 swapchain skeleton.
     ///
-    /// Not yet called by presenter.rs — startup and device recovery always
-    /// build the SDR swapchain today, which is also what the tone-map path
-    /// presents through; only `UnsupportedHdr` content dead-ends at open.
-    /// The HDR passthrough commit migrates presenter.rs here, keyed on the
-    /// selected [`VideoPresentationPath`].
-    ///
-    /// HDR-VERIFY (passthrough commit): the swapchain is created at app
-    /// startup, before any file exists, so wiring this fork means deciding
-    /// WHEN the 10-bit swapchain is created. Recreating between playbacks
-    /// at file-open (never mid-playback) is the expected shape, but it must
-    /// follow the existing one-swapchain-per-HWND discipline —
-    /// `release_resources()` before drop, exactly like device recovery in
-    /// presenter.rs — and respect the v0.4.1 shutdown constraint that D3D
-    /// teardown is avoided in-process.
-    #[allow(dead_code)]
+    /// Called by `Presenter::ensure_swapchain_for_path` between playbacks
+    /// at file-open (never mid-playback), and by the presenter's rebuild
+    /// paths so resize/device recovery restore the same kind. Callers must
+    /// follow the one-swapchain-per-HWND discipline — `release_resources()`
+    /// before dropping the previous presenter, exactly like device
+    /// recovery — and the shutdown constraint that D3D teardown is avoided
+    /// in-process.
     pub fn new_for_path(
         window: &NativeWindow,
         device: &D3D11Device,
         path: VideoPresentationPath,
-        content: Option<&ContentColorInfo>,
-        capabilities: &HdrPresentationCapabilities,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         match renderer_constructor_for_path(path)? {
             RendererConstructor::ExistingSdr(constructor) => constructor(window, device),
-            RendererConstructor::Hdr10Skeleton => {
-                let content = content.ok_or(HdrError::UnsupportedHdrPresentation)?;
-                Ok(Self {
-                    swap_chain: DxgiSwapChain::create_hdr10_skeleton(
-                        window.raw_window(),
-                        device,
-                        content,
-                        capabilities,
-                    )?,
-                })
-            }
-            RendererConstructor::HdrToSdrToneMap(constructor) => {
-                let content = content.ok_or(HdrError::UnsupportedHdrPresentation)?;
-                constructor(window, device, content, capabilities)
-            }
+            RendererConstructor::Hdr10Skeleton => Ok(Self {
+                swap_chain: DxgiSwapChain::create_hdr10_skeleton(window.raw_window(), device)?,
+            }),
+            RendererConstructor::HdrToSdrToneMap(constructor) => constructor(window, device),
         }
     }
 
