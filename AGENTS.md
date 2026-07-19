@@ -54,10 +54,10 @@ Do not add any of the following unless explicitly requested:
 - playlists or media library
 - browser/web UI
 - plugin system
-- native HDR passthrough (HDR10 PQ/HLG already tone-map to SDR in our own
-  pixel shader as of v0.4.2; see `ARCHITECTURE.md` §21 — do not remove or
-  redesign that path, and do not enable `display_hdr_active` without
-  implementing passthrough)
+- metadata-driven tone mapping (HDR10 PQ/HLG present natively on HDR-active
+  displays via `HdrPqOutput` and tone-map to SDR otherwise, both in our own
+  pixel shader; see `ARCHITECTURE.md` §21 — do not remove or redesign those
+  paths, and never let HDR content fall through to the plain SDR path)
 - frame interpolation
 - CUDA/NVDEC split path
 - extra hardware decode backends
