@@ -8,7 +8,9 @@ It is intentionally focused on **local playback**. No media library. No plugin m
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
-<img width="360" height="654" alt="fastplay-demo (2)" src="https://github.com/user-attachments/assets/b2e93267-aa3d-43e8-8515-6ea347cddde6" />
+
+https://github.com/user-attachments/assets/d81912fc-b62c-44ec-b12a-58f944ff7c26
+
 
 ## Why FastPlay exists
 
