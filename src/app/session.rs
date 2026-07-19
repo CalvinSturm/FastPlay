@@ -630,6 +630,30 @@ impl PlaybackSession {
         &self,
         capture: BgraFrameCapture,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        // The HDR10 chain reads back packed 2:10:10:10 PQ dwords, not
+        // BGRA8; tone-map them to SDR on the CPU (the audited shader model
+        // in double precision) so the BMP shows what an SDR viewer would
+        // have seen. Any other non-BGRA format is a typed error rather
+        // than a garbage file.
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM,
+        };
+        let capture = if capture.format == DXGI_FORMAT_R10G10B10A2_UNORM {
+            BgraFrameCapture {
+                width: capture.width,
+                height: capture.height,
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                pixels: crate::render::hdr::pq10_capture_to_sdr_bgra(&capture.pixels),
+            }
+        } else if capture.format == DXGI_FORMAT_B8G8R8A8_UNORM {
+            capture
+        } else {
+            return Err(format!(
+                "screenshot capture in unsupported format {:?}",
+                capture.format
+            )
+            .into());
+        };
         let directory = screenshot_directory()?;
         fs::create_dir_all(&directory)?;
         let stamp = SystemTime::now()
@@ -958,6 +982,61 @@ impl PlaybackSession {
                     return Ok(());
                 }
                 self.media_duration = Some(duration);
+            }
+            SessionEvent::PresentationPathSelected {
+                open_gen,
+                seek_gen,
+                op_id,
+                path,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                flog!("[presentation_path] open={} path={:?}", open_gen.0, path);
+                // Recreate the swapchain if this open's path needs the
+                // other kind. FIFO ordering places this event before any
+                // frame of the same generation, so the first frame always
+                // lands in the right chain. On failure the presenter has
+                // already restored the SDR chain; fail the open visibly
+                // with the typed error rather than presenting HDR wrong.
+                if let Err(error) = self.presenter.ensure_swapchain_for_path(&self.window, path) {
+                    self.fail_open(error.to_string());
+                    return Ok(());
+                }
+                self.present_needed = true;
+            }
+            SessionEvent::HdrMetadataKnown {
+                open_gen,
+                seek_gen,
+                op_id,
+                mastering,
+                content_light,
+            } => {
+                if !self.is_current_frame(open_gen, seek_gen, op_id) {
+                    return Ok(());
+                }
+                // Advisory: DWM composites the PQ chain correctly without
+                // static metadata, so conversion or application failures
+                // are logged and never fail playback.
+                match crate::render::hdr::build_dxgi_hdr10_metadata(
+                    mastering.as_ref(),
+                    content_light.as_ref(),
+                ) {
+                    Some(metadata) => match self.presenter.apply_hdr10_metadata(&metadata) {
+                        Ok(()) => flog!(
+                            "[hdr_metadata] applied: maxMastering={} minMastering(0.0001nit)={} \
+                             maxCLL={} maxFALL={}",
+                            metadata.MaxMasteringLuminance,
+                            metadata.MinMasteringLuminance,
+                            metadata.MaxContentLightLevel,
+                            metadata.MaxFrameAverageLightLevel
+                        ),
+                        Err(error) => {
+                            flog!("[hdr_metadata] apply failed (non-fatal): {error}")
+                        }
+                    },
+                    None => flog!("[hdr_metadata] no convertible metadata; skipped"),
+                }
             }
             SessionEvent::VideoFrameReady(frame) => {
                 if !self.is_current_frame(frame.open_gen(), frame.seek_gen(), frame.op_id()) {
@@ -1365,17 +1444,23 @@ impl PlaybackSession {
             .map(|sink| sink.format())
             .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
         let decode_preference = self.decode_preference;
+        // HDR capability snapshot for this open, taken here on the main
+        // thread: the worker has no window objects, and the swap chain's
+        // containing output identifies the monitor the window is actually
+        // on. Constant for the lifetime of the open (decide-at-open policy).
+        let hdr_capabilities = self.presenter.query_hdr_capabilities();
         let control = Arc::new(DecodeControl::new());
         let worker_count = self
             .decode_thread
             .prepare_spawn(control.clone(), decode_preference);
 
         flog!(
-            "[spawn_decode_thread] open={} seek={} op={:?} workers_now={}",
+            "[spawn_decode_thread] open={} seek={} op={:?} workers_now={} hdr_caps={:?}",
             open_gen.0,
             seek_gen.0,
             op_id,
-            self.decode_thread.worker_count()
+            self.decode_thread.worker_count(),
+            hdr_capabilities
         );
 
         let handle = thread::spawn(move || {
@@ -1452,6 +1537,7 @@ impl PlaybackSession {
                 DecodeSession::open(
                     &source,
                     &device,
+                    hdr_capabilities,
                     audio_format,
                     start_position,
                     decode_preference,
@@ -1470,6 +1556,18 @@ impl PlaybackSession {
                                 mode,
                                 hw_fallback_count,
                                 rotation_quarter_turns,
+                            },
+                            &sender,
+                        )
+                    },
+                    &mut |path| {
+                        let (seek_gen, op_id) = gen_cell.get();
+                        worker_send(
+                            SessionEvent::PresentationPathSelected {
+                                open_gen,
+                                seek_gen,
+                                op_id,
+                                path,
                             },
                             &sender,
                         )
@@ -1547,6 +1645,19 @@ impl PlaybackSession {
                     &sender,
                 )
             };
+            let mut on_hdr_metadata = |mastering, content_light| {
+                let (seek_gen, op_id) = gen_cell.get();
+                worker_send(
+                    SessionEvent::HdrMetadataKnown {
+                        open_gen,
+                        seek_gen,
+                        op_id,
+                        mastering,
+                        content_light,
+                    },
+                    &sender,
+                )
+            };
             let mut on_video = |frame| worker_send(SessionEvent::VideoFrameReady(frame), &sender);
             let mut on_audio =
                 |frame| worker_send(SessionEvent::AudioFrameReady(frame), &audio_sender);
@@ -1565,6 +1676,7 @@ impl PlaybackSession {
                         cur_op_id,
                         &cancelled,
                         &mut on_decode_mode,
+                        &mut on_hdr_metadata,
                         &mut on_video,
                         &mut on_audio,
                     )

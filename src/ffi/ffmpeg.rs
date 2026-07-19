@@ -15,10 +15,7 @@ use std::{
 };
 
 use crate::{
-    ffi::{
-        d3d11::{D3D11Device, SurfaceColor, VideoSurface},
-        dxgi::query_hdr_presentation_capabilities,
-    },
+    ffi::d3d11::{D3D11Device, SurfaceColor, VideoSurface},
     media::{
         audio::AudioStreamFormat,
         source::MediaSource,
@@ -28,7 +25,8 @@ use crate::{
     render::hdr::{
         classify_color_tags, select_video_presentation_path, tone_map_stream_color_space,
         ContentColorInfo, ContentColorMode, ContentLightMetadata, HdrError,
-        MasteringDisplayMetadata, VideoPresentationPath,
+        HdrPresentationCapabilities, HdrRational, HdrShaderOutput, MasteringDisplayMetadata,
+        VideoPresentationPath,
     },
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_TYPE;
@@ -186,8 +184,9 @@ pub(crate) enum StreamStatus {
 /// Outcome of [`DecodeSession::open`]. The video worker acts on each variant:
 /// run the decode loop, exit quietly, or hand the file to the audio-only path.
 pub(crate) enum VideoOpen {
-    /// A video decode session is ready.
-    Ready(DecodeSession),
+    /// A video decode session is ready. Boxed because the session is far
+    /// larger than the other variants (clippy::large_enum_variant).
+    Ready(Box<DecodeSession>),
     /// Cancellation was signalled during the (expensive) open, so no decode
     /// work should begin.
     Cancelled,
@@ -207,8 +206,9 @@ pub(crate) enum VideoOpen {
 /// file, because the coordinator keeps sending seeks to a control channel that
 /// outlives the thread and so never learns the worker is gone.
 pub(crate) enum AudioOpen {
-    /// An audio decode session is ready.
-    Ready(AudioDecodeSession),
+    /// An audio decode session is ready. Boxed because the session is far
+    /// larger than the other variants (clippy::large_enum_variant).
+    Ready(Box<AudioDecodeSession>),
     /// The file has no audio stream. The coordinator plays video alone.
     NoAudioStream,
     /// A newer command (always a seek) arrived while the open was in flight.
@@ -229,6 +229,10 @@ pub(crate) struct DecodeSession {
     /// Position the decoder is currently seeked to (None = start of stream).
     /// Used to restart decoding after a mid-stream hardware→software fallback.
     position: Option<Duration>,
+    /// The one-shot `on_hdr_metadata` report has fired (see `run_to_eof`);
+    /// survives seeks and the HW→SW decoder swap so the session is told
+    /// about the stream's static metadata exactly once per open.
+    hdr_metadata_reported: bool,
     /// Backs the format context's interrupt callback. Declared last so it is
     /// dropped *after* `input` (whose teardown could otherwise reference a
     /// freed callback opaque pointer). The `AVFormatContext` holds a raw
@@ -253,6 +257,7 @@ impl DecodeSession {
     pub(crate) unsafe fn open(
         source: &MediaSource,
         device: &D3D11Device,
+        hdr_capabilities: HdrPresentationCapabilities,
         audio_output_format: AudioStreamFormat,
         start_position: Option<Duration>,
         decode_preference: VideoDecodePreference,
@@ -260,6 +265,7 @@ impl DecodeSession {
         io_cancel: Box<dyn Fn() -> bool>,
         should_cancel: &impl Fn() -> bool,
         on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
+        on_presentation_path: &mut impl FnMut(VideoPresentationPath) -> Result<(), String>,
         on_duration: &mut impl FnMut(Duration) -> Result<(), String>,
     ) -> Result<VideoOpen, String> {
         let source_path = source
@@ -322,6 +328,10 @@ impl DecodeSession {
             if !total_duration.is_zero() {
                 on_duration(total_duration)?;
             }
+            // Audio-only media presents nothing but overlays; announce the
+            // SDR path so a chain left over from a previous HDR open is
+            // swapped back before this file's idle/overlay rendering.
+            on_presentation_path(VideoPresentationPath::ExistingSdr)?;
             return Ok(VideoOpen::NoVideoStream);
         }
 
@@ -345,26 +355,50 @@ impl DecodeSession {
         // outcomes; passthrough and unsupported combinations remain typed
         // errors surfaced through the existing OpenFailed flow.
         //
-        // SDR short-circuits before any capability probing: an SDR open
-        // performs zero new COM work here, so a capability-query failure on
-        // exotic systems (headless/RDP output, drivers without the newer
-        // interfaces) can never regress SDR open availability.
+        // `hdr_capabilities` was snapshotted by the session on the main
+        // thread (the worker has no window objects; see
+        // `Presenter::query_hdr_capabilities`). That query is non-fatal by
+        // design — on any failure the snapshot is the all-false default —
+        // and SDR content never consults it, so a capability problem on
+        // exotic systems can never regress SDR open availability.
+        let presentation_path = if video.content_color.mode == ContentColorMode::Sdr {
+            VideoPresentationPath::ExistingSdr
+        } else {
+            select_video_presentation_path(&video.content_color, &hdr_capabilities)
+        };
+        // Announce the path before acting on it (even for the arms that
+        // fail the open): the session (re)builds the matching swapchain
+        // kind on this event, and the FIFO channel orders it ahead of any
+        // frame of this generation. A failing arm still announcing lets a
+        // leftover HDR chain swap back to SDR before the error shows.
+        on_presentation_path(presentation_path)?;
         if video.content_color.mode != ContentColorMode::Sdr {
-            let hdr_capabilities = query_hdr_presentation_capabilities(device, None)
-                .map_err(|error| error.to_string())?;
-            match select_video_presentation_path(&video.content_color, &hdr_capabilities) {
+            match presentation_path {
                 // Unreachable for non-SDR modes (the decision function
                 // returns ExistingSdr only for Sdr content); kept as an
                 // explicit no-op for match exhaustiveness.
                 VideoPresentationPath::ExistingSdr => {}
-                VideoPresentationPath::Hdr10Passthrough => {
-                    // Integration point for the passthrough commit: create
-                    // the HDR renderer via SwapChainPresenter::new_for_path,
-                    // then refine the classification from the first decoded
-                    // frame (refine_color_from_first_frame) once the HDR
-                    // swapchain exists. Until the color spaces are verified
-                    // this is a typed error, never a panic.
-                    return Err(HdrError::HdrColorSpaceUnverified.to_string());
+                VideoPresentationPath::HdrPqOutput => {
+                    // Present HDR (PQ or HLG) on the 10-bit HDR10 swapchain
+                    // (recreated by the session on the path event above)
+                    // through the same shader as the tone-map path, in its
+                    // PQ output encode: PQ passes through bit-transparently,
+                    // HLG is completed to display light and PQ-encoded.
+                    // Resolving the stream color space here still rejects
+                    // non-standard signals (full-range PQ, constant-
+                    // luminance matrices) as typed errors.
+                    let input_color_space = tone_map_stream_color_space(&video.content_color)
+                        .map_err(|e| e.to_string())?;
+                    // The capability snapshot already probed shader
+                    // sampling on the main thread, but the gate is cheap
+                    // and this worker owns its own device clone — re-check
+                    // at open so an incapable device fails cleanly here,
+                    // never at the first draw (a per-frame render error is
+                    // misread by device recovery as device-lost).
+                    if !device.supports_hdr_shader_tone_map() {
+                        return Err(HdrError::HdrToneMapUnavailable.to_string());
+                    }
+                    video.hdr_shader = Some((input_color_space, HdrShaderOutput::PqPassthrough));
                 }
                 VideoPresentationPath::HdrToSdrToneMapRequired => {
                     // Present HDR (PQ or HLG) through the verified SDR
@@ -385,7 +419,7 @@ impl DecodeSession {
                     if !device.supports_hdr_shader_tone_map() {
                         return Err(HdrError::HdrToneMapUnavailable.to_string());
                     }
-                    video.tone_map_input = Some(input_color_space);
+                    video.hdr_shader = Some((input_color_space, HdrShaderOutput::SdrToneMap));
                 }
                 VideoPresentationPath::UnsupportedHdr => {
                     return Err(HdrError::UnsupportedHdrPresentation.to_string());
@@ -446,7 +480,7 @@ impl DecodeSession {
         }
         let frame = Frame(frame);
 
-        Ok(VideoOpen::Ready(Self {
+        Ok(VideoOpen::Ready(Box::new(Self {
             input,
             video,
             audio,
@@ -455,8 +489,9 @@ impl DecodeSession {
             frame,
             summary,
             position: start_position,
+            hdr_metadata_reported: false,
             interrupt,
-        }))
+        })))
     }
 
     /// Seek within the already-open file to `target` and flush the decoders,
@@ -487,6 +522,10 @@ impl DecodeSession {
         op_id: OperationId,
         should_cancel: &impl Fn() -> bool,
         on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
+        on_hdr_metadata: &mut impl FnMut(
+            Option<MasteringDisplayMetadata>,
+            Option<ContentLightMetadata>,
+        ) -> Result<(), String>,
         on_video: &mut impl FnMut(PendingVideoFrame) -> Result<(), String>,
         on_audio: &mut impl FnMut(PendingAudioFrame) -> Result<(), String>,
     ) -> Result<StreamStatus, String> {
@@ -534,11 +573,14 @@ impl DecodeSession {
                                 send_result
                             );
                             sw_decoder.hw_fallback_count = self.video.hw_fallback_count + 1;
-                            // Preserve the HDR tone-map decision across the
+                            // Preserve the HDR shader decision across the
                             // decoder swap: the stream's color space is
                             // unchanged by falling back to software, so its
-                            // surfaces must still be tagged for HDR→SDR.
-                            sw_decoder.tone_map_input = self.video.tone_map_input;
+                            // surfaces must keep the same input space and
+                            // output encode. Same for the already-inspected
+                            // static metadata.
+                            sw_decoder.hdr_shader = self.video.hdr_shader;
+                            sw_decoder.hdr_metadata = self.video.hdr_metadata.clone();
                             self.video = sw_decoder;
                             hw_mid_fallback_done = true;
                             self.summary.decode_mode = self.video.mode;
@@ -577,6 +619,18 @@ impl DecodeSession {
                     on_video,
                     &|| should_cancel(),
                 )?;
+                // One-shot: the first decoded frame on the PQ-output path
+                // recorded its static-metadata answer; hand it to the
+                // session (which owns the swapchain) exactly once per open,
+                // and only when there is something to apply.
+                if !self.hdr_metadata_reported {
+                    if let Some((mastering, content_light)) = self.video.hdr_metadata.clone() {
+                        self.hdr_metadata_reported = true;
+                        if mastering.is_some() || content_light.is_some() {
+                            on_hdr_metadata(mastering, content_light)?;
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -765,7 +819,7 @@ impl AudioDecodeSession {
         }
         let frame = Frame(frame);
 
-        Ok(AudioOpen::Ready(Self {
+        Ok(AudioOpen::Ready(Box::new(Self {
             input,
             audio,
             audio_batch,
@@ -773,7 +827,7 @@ impl AudioDecodeSession {
             frame,
             produced_audio_frames: 0,
             interrupt,
-        }))
+        })))
     }
 
     /// Seek within the already-open file to `target` and flush the audio
@@ -891,12 +945,20 @@ struct VideoDecoder {
     /// at decoder open. Drives the presentation-path decision before any
     /// frame is decoded.
     content_color: ContentColorInfo,
-    /// When `Some`, this stream is HDR and presents through the SDR swapchain
-    /// via the video processor's HDR→SDR tone-mapping: the value is the
-    /// decoded DXGI input color space (PQ or HLG), stamped on every produced
-    /// surface. `None` is the ordinary SDR path. Set once at open by the
-    /// presentation-path fork; see `DecodeSession::open`.
-    tone_map_input: Option<DXGI_COLOR_SPACE_TYPE>,
+    /// When `Some`, this stream is HDR and presents through our own pixel
+    /// shader: the decoded DXGI input color space (PQ or HLG) paired with
+    /// the output encode (SDR tone-map or PQ passthrough), stamped on every
+    /// produced surface. `None` is the ordinary SDR path. Set once at open
+    /// by the presentation-path fork; see `DecodeSession::open`.
+    hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, HdrShaderOutput)>,
+    /// HDR10 static metadata from the first decoded frame's side data, on
+    /// the PQ-output path only. `None` = not yet inspected; `Some` = the
+    /// first frame's answer, including `(None, None)` for streams without
+    /// metadata. Read (and reported once) by `DecodeSession::run_to_eof`.
+    hdr_metadata: Option<(
+        Option<MasteringDisplayMetadata>,
+        Option<ContentLightMetadata>,
+    )>,
 }
 
 enum VideoDecoderOutput {
@@ -1065,7 +1127,8 @@ unsafe fn open_hardware_video_decoder(
         hw_fallback_count: 0,
         rotation_quarter_turns,
         content_color,
-        tone_map_input: None,
+        hdr_shader: None,
+        hdr_metadata: None,
     })
 }
 
@@ -1123,7 +1186,8 @@ unsafe fn open_software_video_decoder(
         hw_fallback_count: 0,
         rotation_quarter_turns,
         content_color,
-        tone_map_input: None,
+        hdr_shader: None,
+        hdr_metadata: None,
     })
 }
 
@@ -1266,80 +1330,83 @@ unsafe fn classify_stream_color(
     })
 }
 
-/// First-frame refinement of the stream-level classification.
+/// Extract HDR10 static metadata side data from a decoded frame, in
+/// FFmpeg's own unconverted representation (the DXGI unit conversion lives
+/// in [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata)).
 ///
-/// Precedence rule: valid, *specified* frame-level tags override
-/// stream-level tags; unspecified frame fields leave the stream-level
-/// values in place. Frame side data (mastering display, content light) is
-/// attached only here, never at stream level.
-///
-/// Integration point: runs ONLY on the HDR path, after the HDR swapchain
-/// exists, on a first frame that already flowed through the unchanged
-/// decode path (see the `Hdr10Passthrough` arm in `DecodeSession::open`).
-/// The verified SDR path never calls this and its first-frame handling is
-/// untouched.
-///
-/// HDR-VERIFY: the concrete field-by-field refinement (upgrading `mode`
-/// from frame-level trc/primaries, range/matrix overrides) is unresolved;
-/// today the stream classification passes through with side-data
-/// attachment only.
-///
-/// SAFETY contract: `frame` must be a live decoded `AVFrame` owned by the
-/// caller. Read-only access; nothing is retained beyond the call.
-unsafe fn refine_color_from_first_frame(
-    stream_info: ContentColorInfo,
-    frame: *const AVFrame,
-) -> Result<ContentColorInfo, String> {
-    if frame.is_null() {
-        return Err("first decoded frame was null during HDR color refinement".into());
-    }
-    let (mastering_display, content_light) = extract_hdr_metadata_from_frame(frame)?;
-    let mut refined = stream_info;
-    refined.mastering_display = mastering_display;
-    refined.content_light = content_light;
-    Ok(refined)
-}
-
-/// Locate HDR10 static metadata side data on a decoded frame.
-///
-/// Missing side data yields `None` and never fails playback. Side data
-/// that IS present cannot be parsed yet: the payload structs
-/// (`AVMasteringDisplayMetadata`, `AVContentLightMetadata`) are not on our
-/// bindgen allowlist, and their layouts must not be guessed — presence is
-/// a typed error so the verification commit cannot be skipped silently.
-///
-/// HDR-VERIFY: bind the payload structs and parse `data`/`size` into
-/// [`MasteringDisplayMetadata`] / [`ContentLightMetadata`].
+/// Missing, undersized, or null side data yields `None` — static metadata
+/// is advisory and its absence never fails playback.
 ///
 /// SAFETY contract: `frame` must be a live decoded `AVFrame`; the
-/// `side_data` entries are owned by the frame, and only the bound
-/// `AVFrameSideData` header (the `type_` tag) is read — never the payload.
+/// `side_data` entries and their payloads are owned by the frame and are
+/// only read for the duration of the call. Payload layouts come from the
+/// bindgen-generated `AVMasteringDisplayMetadata` /
+/// `AVContentLightMetadata` (libavutil/mastering_display_metadata.h in
+/// the shim header), guarded by a size check before the cast.
 unsafe fn extract_hdr_metadata_from_frame(
     frame: *const AVFrame,
-) -> Result<
-    (
-        Option<MasteringDisplayMetadata>,
-        Option<ContentLightMetadata>,
-    ),
-    String,
-> {
+) -> (
+    Option<MasteringDisplayMetadata>,
+    Option<ContentLightMetadata>,
+) {
     if frame.is_null() {
-        return Err("frame was null during HDR metadata extraction".into());
+        return (None, None);
     }
+    let rational = |r: AVRational| HdrRational {
+        num: r.num,
+        den: r.den,
+    };
+    let mut mastering = None;
+    let mut content_light = None;
     let count = (*frame).nb_side_data.max(0) as isize;
     for index in 0..count {
         let entry = *(*frame).side_data.offset(index);
-        if entry.is_null() {
+        if entry.is_null() || (*entry).data.is_null() {
             continue;
         }
         let side_data_type = (*entry).type_;
+        let size = (*entry).size as usize;
         if side_data_type == AVFrameSideDataType_AV_FRAME_DATA_MASTERING_DISPLAY_METADATA
-            || side_data_type == AVFrameSideDataType_AV_FRAME_DATA_CONTENT_LIGHT_LEVEL
+            && mastering.is_none()
+            && size >= size_of::<AVMasteringDisplayMetadata>()
         {
-            return Err(HdrError::HdrMetadataConversionUnverified.to_string());
+            let payload = &*((*entry).data as *const AVMasteringDisplayMetadata);
+            mastering = Some(MasteringDisplayMetadata {
+                display_primaries: [
+                    [
+                        rational(payload.display_primaries[0][0]),
+                        rational(payload.display_primaries[0][1]),
+                    ],
+                    [
+                        rational(payload.display_primaries[1][0]),
+                        rational(payload.display_primaries[1][1]),
+                    ],
+                    [
+                        rational(payload.display_primaries[2][0]),
+                        rational(payload.display_primaries[2][1]),
+                    ],
+                ],
+                white_point: [
+                    rational(payload.white_point[0]),
+                    rational(payload.white_point[1]),
+                ],
+                min_luminance: rational(payload.min_luminance),
+                max_luminance: rational(payload.max_luminance),
+                has_primaries: payload.has_primaries != 0,
+                has_luminance: payload.has_luminance != 0,
+            });
+        } else if side_data_type == AVFrameSideDataType_AV_FRAME_DATA_CONTENT_LIGHT_LEVEL
+            && content_light.is_none()
+            && size >= size_of::<AVContentLightMetadata>()
+        {
+            let payload = &*((*entry).data as *const AVContentLightMetadata);
+            content_light = Some(ContentLightMetadata {
+                max_content_light_level: Some(payload.MaxCLL),
+                max_frame_average_light_level: Some(payload.MaxFALL),
+            });
         }
     }
-    Ok((None, None))
+    (mastering, content_light)
 }
 
 /// Reduce a decoded frame's colorimetry tags to the matrix/range pair the
@@ -1413,9 +1480,21 @@ where
             return Ok(());
         }
 
+        // On the PQ-output path, inspect the first decoded frame's side
+        // data for HDR10 static metadata (mastering display + content
+        // light). Recorded once; run_to_eof reports it to the session.
+        if video.hdr_metadata.is_none()
+            && matches!(
+                video.hdr_shader,
+                Some((_, crate::render::hdr::HdrShaderOutput::PqPassthrough))
+            )
+        {
+            video.hdr_metadata = Some(extract_hdr_metadata_from_frame(frame));
+        }
+
         // Copied out before the `&mut video.output` borrow so both arms can
         // stamp surfaces with it without a disjoint-field borrow dance.
-        let tone_map_input = video.tone_map_input;
+        let hdr_shader = video.hdr_shader;
         let result = match &mut video.output {
             VideoDecoderOutput::Hardware => {
                 let pixel_format = (*frame).format as AVPixelFormat;
@@ -1448,7 +1527,7 @@ where
                         sar_num,
                         sar_den,
                         frame_surface_color(frame),
-                        tone_map_input,
+                        hdr_shader,
                     )
                     .map_err(|error| error.to_string())?;
 
@@ -1465,7 +1544,7 @@ where
                 }
             }
             VideoDecoderOutput::Software(converter) => {
-                let surface = converter.convert(frame, device, tone_map_input)?;
+                let surface = converter.convert(frame, device, hdr_shader)?;
                 let sar = (*frame).sample_aspect_ratio;
                 let sar_num = if sar.num > 0 && sar.den > 0 {
                     sar.num as u32
@@ -1513,7 +1592,7 @@ impl SoftwareVideoConverter {
         &mut self,
         frame: *mut AVFrame,
         device: &D3D11Device,
-        tone_map_input: Option<DXGI_COLOR_SPACE_TYPE>,
+        hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, HdrShaderOutput)>,
     ) -> Result<VideoSurface, String> {
         let width = (*frame).width;
         let height = (*frame).height;
@@ -1581,7 +1660,7 @@ impl SoftwareVideoConverter {
                 sar_num,
                 sar_den,
                 frame_surface_color(frame),
-                tone_map_input,
+                hdr_shader,
             )
             .map_err(|e| e.to_string())
     }

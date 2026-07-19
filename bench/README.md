@@ -102,6 +102,7 @@ and exit non-zero on failure.
 | `verify-colors.ps1` | SDR (BT.709) backbuffer matches an ffmpeg reference decode |
 | `verify-colors-pq.ps1` | The resolved HDR10 color spaces, via 10-bit backbuffer readback |
 | `verify-subtitles-hdr.ps1` | Overlays composite correctly on top of HDR video |
+| `verify-tonemap.ps1` | The HDR→SDR tone-map shader's output matches a double-precision CPU model of its math (PQ clipped bars, PQ unclipped midtones, HLG) |
 
 `verify-subtitles-hdr.ps1` exists because HDR frames reach the backbuffer by a
 different route than SDR ones: SDR is blitted by the D3D11 video processor,

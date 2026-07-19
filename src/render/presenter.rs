@@ -5,6 +5,7 @@ use crate::{
     },
     platform::window::NativeWindow,
     render::{
+        hdr::{swapchain_kind_for_path, VideoPresentationPath},
         surface_registry::{SurfaceRegistry, VideoSurfaceHandle},
         swapchain::SwapChainPresenter,
         timeline::TimelineOverlayModel,
@@ -21,6 +22,11 @@ pub struct Presenter {
     // this the last device reference — e.g. closing the window after the clip
     // has finished playing.
     swap_chain: Option<SwapChainPresenter>,
+    /// The presentation path the live swapchain was built for. Rebuild
+    /// paths (resize failure, device loss) reconstruct THIS path's
+    /// swapchain kind; the kind only ever changes through
+    /// [`Self::ensure_swapchain_for_path`] at file-open.
+    swapchain_path: VideoPresentationPath,
     surfaces: SurfaceRegistry,
     current_surface: Option<VideoSurfaceHandle>,
     subtitle_overlay: Option<SubtitleOverlay>,
@@ -45,6 +51,7 @@ impl Presenter {
         Ok(Self {
             device,
             swap_chain: Some(swap_chain),
+            swapchain_path: VideoPresentationPath::ExistingSdr,
             surfaces: SurfaceRegistry::default(),
             current_surface: None,
             subtitle_overlay: None,
@@ -163,6 +170,53 @@ impl Presenter {
         Ok(())
     }
 
+    /// Make the live swapchain match `path`'s kind, recreating it between
+    /// playbacks at file-open (never mid-playback). A same-kind path is a
+    /// strict no-op on the chain object, so SDR↔SDR (and tone-map) opens
+    /// can never churn the pixel-verified SDR swapchain.
+    ///
+    /// On failure to build the HDR chain, the verified SDR chain is
+    /// restored so the window keeps presenting, and the original typed
+    /// error is returned for the caller to surface — an HDR open must fail
+    /// visibly, never silently render into the wrong chain.
+    pub fn ensure_swapchain_for_path(
+        &mut self,
+        window: &NativeWindow,
+        path: VideoPresentationPath,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let target = swapchain_kind_for_path(path);
+        if self.swap_chain.as_ref().map(|sc| sc.kind()) == Some(target) {
+            // Record the path (it may differ within a kind, e.g.
+            // ExistingSdr vs HdrToSdrToneMapRequired — both SDR) so
+            // rebuilds keep dispatching to the same constructor family.
+            self.swapchain_path = path;
+            return Ok(());
+        }
+        flog!(
+            "[swapchain] kind change {:?} -> {:?} (path {:?})",
+            self.swap_chain.as_ref().map(|sc| sc.kind()),
+            target,
+            path
+        );
+        self.drop_swap_chain();
+        match SwapChainPresenter::new_for_path(window, &self.device, path) {
+            Ok(sc) => {
+                self.swap_chain = Some(sc);
+                self.swapchain_path = path;
+                Ok(())
+            }
+            Err(error) => {
+                flog!(
+                    "[swapchain] {:?} chain creation failed ({error}); restoring SDR",
+                    target
+                );
+                self.swapchain_path = VideoPresentationPath::ExistingSdr;
+                self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
+                Err(error)
+            }
+        }
+    }
+
     pub fn rebuild_swap_chain(
         &mut self,
         window: &NativeWindow,
@@ -170,8 +224,7 @@ impl Presenter {
         // Release backbuffer / render-target references, flush the device
         // context, then drop the swap chain — DXGI only allows one per HWND.
         self.drop_swap_chain();
-        self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
-        Ok(())
+        self.build_swap_chain_for_current_path(window)
     }
 
     pub fn rebuild_device(
@@ -183,8 +236,36 @@ impl Presenter {
         self.reset_surfaces();
         self.drop_swap_chain();
         self.device = D3D11Device::create()?;
-        self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
-        Ok(())
+        self.build_swap_chain_for_current_path(window)
+    }
+
+    /// (Re)build the swapchain of the current path's kind, for the rebuild
+    /// paths above. If the HDR chain cannot be rebuilt (e.g. the window now
+    /// sits on a display that rejects the HDR10 color space), fall back to
+    /// the verified SDR chain and report success: recovery must leave the
+    /// window presenting. Any still-HDR content then fails visibly at draw
+    /// or is re-decided by the next open's path event — it is never
+    /// silently rendered into the wrong chain.
+    fn build_swap_chain_for_current_path(
+        &mut self,
+        window: &NativeWindow,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match SwapChainPresenter::new_for_path(window, &self.device, self.swapchain_path) {
+            Ok(sc) => {
+                self.swap_chain = Some(sc);
+                Ok(())
+            }
+            Err(error) if self.swapchain_path != VideoPresentationPath::ExistingSdr => {
+                flog!(
+                    "[swapchain] rebuild of {:?} failed ({error}); falling back to SDR",
+                    self.swapchain_path
+                );
+                self.swapchain_path = VideoPresentationPath::ExistingSdr;
+                self.swap_chain = Some(SwapChainPresenter::new(window, &self.device)?);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn drop_swap_chain(&mut self) {
@@ -197,6 +278,40 @@ impl Presenter {
 
     pub fn device(&self) -> &D3D11Device {
         &self.device
+    }
+
+    /// Apply HDR10 static metadata to the live HDR swapchain. Callers
+    /// treat failure as advisory (logged, never fatal): DWM composites the
+    /// PQ chain correctly without metadata.
+    pub fn apply_hdr10_metadata(
+        &self,
+        metadata: &windows::Win32::Graphics::Dxgi::DXGI_HDR_METADATA_HDR10,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(sc) = self.swap_chain.as_ref() else {
+            return Err("swap chain unavailable".into());
+        };
+        sc.apply_hdr10_metadata(metadata)
+    }
+
+    /// Snapshot the display/swapchain/device capabilities that gate HDR
+    /// presentation. Must run on the main thread, where the window's swap
+    /// chain lives: `GetContainingOutput` on that chain identifies the
+    /// display the window is actually on (per-monitor correct).
+    ///
+    /// Non-fatal by design: any failure — no swap chain, headless/RDP
+    /// output, drivers without the newer interfaces — returns the all-false
+    /// default, which can only make HDR content dead-end in a typed error.
+    /// It can never affect SDR selection, so exotic systems cannot regress
+    /// SDR open availability.
+    pub fn query_hdr_capabilities(&self) -> crate::render::hdr::HdrPresentationCapabilities {
+        let Some(sc) = self.swap_chain.as_ref() else {
+            return crate::render::hdr::HdrPresentationCapabilities::default();
+        };
+        crate::ffi::dxgi::query_hdr_presentation_capabilities(
+            &self.device,
+            Some(sc.raw_swap_chain()),
+        )
+        .unwrap_or_default()
     }
 
     pub fn register_surface(

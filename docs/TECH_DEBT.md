@@ -133,6 +133,37 @@ These stay out of scope (consistent with `ARCHITECTURE.md §2` and `AGENTS.md`):
 - Making `PlaybackSession` a trait, or introducing a second coordinator.
 - Workspace / multi-crate split.
 - Streaming, playlists / media library, plugins, web UI.
-- HDR tone mapping, frame interpolation, extra hw decode backends.
+- Metadata-driven (dynamic) tone mapping, frame interpolation, extra hw
+  decode backends. (HDR output itself shipped: PQ/HLG present on a 10-bit
+  PQ swapchain when the display is HDR-active — `HdrPqOutput` — and
+  tone-map to SDR in the same pixel shader otherwise.)
 - Cross-platform abstractions.
 - Any change to steady-state playback behavior in the name of "cleanup".
+
+---
+
+## 6. HDR follow-ups (updated after the HDR-output branch; not scheduled)
+
+Superseded items from `docs/audits/2026-07-14-hdr-final-audit.md`: the
+passthrough arm now plays (HdrPqOutput), `display_hdr_active` is real,
+open-time path/caps diagnostics are logged, and the tone-map-on-HDR-desktop
+question is moot (HDR desktops get PQ output). Still open:
+
+1. ~~HDR10 static metadata~~ — DONE: `SetHDRMetaData` is wired (first-frame
+   side data → `HdrMetadataKnown` event → `build_dxgi_hdr10_metadata`,
+   unit-tested against the MSDN worked example → HDR chain), verified
+   end-to-end by `bench/verify-hdr-metadata.ps1` with real x265 SEI.
+   Advisory only: absence or failure never gates playback.
+   `refine_color_from_first_frame` (frame-tag classification refinement)
+   was deleted; reintroduce from scratch if real-world files need it.
+2. A scripted entry point for mixed HDR/SDR queue validation (queues are only
+   reachable via OLE drag-drop today; the CLI seeds a single-file queue).
+   The SDR→HDR chain swap is exercised end-to-end by
+   `bench/verify-hdr-passthrough.ps1` (app starts on the SDR chain); the
+   HDR→SDR direction is the same kind-driven code but has no automated
+   in-process driver.
+3. HLG OOTF is fixed at the 1000-nit nominal peak; the display's real peak
+   (`HdrDisplayDescriptor.max_luminance`, ~418 nits on the dev panel) could
+   drive the system gamma for closer-to-reference HLG.
+4. PQ-space straight-alpha blending for overlays on the HDR chain
+   (anti-aliased edges blend slightly dark; solid text exact).
