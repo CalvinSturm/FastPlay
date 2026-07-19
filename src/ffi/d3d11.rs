@@ -111,7 +111,14 @@ pub(crate) struct SubtitleOverlay {
 
 pub(crate) struct SubtitleRenderer {
     vertex_shader: ID3D11VertexShader,
+    /// Passes the sRGB-encoded BGRA texel through untouched — the verified
+    /// SDR overlay shader, byte-identical on the SDR chain.
     pixel_shader: ID3D11PixelShader,
+    /// PQ-chain variant: sRGB-decodes the texel, converts BT.709→BT.2020,
+    /// scales to 203-nit reference white, PQ-encodes; alpha unmodified.
+    /// Straight-alpha blending then happens in PQ space (see
+    /// `render_subtitle_overlay`).
+    hdr_pixel_shader: ID3D11PixelShader,
     input_layout: ID3D11InputLayout,
     sampler: ID3D11SamplerState,
     blend_state: ID3D11BlendState,
@@ -1476,11 +1483,56 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
     return subtitle_tex.Sample(subtitle_sampler, uv);
 }
 \0";
+        // Overlay pixels are authored in sRGB. On the PQ chain, writing them
+        // raw would scan out at a few nits (dim, wrong hue); instead decode
+        // to linear, move BT.709 -> BT.2020 primaries (BT.2087 matrix), pin
+        // white to the BT.2408 203-nit reference, and PQ-encode. Alpha is
+        // passed through: the fixed-function straight-alpha blend then runs
+        // in PQ space, the accepted compromise (anti-aliased edges blend
+        // slightly dark; solid text and boxes are exact).
+        let hdr_pixel_shader_source = b"
+Texture2D subtitle_tex : register(t0);
+SamplerState subtitle_sampler : register(s0);
+
+static const float REF_WHITE_NITS = 203.0f;
+static const float PQ_PEAK_NITS = 10000.0f;
+
+float3 srgb_decode(float3 encoded) {
+    return (encoded <= 0.04045f)
+        ? encoded / 12.92f
+        : pow((encoded + 0.055f) / 1.055f, 2.4f);
+}
+
+// SMPTE ST 2084 inverse EOTF; input in units of PQ_PEAK_NITS.
+float3 pq_inverse_eotf(float3 luminance) {
+    const float m1 = 0.1593017578125f;
+    const float m2 = 78.84375f;
+    const float c1 = 0.8359375f;
+    const float c2 = 18.8515625f;
+    const float c3 = 18.6875f;
+    float3 y = pow(max(luminance, 0.0f), m1);
+    return pow((c1 + c2 * y) / (1.0f + c3 * y), m2);
+}
+
+float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
+    float4 texel = subtitle_tex.Sample(subtitle_sampler, uv);
+    float3 linear_rgb = srgb_decode(saturate(texel.rgb));
+    // BT.709 -> BT.2020 primaries (BT.2087), in linear light.
+    float3 rgb2020;
+    rgb2020.r = 0.627404f * linear_rgb.r + 0.329283f * linear_rgb.g + 0.043313f * linear_rgb.b;
+    rgb2020.g = 0.069097f * linear_rgb.r + 0.919540f * linear_rgb.g + 0.011362f * linear_rgb.b;
+    rgb2020.b = 0.016391f * linear_rgb.r + 0.088013f * linear_rgb.g + 0.895595f * linear_rgb.b;
+    float3 encoded = pq_inverse_eotf(rgb2020 * (REF_WHITE_NITS / PQ_PEAK_NITS));
+    return float4(encoded, texel.a);
+}
+\0";
         let vertex_blob = compile_shader(vertex_shader_source, b"main\0", b"vs_4_0\0")?;
         let pixel_blob = compile_shader(pixel_shader_source, b"main\0", b"ps_4_0\0")?;
+        let hdr_pixel_blob = compile_shader(hdr_pixel_shader_source, b"main\0", b"ps_4_0\0")?;
 
         let mut vertex_shader = None;
         let mut pixel_shader = None;
+        let mut hdr_pixel_shader = None;
         let mut input_layout = None;
         let input_elements = [
             D3D11_INPUT_ELEMENT_DESC {
@@ -1530,12 +1582,15 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         let mut blend_state = None;
         let vertex_bytecode = shader_blob_bytes(&vertex_blob);
         let pixel_bytecode = shader_blob_bytes(&pixel_blob);
+        let hdr_pixel_bytecode = shader_blob_bytes(&hdr_pixel_blob);
 
         unsafe {
             self.device
                 .CreateVertexShader(vertex_bytecode, None, Some(&mut vertex_shader))?;
             self.device
                 .CreatePixelShader(pixel_bytecode, None, Some(&mut pixel_shader))?;
+            self.device
+                .CreatePixelShader(hdr_pixel_bytecode, None, Some(&mut hdr_pixel_shader))?;
             self.device.CreateInputLayout(
                 &input_elements,
                 vertex_bytecode,
@@ -1551,6 +1606,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             vertex_shader: vertex_shader
                 .ok_or(D3D11Error("CreateVertexShader returned no shader"))?,
             pixel_shader: pixel_shader.ok_or(D3D11Error("CreatePixelShader returned no shader"))?,
+            hdr_pixel_shader: hdr_pixel_shader
+                .ok_or(D3D11Error("CreatePixelShader returned no HDR shader"))?,
             input_layout: input_layout.ok_or(D3D11Error("CreateInputLayout returned no layout"))?,
             sampler: sampler.ok_or(D3D11Error("CreateSamplerState returned no sampler"))?,
             blend_state: blend_state
@@ -1635,6 +1692,115 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             width: bitmap.width,
             height: bitmap.height,
         }))
+    }
+
+    /// Dev-only: an overlay from raw BGRA pixels on a full-viewport quad,
+    /// for the env-gated HDR overlay validation (`render::hdr_validate`).
+    /// Production overlays are rasterized text/graphics; this exists so the
+    /// pixel oracle can feed the overlay pipeline known flat colors.
+    // Called only by the env-gated validation entry.
+    #[allow(dead_code)]
+    pub(crate) fn create_validation_overlay(
+        &self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<SubtitleOverlay, Box<dyn Error>> {
+        if pixels.len() != (width as usize) * (height as usize) * 4 {
+            return Err(Box::new(D3D11Error("validation overlay size mismatch")));
+        }
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: width.saturating_mul(4),
+            SysMemSlicePitch: 0,
+        };
+        // Full-viewport quad, same winding/uv convention as
+        // subtitle_quad_vertices.
+        let vertices = [
+            SubtitleVertex {
+                position: [-1.0, 1.0, 0.0],
+                texcoord: [0.0, 0.0],
+            },
+            SubtitleVertex {
+                position: [1.0, 1.0, 0.0],
+                texcoord: [1.0, 0.0],
+            },
+            SubtitleVertex {
+                position: [-1.0, -1.0, 0.0],
+                texcoord: [0.0, 1.0],
+            },
+            SubtitleVertex {
+                position: [-1.0, -1.0, 0.0],
+                texcoord: [0.0, 1.0],
+            },
+            SubtitleVertex {
+                position: [1.0, 1.0, 0.0],
+                texcoord: [1.0, 0.0],
+            },
+            SubtitleVertex {
+                position: [1.0, -1.0, 0.0],
+                texcoord: [1.0, 1.0],
+            },
+        ];
+        let vertex_buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: (size_of::<SubtitleVertex>() * vertices.len()) as u32,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+        let vertex_buffer_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: vertices.as_ptr().cast(),
+            SysMemPitch: 0,
+            SysMemSlicePitch: 0,
+        };
+        let mut texture = None;
+        let mut shader_resource_view = None;
+        let mut vertex_buffer = None;
+        // SAFETY: descriptors are fully initialized; `pixels`/`vertices`
+        // outlive the creation calls; created objects belong to this device.
+        unsafe {
+            self.device
+                .CreateTexture2D(&texture_desc, Some(&initial_data), Some(&mut texture))?;
+            self.device.CreateShaderResourceView(
+                texture
+                    .as_ref()
+                    .ok_or(D3D11Error("CreateTexture2D returned no overlay texture"))?,
+                None,
+                Some(&mut shader_resource_view),
+            )?;
+            self.device.CreateBuffer(
+                &vertex_buffer_desc,
+                Some(&vertex_buffer_data),
+                Some(&mut vertex_buffer),
+            )?;
+        }
+        Ok(SubtitleOverlay {
+            texture: texture.ok_or(D3D11Error("CreateTexture2D returned no overlay texture"))?,
+            shader_resource_view: shader_resource_view.ok_or(D3D11Error(
+                "CreateShaderResourceView returned no overlay view",
+            ))?,
+            vertex_buffer: vertex_buffer
+                .ok_or(D3D11Error("CreateBuffer returned no overlay vertex buffer"))?,
+            width,
+            height,
+        })
     }
 
     pub(crate) fn create_timeline_overlay(
@@ -2090,7 +2256,15 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         render_target: &RenderTargetView,
         viewport_width: u32,
         viewport_height: u32,
+        chain_kind: crate::render::hdr::SwapchainKind,
     ) -> Result<(), Box<dyn Error>> {
+        // The SDR chain binds the exact original shader object — overlay
+        // rendering there is byte-identical to the pre-HDR path. Only the
+        // PQ chain selects the encode-aware variant.
+        let pixel_shader = match chain_kind {
+            crate::render::hdr::SwapchainKind::Sdr => &renderer.pixel_shader,
+            crate::render::hdr::SwapchainKind::Hdr10Pq => &renderer.hdr_pixel_shader,
+        };
         let stride = size_of::<SubtitleVertex>() as u32;
         let offset = 0u32;
         let viewport = D3D11_VIEWPORT {
@@ -2121,7 +2295,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             );
             self.context
                 .VSSetShader(Some(&renderer.vertex_shader), None);
-            self.context.PSSetShader(Some(&renderer.pixel_shader), None);
+            self.context.PSSetShader(Some(pixel_shader), None);
             self.context
                 .PSSetSamplers(0, Some(&[Some(renderer.sampler.clone())]));
             self.context
