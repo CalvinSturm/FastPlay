@@ -698,7 +698,29 @@ impl DxgiSwapChain {
         output_height: u32,
         view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn Error>> {
-        if surface.hdr_tone_map.is_some() {
+        // A surface whose output mode disagrees with this chain's kind is a
+        // typed error, never a silent wrong-colors draw: the open-time
+        // PresentationPathSelected event swaps the chain before the first
+        // frame of its generation, so a mismatch here means an ordering bug.
+        use crate::render::hdr::HdrShaderOutput;
+        let surface_mode = surface.hdr_shader.map(|(_, output)| output);
+        let mode_matches_chain = matches!(
+            (surface_mode, self.kind),
+            (None, SwapchainKind::Sdr)
+                | (Some(HdrShaderOutput::SdrToneMap), SwapchainKind::Sdr)
+                | (Some(HdrShaderOutput::PqPassthrough), SwapchainKind::Hdr10Pq)
+        );
+        if !mode_matches_chain {
+            return Err(Box::new(DxgiError(
+                format!(
+                    "surface output mode {surface_mode:?} does not match the live {:?} swapchain",
+                    self.kind
+                )
+                .into(),
+            )));
+        }
+
+        if surface.hdr_shader.is_some() {
             if self.hdr_tone_map_renderer.is_none() {
                 self.hdr_tone_map_renderer = Some(device.create_hdr_tone_map_renderer()?);
             }
@@ -717,9 +739,6 @@ impl DxgiSwapChain {
                 output_width,
                 output_height,
                 view,
-                // The SDR-swapchain tone-map path; the PQ-output encode is
-                // selected per surface by the integration commit.
-                crate::render::hdr::HdrShaderOutput::SdrToneMap,
             );
         }
 
@@ -973,7 +992,6 @@ impl DxgiSwapChain {
             output_width,
             output_height,
             &crate::render::ViewTransform::default(),
-            crate::render::hdr::HdrShaderOutput::PqPassthrough,
         )?;
         device.capture_bgra_texture(backbuffer)
     }
@@ -1238,6 +1256,22 @@ impl DxgiSwapChain {
             )?;
         }
 
+        // The HDR10 chain's color space is documented to persist across
+        // ResizeBuffers, but re-committing it is free and idempotent —
+        // scanning PQ pixels out with an SDR interpretation would be a
+        // silent wrong-colors failure the pre-Present readback cannot see.
+        if self.kind == SwapchainKind::Hdr10Pq {
+            let hdr_color_space = verified_hdr10_swapchain_color_space()?;
+            let swap_chain3: IDXGISwapChain3 = self
+                .swap_chain
+                .cast()
+                .map_err(|_| HdrError::HdrSwapchainColorSpaceUnsupported)?;
+            // SAFETY: color-space commit on the live swap chain.
+            unsafe {
+                swap_chain3.SetColorSpace1(hdr_color_space)?;
+            }
+        }
+
         let (backbuffer, render_target) = create_backbuffer_state(device, &self.swap_chain)?;
         self.backbuffer = Some(backbuffer);
         self.render_target = Some(render_target);
@@ -1361,11 +1395,11 @@ pub fn query_hdr_presentation_capabilities(
         }
     }
 
-    // Hardcoded false until the integration commit flips it to the real
-    // probe (D3D11Device::supports_hdr_shader_tone_map): the PQ-output
-    // render path must exist and be pixel-validated before the gate can
-    // select it.
-    capabilities.hdr_shader_sampling_supported = false;
+    // The real probe: can the HDR shader sample decoded NV12/P010 through
+    // per-plane SRVs on this device. The PQ-output render path behind it is
+    // pixel-validated (bench/verify-colors-pq.ps1 -Mode shader-pq,
+    // bench/verify-hlg-pq.ps1, bench/verify-overlay-hdr.ps1).
+    capabilities.hdr_shader_sampling_supported = device.supports_hdr_shader_tone_map();
 
     Ok(capabilities)
 }
