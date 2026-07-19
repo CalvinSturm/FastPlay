@@ -1,10 +1,22 @@
 # FastPlay v0.4.4
 
-FastPlay `0.4.4` fixes two playback issues: full-range PQ video (notably
-Topaz Video AI "HDR Enhanced" exports) now plays, and high-frame-rate
-content (120 fps) now presents every frame.
+FastPlay `0.4.4` caps off a same-day pair with `0.4.3`: together they bring
+**native HDR output**, and this release adds two follow-up fixes found
+immediately after — full-range PQ video (notably Topaz Video AI
+"HDR Enhanced" exports) now plays, and high-frame-rate content (120 fps)
+now presents every frame.
 
-## Fixes
+## HDR, since v0.4.3 (same day)
+
+On a display with Windows HDR enabled, HDR10 (PQ) and HLG video — including
+iPhone recordings — presents natively in HDR on a 10-bit PQ swapchain, with
+the stream's HDR10 static metadata passed to the display and HDR-aware
+overlays and screenshots. On SDR displays the same content is tone-mapped
+to SDR in a pixel shader. The decision is per file open, for the monitor
+the window is on. Details in the
+[v0.4.3 notes](https://github.com/CalvinSturm/FastPlay/releases/tag/v0.4.3).
+
+## Fixes in v0.4.4
 
 ### Full-range PQ video failed to open
 
