@@ -12,11 +12,11 @@
 //! conversion, side-data layouts, display-active policy) remains a typed
 //! error. Search for `HDR-VERIFY` to find the open items.
 //!
-//! PQ and HLG both present today, tone-mapped to SDR in a pixel shader
-//! (`HdrToneMapRenderer`) rather than by the GPU video processor — see
+//! PQ and HLG both present today through a pixel shader
+//! (`HdrToneMapRenderer`) rather than the GPU video processor — see
 //! [`VideoPresentationPath::HdrToSdrToneMapRequired`] for why the processor
-//! cannot do it. This module resolves the stream's DXGI color space and
-//! [`tone_map_signal`] decodes it into that shader's inputs.
+//! cannot do it. This module validates the stream's colorimetry and
+//! resolves it into that shader's inputs ([`hdr_stream_signal`]).
 //!
 //! The verified SDR path never enters this module beyond
 //! [`select_video_presentation_path`] returning
@@ -27,10 +27,7 @@ use std::{error::Error, fmt};
 use windows::Win32::Graphics::Dxgi::{
     Common::{
         DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, DXGI_COLOR_SPACE_TYPE,
-        DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
-        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
-        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020,
-        DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
         DXGI_FORMAT_R10G10B10A2_UNORM,
     },
     DXGI_HDR_METADATA_HDR10,
@@ -92,8 +89,7 @@ pub(crate) enum VideoPresentationPath {
     HdrPqOutput,
     /// HDR content tone-mapped to SDR in our own pixel shader and presented
     /// through the existing SDR swapchain. The stream's colorimetry is
-    /// resolved to a DXGI color space ([`tone_map_stream_color_space`]) and
-    /// decoded into shader inputs ([`tone_map_signal`]).
+    /// validated and resolved into shader inputs ([`hdr_stream_signal`]).
     ///
     /// This does *not* use the video processor's HDR-to-SDR conversion.
     /// That was the original design and it is unreachable on real hardware:
@@ -511,39 +507,35 @@ pub(crate) fn verified_hdr10_processor_output_color_space(
     verified_hdr10_swapchain_color_space()
 }
 
-/// The YCbCr input color space the tone-map blt tags the decoded HDR
-/// stream with, so the GPU video processor knows what it is converting
-/// *from*:
+/// Resolve the decoded HDR stream's colorimetry into the shader inputs the
+/// HDR renderer consumes ([`HdrToneMapSignal`]): which transfer to decode
+/// and whether the samples are full- or studio-range.
 ///
-/// - HDR10 PQ reuses [`verified_hdr_stream_color_space`]
-///   (`YCBCR_STUDIO_G2084_LEFT_P2020`, resolved + pixel-validated), with
-///   the same typed errors for full-range / constant-luminance /
-///   non-BT.2020 signals.
-/// - HLG (BT.2100: BT.2020 NCL matrix, or unspecified which BT.2100
-///   defines as BT.2020 NCL) maps to the only GHLG variants the DXGI enum
-///   offers: `YCBCR_STUDIO_GHLG_TOPLEFT_P2020` for studio/unspecified
-///   range and `YCBCR_FULL_GHLG_TOPLEFT_P2020` for full range. Validated
-///   structurally per-device via `CheckVideoProcessorFormatConversion` at
-///   the blt (there is no chroma-siting choice to get wrong: TOPLEFT is
-///   the only siting DXGI defines for GHLG).
-/// - Anything else stays a typed error rather than a guess.
-pub(crate) fn tone_map_stream_color_space(
-    content: &ContentColorInfo,
-) -> Result<DXGI_COLOR_SPACE_TYPE, HdrError> {
+/// This replaced the DXGI-color-space representation as the single
+/// validated form on the shader path: DXGI's enum has no full-range PQ
+/// variant, but full-range PQ exists in the wild (notably Topaz Video AI
+/// "HDR Enhanced" exports: 8-bit full-range H.264 with genuine PQ/BT.2020
+/// signalling) and the shader's range normalization handles it exactly
+/// like full-range HLG. The matrix validation is unchanged: only BT.2020
+/// NCL (or unspecified, which BT.2100 defines as BT.2020 NCL) is accepted
+/// — constant-luminance and other matrices stay typed errors rather than
+/// guesses, and SDR/Unknown content can never resolve a signal.
+pub(crate) fn hdr_stream_signal(content: &ContentColorInfo) -> Result<HdrToneMapSignal, HdrError> {
+    if content.color_space != AVColorSpace_AVCOL_SPC_BT2020_NCL
+        && content.color_space != AVColorSpace_AVCOL_SPC_UNSPECIFIED
+    {
+        return Err(HdrError::HdrColorSpaceUnverified);
+    }
+    let full_range = content.color_range == AVColorRange_AVCOL_RANGE_JPEG;
     match content.mode {
-        ContentColorMode::Hdr10Pq => verified_hdr_stream_color_space(content),
-        ContentColorMode::Hlg => {
-            if content.color_space != AVColorSpace_AVCOL_SPC_BT2020_NCL
-                && content.color_space != AVColorSpace_AVCOL_SPC_UNSPECIFIED
-            {
-                return Err(HdrError::HdrColorSpaceUnverified);
-            }
-            if content.color_range == AVColorRange_AVCOL_RANGE_JPEG {
-                Ok(DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020)
-            } else {
-                Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020)
-            }
-        }
+        ContentColorMode::Hdr10Pq => Ok(HdrToneMapSignal {
+            transfer: HdrTransfer::Pq,
+            full_range,
+        }),
+        ContentColorMode::Hlg => Ok(HdrToneMapSignal {
+            transfer: HdrTransfer::Hlg,
+            full_range,
+        }),
         ContentColorMode::Sdr | ContentColorMode::Unknown => Err(HdrError::HdrColorSpaceUnverified),
     }
 }
@@ -576,54 +568,15 @@ pub(crate) enum HdrTransfer {
     Hlg,
 }
 
-/// Everything the tone-map pixel shader needs to know about the decoded
-/// signal, decoded back out of the DXGI color space that
-/// [`tone_map_stream_color_space`] already resolved.
-///
-/// The DXGI color space stays the single validated representation of the
-/// stream's colorimetry (it is what rejects full-range PQ, constant-luminance
-/// matrices, and non-BT.2020 signalling), even though the tone-map path no
-/// longer hands it to the video processor. This function is the one place
-/// that turns it back into shader inputs, so the shader can never disagree
-/// with what was validated at open.
+/// Everything the HDR pixel shader needs to know about the decoded
+/// signal. Resolved once at open by [`hdr_stream_signal`] (which performs
+/// the matrix/mode validation) and stamped on every surface of that open,
+/// so the shader can never disagree with what was validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HdrToneMapSignal {
     pub(crate) transfer: HdrTransfer,
     /// Full-range (0–max) samples when true, studio/limited otherwise.
     pub(crate) full_range: bool,
-}
-
-/// Decode a validated tone-map stream color space into shader inputs.
-///
-/// Only the spaces [`tone_map_stream_color_space`] can actually produce are
-/// accepted; anything else is a typed error rather than a guessed transfer.
-pub(crate) fn tone_map_signal(
-    color_space: DXGI_COLOR_SPACE_TYPE,
-) -> Result<HdrToneMapSignal, HdrError> {
-    // Both PQ sitings map to the same shader inputs: chroma siting shifts
-    // upsampling by half a chroma sample and does not change the transfer,
-    // matrix, or range the shader applies.
-    if color_space == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020
-        || color_space == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020
-    {
-        return Ok(HdrToneMapSignal {
-            transfer: HdrTransfer::Pq,
-            full_range: false,
-        });
-    }
-    if color_space == DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020 {
-        return Ok(HdrToneMapSignal {
-            transfer: HdrTransfer::Hlg,
-            full_range: false,
-        });
-    }
-    if color_space == DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020 {
-        return Ok(HdrToneMapSignal {
-            transfer: HdrTransfer::Hlg,
-            full_range: true,
-        });
-    }
-    Err(HdrError::HdrColorSpaceUnverified)
 }
 
 /// Convert a raw R10G10B10A2 PQ backbuffer readback into SDR BGRA8 —
@@ -1386,79 +1339,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tone_map_signal_round_trips_every_resolvable_stream_space() {
-        // Whatever tone_map_stream_color_space resolves, tone_map_signal must
-        // decode — otherwise a file passes the open gate and then dead-ends in
-        // the renderer. These two functions are the only link between the
-        // validated colorimetry and the shader, so they must stay total with
-        // respect to each other.
-        use crate::ffi::ffmpeg::{AVColorRange_AVCOL_RANGE_JPEG, AVColorRange_AVCOL_RANGE_MPEG};
-
-        let cases = [
-            (
-                hdr10_info(
-                    AVColorSpace_AVCOL_SPC_BT2020_NCL,
-                    AVColorRange_AVCOL_RANGE_MPEG,
-                ),
-                HdrTransfer::Pq,
-                false,
-            ),
-            (
-                hlg_info(
-                    AVColorSpace_AVCOL_SPC_BT2020_NCL,
-                    AVColorRange_AVCOL_RANGE_MPEG,
-                ),
-                HdrTransfer::Hlg,
-                false,
-            ),
-            (
-                hlg_info(
-                    AVColorSpace_AVCOL_SPC_BT2020_NCL,
-                    AVColorRange_AVCOL_RANGE_JPEG,
-                ),
-                HdrTransfer::Hlg,
-                true,
-            ),
-        ];
-        for (content, transfer, full_range) in cases {
-            let space = tone_map_stream_color_space(&content)
-                .expect("standard HDR signalling must resolve a stream color space");
-            assert_eq!(
-                tone_map_signal(space),
-                Ok(HdrToneMapSignal {
-                    transfer,
-                    full_range
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn tone_map_signal_rejects_a_non_hdr_color_space() {
-        // An SDR YCbCr space must never be decoded into a transfer function:
-        // the shader would apply a PQ or HLG EOTF to gamma-encoded samples.
-        assert_eq!(
-            tone_map_signal(
-                windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
-            ),
-            Err(HdrError::HdrColorSpaceUnverified)
-        );
-    }
-
-    #[test]
-    fn tone_map_pq_stream_space_matches_verified_hdr10() {
-        // PQ reuses the resolved, pixel-validated HDR10 stream color space.
-        let content = hdr10_info(
-            AVColorSpace_AVCOL_SPC_BT2020_NCL,
-            crate::ffi::ffmpeg::AVColorRange_AVCOL_RANGE_MPEG,
-        );
-        assert_eq!(
-            tone_map_stream_color_space(&content),
-            Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020)
-        );
-    }
-
     fn hlg_info(color_space: AVColorSpace, color_range: AVColorRange) -> ContentColorInfo {
         ContentColorInfo {
             mode: ContentColorMode::Hlg,
@@ -1472,58 +1352,74 @@ mod tests {
     }
 
     #[test]
-    fn tone_map_hlg_stream_space_is_ghlg_topleft() {
+    fn hdr_stream_signal_resolves_every_standard_combination() {
         use crate::ffi::ffmpeg::{
-            AVColorRange_AVCOL_RANGE_MPEG, AVColorRange_AVCOL_RANGE_UNSPECIFIED,
+            AVColorRange_AVCOL_RANGE_JPEG, AVColorRange_AVCOL_RANGE_MPEG,
+            AVColorRange_AVCOL_RANGE_UNSPECIFIED,
         };
-        // Studio / unspecified range HLG (BT.2020 NCL, or unspecified which
-        // BT.2100 defines as BT.2020 NCL) maps to studio GHLG.
+        // Both transfers × BT.2020-NCL-or-unspecified matrix × all three
+        // range tags. Full range resolves for PQ as well as HLG: full-range
+        // PQ exists in the wild (Topaz Video AI "HDR Enhanced" 8-bit H.264
+        // exports) and the shader's range normalization is transfer-
+        // agnostic. Unspecified range is conservative studio, matching the
+        // industry default.
         for color_space in [
             AVColorSpace_AVCOL_SPC_BT2020_NCL,
             AVColorSpace_AVCOL_SPC_UNSPECIFIED,
         ] {
-            for color_range in [
-                AVColorRange_AVCOL_RANGE_MPEG,
-                AVColorRange_AVCOL_RANGE_UNSPECIFIED,
+            for (color_range, full_range) in [
+                (AVColorRange_AVCOL_RANGE_MPEG, false),
+                (AVColorRange_AVCOL_RANGE_UNSPECIFIED, false),
+                (AVColorRange_AVCOL_RANGE_JPEG, true),
             ] {
                 assert_eq!(
-                    tone_map_stream_color_space(&hlg_info(color_space, color_range)),
-                    Ok(DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020)
+                    hdr_stream_signal(&hdr10_info(color_space, color_range)),
+                    Ok(HdrToneMapSignal {
+                        transfer: HdrTransfer::Pq,
+                        full_range
+                    })
+                );
+                assert_eq!(
+                    hdr_stream_signal(&hlg_info(color_space, color_range)),
+                    Ok(HdrToneMapSignal {
+                        transfer: HdrTransfer::Hlg,
+                        full_range
+                    })
                 );
             }
         }
-        // Full-range HLG maps to the full GHLG variant.
-        assert_eq!(
-            tone_map_stream_color_space(&hlg_info(
-                AVColorSpace_AVCOL_SPC_BT2020_NCL,
-                AVColorRange_AVCOL_RANGE_JPEG,
-            )),
-            Ok(DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020)
-        );
     }
 
     #[test]
-    fn tone_map_non_standard_hlg_matrix_is_typed_error() {
+    fn hdr_stream_signal_rejects_non_standard_matrices() {
         use crate::ffi::ffmpeg::{
             AVColorRange_AVCOL_RANGE_MPEG, AVColorSpace_AVCOL_SPC_BT2020_CL,
             AVColorSpace_AVCOL_SPC_BT709,
         };
+        // Constant-luminance and non-BT.2020 matrices stay typed errors for
+        // both transfers: the shader hardcodes the BT.2020 NCL matrix.
         for color_space in [
             AVColorSpace_AVCOL_SPC_BT2020_CL,
             AVColorSpace_AVCOL_SPC_BT709,
         ] {
             assert_eq!(
-                tone_map_stream_color_space(&hlg_info(color_space, AVColorRange_AVCOL_RANGE_MPEG)),
+                hdr_stream_signal(&hdr10_info(color_space, AVColorRange_AVCOL_RANGE_MPEG)),
+                Err(HdrError::HdrColorSpaceUnverified)
+            );
+            assert_eq!(
+                hdr_stream_signal(&hlg_info(color_space, AVColorRange_AVCOL_RANGE_MPEG)),
                 Err(HdrError::HdrColorSpaceUnverified)
             );
         }
     }
 
     #[test]
-    fn tone_map_sdr_and_unknown_are_typed_errors() {
+    fn hdr_stream_signal_rejects_sdr_and_unknown() {
+        // SDR/Unknown content must never resolve a transfer for the HDR
+        // shader: it would apply a PQ or HLG EOTF to gamma-encoded samples.
         for mode in [ContentColorMode::Sdr, ContentColorMode::Unknown] {
             assert_eq!(
-                tone_map_stream_color_space(&info(mode)),
+                hdr_stream_signal(&info(mode)),
                 Err(HdrError::HdrColorSpaceUnverified)
             );
         }

@@ -23,14 +23,11 @@ use crate::{
     },
     playback::generations::{OpenGeneration, OperationId, SeekGeneration},
     render::hdr::{
-        classify_color_tags, select_video_presentation_path, tone_map_stream_color_space,
-        ContentColorInfo, ContentColorMode, ContentLightMetadata, HdrError,
-        HdrPresentationCapabilities, HdrRational, HdrShaderOutput, MasteringDisplayMetadata,
-        VideoPresentationPath,
+        classify_color_tags, hdr_stream_signal, select_video_presentation_path, ContentColorInfo,
+        ContentColorMode, ContentLightMetadata, HdrError, HdrPresentationCapabilities, HdrRational,
+        HdrShaderOutput, HdrToneMapSignal, MasteringDisplayMetadata, VideoPresentationPath,
     },
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_TYPE;
-
 include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
 
 const SWS_BILINEAR_FLAGS: i32 = 2;
@@ -384,11 +381,11 @@ impl DecodeSession {
                     // through the same shader as the tone-map path, in its
                     // PQ output encode: PQ passes through bit-transparently,
                     // HLG is completed to display light and PQ-encoded.
-                    // Resolving the stream color space here still rejects
-                    // non-standard signals (full-range PQ, constant-
-                    // luminance matrices) as typed errors.
-                    let input_color_space = tone_map_stream_color_space(&video.content_color)
-                        .map_err(|e| e.to_string())?;
+                    // Resolving the shader signal here still rejects
+                    // non-standard matrices (constant-luminance, non-2020)
+                    // as typed errors; full- and studio-range both resolve.
+                    let signal =
+                        hdr_stream_signal(&video.content_color).map_err(|e| e.to_string())?;
                     // The capability snapshot already probed shader
                     // sampling on the main thread, but the gate is cheap
                     // and this worker owns its own device clone — re-check
@@ -398,19 +395,18 @@ impl DecodeSession {
                     if !device.supports_hdr_shader_tone_map() {
                         return Err(HdrError::HdrToneMapUnavailable.to_string());
                     }
-                    video.hdr_shader = Some((input_color_space, HdrShaderOutput::PqPassthrough));
+                    video.hdr_shader = Some((signal, HdrShaderOutput::PqPassthrough));
                 }
                 VideoPresentationPath::HdrToSdrToneMapRequired => {
                     // Present HDR (PQ or HLG) through the verified SDR
                     // swapchain by tone-mapping it in our own pixel shader
-                    // (see HdrToneMapRenderer). Resolve the stream's DXGI color
-                    // space and stamp every surface with it: it is what the
-                    // renderer decodes into shader inputs, and resolving it
-                    // here still rejects non-standard signals (full-range PQ,
-                    // constant-luminance matrices) as typed errors — better a
-                    // clean open failure than a mis-tone-mapped frame.
-                    let input_color_space = tone_map_stream_color_space(&video.content_color)
-                        .map_err(|e| e.to_string())?;
+                    // (see HdrToneMapRenderer). Resolve the stream's shader
+                    // signal and stamp every surface with it; resolving it
+                    // here still rejects non-standard matrices as typed
+                    // errors — better a clean open failure than a
+                    // mis-tone-mapped frame.
+                    let signal =
+                        hdr_stream_signal(&video.content_color).map_err(|e| e.to_string())?;
                     // Gate on the GPU's real capability *now*, at open, so an
                     // incapable device fails the open cleanly; deferring it to
                     // the first draw would surface as a render error that
@@ -419,7 +415,7 @@ impl DecodeSession {
                     if !device.supports_hdr_shader_tone_map() {
                         return Err(HdrError::HdrToneMapUnavailable.to_string());
                     }
-                    video.hdr_shader = Some((input_color_space, HdrShaderOutput::SdrToneMap));
+                    video.hdr_shader = Some((signal, HdrShaderOutput::SdrToneMap));
                 }
                 VideoPresentationPath::UnsupportedHdr => {
                     return Err(HdrError::UnsupportedHdrPresentation.to_string());
@@ -946,11 +942,11 @@ struct VideoDecoder {
     /// frame is decoded.
     content_color: ContentColorInfo,
     /// When `Some`, this stream is HDR and presents through our own pixel
-    /// shader: the decoded DXGI input color space (PQ or HLG) paired with
+    /// shader: the validated shader signal (transfer + range) paired with
     /// the output encode (SDR tone-map or PQ passthrough), stamped on every
     /// produced surface. `None` is the ordinary SDR path. Set once at open
     /// by the presentation-path fork; see `DecodeSession::open`.
-    hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, HdrShaderOutput)>,
+    hdr_shader: Option<(HdrToneMapSignal, HdrShaderOutput)>,
     /// HDR10 static metadata from the first decoded frame's side data, on
     /// the PQ-output path only. `None` = not yet inspected; `Some` = the
     /// first frame's answer, including `(None, None)` for streams without
@@ -1592,7 +1588,7 @@ impl SoftwareVideoConverter {
         &mut self,
         frame: *mut AVFrame,
         device: &D3D11Device,
-        hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, HdrShaderOutput)>,
+        hdr_shader: Option<(HdrToneMapSignal, HdrShaderOutput)>,
     ) -> Result<VideoSurface, String> {
         let width = (*frame).width;
         let height = (*frame).height;

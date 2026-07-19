@@ -249,16 +249,19 @@ pub(crate) struct VideoSurface {
     pub(crate) sar_den: u32,
     pub(crate) color: SurfaceColor,
     /// When `Some`, this frame carries HDR content presented by our own
-    /// pixel shader ([`HdrToneMapRenderer`]): the decoded stream's DXGI
-    /// input color space (PQ or HLG, decoded into shader inputs by
-    /// `render::hdr::tone_map_signal` at draw time) paired with the output
-    /// encode — `SdrToneMap` into the 8-bit SDR chain, `PqPassthrough`
-    /// into the 10-bit HDR10 chain. The draw path rejects a surface whose
-    /// output mode disagrees with the live swapchain kind.
+    /// pixel shader ([`HdrToneMapRenderer`]): the decoded stream's shader
+    /// signal (transfer + range, validated by `render::hdr::hdr_stream_signal`
+    /// at open) paired with the output encode — `SdrToneMap` into the 8-bit
+    /// SDR chain, `PqPassthrough` into the 10-bit HDR10 chain. The draw
+    /// path rejects a surface whose output mode disagrees with the live
+    /// swapchain kind.
     /// `None` is the pixel-verified SDR path, where `color` alone drives the
     /// legacy matrix/range configuration. Constant for every frame of one
     /// opened file (resolved once at decoder open).
-    pub(crate) hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, crate::render::hdr::HdrShaderOutput)>,
+    pub(crate) hdr_shader: Option<(
+        crate::render::hdr::HdrToneMapSignal,
+        crate::render::hdr::HdrShaderOutput,
+    )>,
 }
 
 impl VideoSurface {
@@ -815,7 +818,10 @@ impl D3D11Device {
         sar_num: u32,
         sar_den: u32,
         color: SurfaceColor,
-        hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, crate::render::hdr::HdrShaderOutput)>,
+        hdr_shader: Option<(
+            crate::render::hdr::HdrToneMapSignal,
+            crate::render::hdr::HdrShaderOutput,
+        )>,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         // Guard: if the device was removed (GPU TDR) bail out before touching
         // any D3D11 objects.  Without this the worker thread crashes inside
@@ -1332,10 +1338,9 @@ impl D3D11Device {
         output_height: u32,
         view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn Error>> {
-        let (color_space, output) = surface.hdr_shader.ok_or(D3D11Error(
+        let (signal, output) = surface.hdr_shader.ok_or(D3D11Error(
             "HDR shader render path called with an SDR surface",
         ))?;
-        let signal = crate::render::hdr::tone_map_signal(color_space)?;
 
         // SAFETY: `surface.texture` is a live texture owned by the surface.
         let mut texture_desc = D3D11_TEXTURE2D_DESC::default();
@@ -2342,7 +2347,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         sar_num: u32,
         sar_den: u32,
         color: SurfaceColor,
-        hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, crate::render::hdr::HdrShaderOutput)>,
+        hdr_shader: Option<(
+            crate::render::hdr::HdrToneMapSignal,
+            crate::render::hdr::HdrShaderOutput,
+        )>,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
             return Err(Box::new(D3D11Error(
