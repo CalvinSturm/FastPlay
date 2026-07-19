@@ -630,6 +630,77 @@ pub(crate) fn tone_map_signal(
     Err(HdrError::HdrColorSpaceUnverified)
 }
 
+/// Convert a raw R10G10B10A2 PQ backbuffer readback into SDR BGRA8 —
+/// what an SDR viewer of the same content would have seen. This is the
+/// tone-map shader's SDR branch (`HDR_TONE_MAP_PIXEL_SHADER`, audited by
+/// `bench/verify-tonemap.ps1`) in double precision: ST 2084 EOTF →
+/// normalize to 203-nit diffuse white → knee/exponential-shoulder tone
+/// curve (knee 0.75) → BT.2020→BT.709 → sRGB encode. Constants must stay
+/// identical to the shader's.
+///
+/// Used by the screenshot path when the capture came from the HDR10
+/// chain; also the capture tap the end-to-end passthrough bench composes
+/// its model against. Alpha is forced opaque.
+pub(crate) fn pq10_capture_to_sdr_bgra(pixels: &[u8]) -> Vec<u8> {
+    const KNEE: f64 = 0.75;
+
+    fn pq_eotf(signal: f64) -> f64 {
+        const M1: f64 = 0.1593017578125;
+        const M2: f64 = 78.84375;
+        const C1: f64 = 0.8359375;
+        const C2: f64 = 18.8515625;
+        const C3: f64 = 18.6875;
+        let encoded = signal.max(0.0).powf(1.0 / M2);
+        let numerator = (encoded - C1).max(0.0);
+        let denominator = (C2 - C3 * encoded).max(1e-6);
+        (numerator / denominator).powf(1.0 / M1)
+    }
+
+    fn tone_curve(value: f64) -> f64 {
+        if value <= KNEE {
+            return value;
+        }
+        let headroom = 1.0 - KNEE;
+        KNEE + headroom * (1.0 - (-(value - KNEE) / headroom).exp())
+    }
+
+    fn srgb_encode(value: f64) -> f64 {
+        if value <= 0.0031308 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    let mut out = Vec::with_capacity(pixels.len());
+    for dword in pixels.chunks_exact(4) {
+        let dw = u32::from_le_bytes([dword[0], dword[1], dword[2], dword[3]]);
+        let signal = [
+            f64::from(dw & 0x3FF) / 1023.0,
+            f64::from((dw >> 10) & 0x3FF) / 1023.0,
+            f64::from((dw >> 20) & 0x3FF) / 1023.0,
+        ];
+        // PQ → linear light in units of diffuse white, then the shader's
+        // per-channel roll-off.
+        let mapped = signal.map(|s| tone_curve(pq_eotf(s) * (10000.0 / 203.0)));
+        // BT.2020 → BT.709 primaries in linear light (shader constants),
+        // clipped like the shader's saturate.
+        let [r, g, b] = mapped;
+        let rgb709 = [
+            1.66049 * r - 0.58764 * g - 0.07285 * b,
+            -0.12455 * r + 1.13290 * g - 0.00835 * b,
+            -0.01824 * r - 0.10057 * g + 1.11881 * b,
+        ]
+        .map(|v| v.clamp(0.0, 1.0));
+        let encode = |v: f64| (srgb_encode(v) * 255.0).round().clamp(0.0, 255.0) as u8;
+        out.push(encode(rgb709[2]));
+        out.push(encode(rgb709[1]));
+        out.push(encode(rgb709[0]));
+        out.push(255);
+    }
+    out
+}
+
 /// Conversion boundary between FFmpeg-sourced metadata and DXGI.
 ///
 /// HDR-VERIFY: `DXGI_HDR_METADATA_HDR10` units, scaling, rounding, clamping,
@@ -1040,6 +1111,67 @@ mod tests {
             swapchain_format_for_path(VideoPresentationPath::HdrPqOutput),
             DXGI_FORMAT_R10G10B10A2_UNORM
         );
+    }
+
+    /// Independent PQ inverse EOTF (ST 2084) for generating test inputs —
+    /// the production code only ever decodes.
+    fn pq_code_for_nits(nits: f64) -> u32 {
+        let (m1, m2, c1, c2, c3) = (0.1593017578125, 78.84375, 0.8359375, 18.8515625, 18.6875);
+        let y = (nits / 10000.0).powf(m1);
+        let n = ((c1 + c2 * y) / (1.0 + c3 * y)).powf(m2);
+        (1023.0 * n).round() as u32
+    }
+
+    fn pq10_dword(r: u32, g: u32, b: u32) -> [u8; 4] {
+        (r | (g << 10) | (b << 20) | (0b11 << 30)).to_le_bytes()
+    }
+
+    #[test]
+    fn pq10_black_converts_to_sdr_black() {
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(0, 0, 0));
+        assert_eq!(out, vec![0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn pq10_full_scale_white_converts_to_sdr_white() {
+        // 10 000 nits on every channel: far past the knee, the shoulder is
+        // asymptotic to 1.0 and this deep in it reaches it exactly in f64.
+        let code = pq_code_for_nits(10000.0);
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(code, code, code));
+        assert_eq!(out, vec![255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn pq10_midtone_gray_below_knee_is_identity_tone_mapped() {
+        // 100 nits ≈ 0.4926 of diffuse white — below the 0.75 knee, so the
+        // tone curve is the identity and gray stays gray through the
+        // 2020→709 matrix (its rows sum to 1). sRGB encode of 100/203 is
+        // 1.055·(100/203)^(1/2.4) − 0.055 ≈ 0.7305 → 186/255. ±2 covers
+        // the 10-bit quantization of the generated input code.
+        let code = pq_code_for_nits(100.0);
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(code, code, code));
+        assert_eq!(out[3], 255);
+        for channel in &out[..3] {
+            assert!(
+                (i32::from(*channel) - 186).abs() <= 2,
+                "expected ~186, got {channel}"
+            );
+        }
+        assert_eq!(out[0], out[1]);
+        assert_eq!(out[1], out[2]);
+    }
+
+    #[test]
+    fn pq10_output_is_bgra_ordered() {
+        // A red-only BT.2020 signal must land in the BMP's R byte (index
+        // 2 of BGRA), with green/blue clipped near zero by the 2020→709
+        // matrix.
+        let code = pq_code_for_nits(100.0);
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(code, 0, 0));
+        assert!(out[2] > 150, "red byte should be bright, got {}", out[2]);
+        assert_eq!(out[1], 0, "green must clip to 0");
+        assert_eq!(out[0], 0, "blue must clip to 0");
+        assert_eq!(out[3], 255);
     }
 
     #[test]

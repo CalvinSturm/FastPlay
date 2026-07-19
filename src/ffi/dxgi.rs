@@ -1041,6 +1041,7 @@ impl DxgiSwapChain {
                 BgraFrameCapture {
                     width: 1,
                     height: 1,
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
                     pixels: vec![0, 0, 0, 255],
                 },
             ));
@@ -1157,6 +1158,7 @@ impl DxgiSwapChain {
                 BgraFrameCapture {
                     width: 1,
                     height: 1,
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
                     pixels: vec![0, 0, 0, 255],
                 },
             ));
