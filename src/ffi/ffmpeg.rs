@@ -260,6 +260,7 @@ impl DecodeSession {
         io_cancel: Box<dyn Fn() -> bool>,
         should_cancel: &impl Fn() -> bool,
         on_decode_mode: &mut impl FnMut(VideoDecodeMode, u64, u8) -> Result<(), String>,
+        on_presentation_path: &mut impl FnMut(VideoPresentationPath) -> Result<(), String>,
         on_duration: &mut impl FnMut(Duration) -> Result<(), String>,
     ) -> Result<VideoOpen, String> {
         let source_path = source
@@ -322,6 +323,10 @@ impl DecodeSession {
             if !total_duration.is_zero() {
                 on_duration(total_duration)?;
             }
+            // Audio-only media presents nothing but overlays; announce the
+            // SDR path so a chain left over from a previous HDR open is
+            // swapped back before this file's idle/overlay rendering.
+            on_presentation_path(VideoPresentationPath::ExistingSdr)?;
             return Ok(VideoOpen::NoVideoStream);
         }
 
@@ -351,8 +356,19 @@ impl DecodeSession {
         // design — on any failure the snapshot is the all-false default —
         // and SDR content never consults it, so a capability problem on
         // exotic systems can never regress SDR open availability.
+        let presentation_path = if video.content_color.mode == ContentColorMode::Sdr {
+            VideoPresentationPath::ExistingSdr
+        } else {
+            select_video_presentation_path(&video.content_color, &hdr_capabilities)
+        };
+        // Announce the path before acting on it (even for the arms that
+        // fail the open): the session (re)builds the matching swapchain
+        // kind on this event, and the FIFO channel orders it ahead of any
+        // frame of this generation. A failing arm still announcing lets a
+        // leftover HDR chain swap back to SDR before the error shows.
+        on_presentation_path(presentation_path)?;
         if video.content_color.mode != ContentColorMode::Sdr {
-            match select_video_presentation_path(&video.content_color, &hdr_capabilities) {
+            match presentation_path {
                 // Unreachable for non-SDR modes (the decision function
                 // returns ExistingSdr only for Sdr content); kept as an
                 // explicit no-op for match exhaustiveness.

@@ -413,6 +413,32 @@ pub(crate) fn select_video_presentation_path(
     }
 }
 
+/// Which of the two swapchain constructions a window currently presents
+/// through. The session recreates the swapchain only when an open's
+/// selected path maps to a different kind than the live chain — never
+/// mid-playback, and a same-kind open must be a strict no-op so the
+/// pixel-verified SDR chain object is never churned by SDR↔SDR opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwapchainKind {
+    /// The verified 8-bit B8G8R8A8 sRGB chain (`DxgiSwapChain::create`).
+    Sdr,
+    /// The 10-bit R10G10B10A2 chain committed to
+    /// RGB_FULL_G2084_NONE_P2020 (`DxgiSwapChain::create_hdr10_skeleton`).
+    Hdr10Pq,
+}
+
+/// Swapchain kind per presentation path. Must always agree with
+/// [`swapchain_format_for_path`] (unit-tested): the SDR format pairs with
+/// `Sdr`, the 10-bit format with `Hdr10Pq`.
+pub(crate) fn swapchain_kind_for_path(path: VideoPresentationPath) -> SwapchainKind {
+    match path {
+        VideoPresentationPath::ExistingSdr
+        | VideoPresentationPath::HdrToSdrToneMapRequired
+        | VideoPresentationPath::UnsupportedHdr => SwapchainKind::Sdr,
+        VideoPresentationPath::HdrPqOutput => SwapchainKind::Hdr10Pq,
+    }
+}
+
 /// Swapchain backbuffer format per path. Pure so the format pairing is
 /// unit-testable; the verified SDR constructor keeps its own literal
 /// `DXGI_FORMAT_B8G8R8A8_UNORM` untouched and this function must always
@@ -1014,6 +1040,22 @@ mod tests {
             swapchain_format_for_path(VideoPresentationPath::HdrPqOutput),
             DXGI_FORMAT_R10G10B10A2_UNORM
         );
+    }
+
+    #[test]
+    fn swapchain_kind_agrees_with_swapchain_format_on_every_path() {
+        for path in [
+            VideoPresentationPath::ExistingSdr,
+            VideoPresentationPath::HdrPqOutput,
+            VideoPresentationPath::HdrToSdrToneMapRequired,
+            VideoPresentationPath::UnsupportedHdr,
+        ] {
+            let expected_format = match swapchain_kind_for_path(path) {
+                SwapchainKind::Sdr => DXGI_FORMAT_B8G8R8A8_UNORM,
+                SwapchainKind::Hdr10Pq => DXGI_FORMAT_R10G10B10A2_UNORM,
+            };
+            assert_eq!(swapchain_format_for_path(path), expected_format);
+        }
     }
 
     fn descriptor_with_color_space(color_space: DXGI_COLOR_SPACE_TYPE) -> HdrDisplayDescriptor {

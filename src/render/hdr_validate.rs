@@ -32,7 +32,7 @@ use crate::{
         },
     },
     platform::window::NativeWindow,
-    render::hdr::{ContentColorInfo, ContentColorMode, HdrPresentationCapabilities},
+    render::hdr::{ContentColorInfo, ContentColorMode},
 };
 
 /// Which HDR pipeline the validation frame is rendered through.
@@ -131,13 +131,7 @@ pub fn run(config: HdrValidateConfig) -> Result<(), Box<dyn Error>> {
 
     // Creates the 10-bit swapchain, runs CheckColorSpaceSupport on this
     // display, and commits SetColorSpace1 — structural oracle #1.
-    let capabilities = HdrPresentationCapabilities::default();
-    let mut swap_chain = DxgiSwapChain::create_hdr10_skeleton(
-        window.raw_window(),
-        &device,
-        &content,
-        &capabilities,
-    )?;
+    let mut swap_chain = DxgiSwapChain::create_hdr10_skeleton(window.raw_window(), &device)?;
     println!(
         "[hdr-validate] R10G10B10A2 swapchain created; CheckColorSpaceSupport accepted \
          RGB_FULL_G2084_NONE_P2020 and SetColorSpace1 committed"
