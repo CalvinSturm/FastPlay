@@ -248,14 +248,17 @@ pub(crate) struct VideoSurface {
     pub(crate) sar_num: u32,
     pub(crate) sar_den: u32,
     pub(crate) color: SurfaceColor,
-    /// When `Some`, this frame carries HDR content that must be tone-mapped
-    /// to SDR by our own pixel shader ([`HdrToneMapRenderer`]): the value is
-    /// the decoded stream's DXGI input color space (PQ or HLG), decoded into
-    /// shader inputs by `render::hdr::tone_map_signal` at draw time.
+    /// When `Some`, this frame carries HDR content presented by our own
+    /// pixel shader ([`HdrToneMapRenderer`]): the decoded stream's DXGI
+    /// input color space (PQ or HLG, decoded into shader inputs by
+    /// `render::hdr::tone_map_signal` at draw time) paired with the output
+    /// encode — `SdrToneMap` into the 8-bit SDR chain, `PqPassthrough`
+    /// into the 10-bit HDR10 chain. The draw path rejects a surface whose
+    /// output mode disagrees with the live swapchain kind.
     /// `None` is the pixel-verified SDR path, where `color` alone drives the
     /// legacy matrix/range configuration. Constant for every frame of one
     /// opened file (resolved once at decoder open).
-    pub(crate) hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
+    pub(crate) hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, crate::render::hdr::HdrShaderOutput)>,
 }
 
 impl VideoSurface {
@@ -812,7 +815,7 @@ impl D3D11Device {
         sar_num: u32,
         sar_den: u32,
         color: SurfaceColor,
-        hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
+        hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, crate::render::hdr::HdrShaderOutput)>,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         // Guard: if the device was removed (GPU TDR) bail out before touching
         // any D3D11 objects.  Without this the worker thread crashes inside
@@ -885,7 +888,7 @@ impl D3D11Device {
             sar_num,
             sar_den,
             color,
-            hdr_tone_map,
+            hdr_shader,
         })
     }
 
@@ -903,7 +906,7 @@ impl D3D11Device {
         view: &crate::render::ViewTransform,
         vp_cache: &mut Option<VideoProcessorCache>,
     ) -> Result<(), Box<dyn Error>> {
-        if surface.hdr_tone_map.is_some() {
+        if surface.hdr_shader.is_some() {
             return Err(Box::new(D3D11Error(
                 "HDR surface routed to the SDR video-processor path",
             )));
@@ -1328,10 +1331,9 @@ impl D3D11Device {
         output_width: u32,
         output_height: u32,
         view: &crate::render::ViewTransform,
-        output: crate::render::hdr::HdrShaderOutput,
     ) -> Result<(), Box<dyn Error>> {
-        let color_space = surface.hdr_tone_map.ok_or(D3D11Error(
-            "tone-map render path called with an SDR surface",
+        let (color_space, output) = surface.hdr_shader.ok_or(D3D11Error(
+            "HDR shader render path called with an SDR surface",
         ))?;
         let signal = crate::render::hdr::tone_map_signal(color_space)?;
 
@@ -2340,7 +2342,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
         sar_num: u32,
         sar_den: u32,
         color: SurfaceColor,
-        hdr_tone_map: Option<DXGI_COLOR_SPACE_TYPE>,
+        hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, crate::render::hdr::HdrShaderOutput)>,
     ) -> Result<VideoSurface, Box<dyn Error>> {
         if width == 0 || height == 0 {
             return Err(Box::new(D3D11Error(
@@ -2402,7 +2404,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
             sar_num,
             sar_den,
             color,
-            hdr_tone_map,
+            hdr_shader,
         })
     }
 }

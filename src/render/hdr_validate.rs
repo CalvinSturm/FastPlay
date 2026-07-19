@@ -32,7 +32,7 @@ use crate::{
         },
     },
     platform::window::NativeWindow,
-    render::hdr::{ContentColorInfo, ContentColorMode},
+    render::hdr::{ContentColorInfo, ContentColorMode, HdrShaderOutput},
 };
 
 /// Which HDR pipeline the validation frame is rendered through.
@@ -168,19 +168,21 @@ pub fn run(config: HdrValidateConfig) -> Result<(), Box<dyn Error>> {
             .into());
         }
 
-        // The shader modes read the input transfer from the surface's
-        // tone-map tag, exactly as production does; the wrong-matrix
-        // control swaps in the other HDR transfer. The VP mode attaches no
-        // tag (its blt reads the verified_* helpers) and its control stays
-        // the SDR BT.709 space.
+        // The shader modes read the input transfer and PQ output encode
+        // from the surface's tag, exactly as production does; the
+        // wrong-matrix control swaps in the other HDR transfer. The VP
+        // mode attaches no tag (its blt reads the verified_* helpers) and
+        // its control stays the SDR BT.709 space.
         let tone_map_tag = match (config.mode, config.wrong_matrix) {
             (ValidateMode::Vp | ValidateMode::Overlay, _) => None,
-            (ValidateMode::ShaderPq, false) | (ValidateMode::ShaderHlg, true) => {
-                Some(DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020)
-            }
-            (ValidateMode::ShaderPq, true) | (ValidateMode::ShaderHlg, false) => {
-                Some(DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020)
-            }
+            (ValidateMode::ShaderPq, false) | (ValidateMode::ShaderHlg, true) => Some((
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
+                HdrShaderOutput::PqPassthrough,
+            )),
+            (ValidateMode::ShaderPq, true) | (ValidateMode::ShaderHlg, false) => Some((
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020,
+                HdrShaderOutput::PqPassthrough,
+            )),
         };
         if config.wrong_matrix {
             println!(

@@ -25,7 +25,8 @@ use crate::{
     render::hdr::{
         classify_color_tags, select_video_presentation_path, tone_map_stream_color_space,
         ContentColorInfo, ContentColorMode, ContentLightMetadata, HdrError,
-        HdrPresentationCapabilities, MasteringDisplayMetadata, VideoPresentationPath,
+        HdrPresentationCapabilities, HdrShaderOutput, MasteringDisplayMetadata,
+        VideoPresentationPath,
     },
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_TYPE;
@@ -374,13 +375,26 @@ impl DecodeSession {
                 // explicit no-op for match exhaustiveness.
                 VideoPresentationPath::ExistingSdr => {}
                 VideoPresentationPath::HdrPqOutput => {
-                    // Integration point for the passthrough commit: create
-                    // the HDR renderer via SwapChainPresenter::new_for_path,
-                    // then refine the classification from the first decoded
-                    // frame (refine_color_from_first_frame) once the HDR
-                    // swapchain exists. Until the color spaces are verified
-                    // this is a typed error, never a panic.
-                    return Err(HdrError::HdrColorSpaceUnverified.to_string());
+                    // Present HDR (PQ or HLG) on the 10-bit HDR10 swapchain
+                    // (recreated by the session on the path event above)
+                    // through the same shader as the tone-map path, in its
+                    // PQ output encode: PQ passes through bit-transparently,
+                    // HLG is completed to display light and PQ-encoded.
+                    // Resolving the stream color space here still rejects
+                    // non-standard signals (full-range PQ, constant-
+                    // luminance matrices) as typed errors.
+                    let input_color_space = tone_map_stream_color_space(&video.content_color)
+                        .map_err(|e| e.to_string())?;
+                    // The capability snapshot already probed shader
+                    // sampling on the main thread, but the gate is cheap
+                    // and this worker owns its own device clone — re-check
+                    // at open so an incapable device fails cleanly here,
+                    // never at the first draw (a per-frame render error is
+                    // misread by device recovery as device-lost).
+                    if !device.supports_hdr_shader_tone_map() {
+                        return Err(HdrError::HdrToneMapUnavailable.to_string());
+                    }
+                    video.hdr_shader = Some((input_color_space, HdrShaderOutput::PqPassthrough));
                 }
                 VideoPresentationPath::HdrToSdrToneMapRequired => {
                     // Present HDR (PQ or HLG) through the verified SDR
@@ -401,7 +415,7 @@ impl DecodeSession {
                     if !device.supports_hdr_shader_tone_map() {
                         return Err(HdrError::HdrToneMapUnavailable.to_string());
                     }
-                    video.tone_map_input = Some(input_color_space);
+                    video.hdr_shader = Some((input_color_space, HdrShaderOutput::SdrToneMap));
                 }
                 VideoPresentationPath::UnsupportedHdr => {
                     return Err(HdrError::UnsupportedHdrPresentation.to_string());
@@ -550,11 +564,12 @@ impl DecodeSession {
                                 send_result
                             );
                             sw_decoder.hw_fallback_count = self.video.hw_fallback_count + 1;
-                            // Preserve the HDR tone-map decision across the
+                            // Preserve the HDR shader decision across the
                             // decoder swap: the stream's color space is
                             // unchanged by falling back to software, so its
-                            // surfaces must still be tagged for HDR→SDR.
-                            sw_decoder.tone_map_input = self.video.tone_map_input;
+                            // surfaces must keep the same input space and
+                            // output encode.
+                            sw_decoder.hdr_shader = self.video.hdr_shader;
                             self.video = sw_decoder;
                             hw_mid_fallback_done = true;
                             self.summary.decode_mode = self.video.mode;
@@ -907,12 +922,12 @@ struct VideoDecoder {
     /// at decoder open. Drives the presentation-path decision before any
     /// frame is decoded.
     content_color: ContentColorInfo,
-    /// When `Some`, this stream is HDR and presents through the SDR swapchain
-    /// via the video processor's HDR→SDR tone-mapping: the value is the
-    /// decoded DXGI input color space (PQ or HLG), stamped on every produced
-    /// surface. `None` is the ordinary SDR path. Set once at open by the
-    /// presentation-path fork; see `DecodeSession::open`.
-    tone_map_input: Option<DXGI_COLOR_SPACE_TYPE>,
+    /// When `Some`, this stream is HDR and presents through our own pixel
+    /// shader: the decoded DXGI input color space (PQ or HLG) paired with
+    /// the output encode (SDR tone-map or PQ passthrough), stamped on every
+    /// produced surface. `None` is the ordinary SDR path. Set once at open
+    /// by the presentation-path fork; see `DecodeSession::open`.
+    hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, HdrShaderOutput)>,
 }
 
 enum VideoDecoderOutput {
@@ -1081,7 +1096,7 @@ unsafe fn open_hardware_video_decoder(
         hw_fallback_count: 0,
         rotation_quarter_turns,
         content_color,
-        tone_map_input: None,
+        hdr_shader: None,
     })
 }
 
@@ -1139,7 +1154,7 @@ unsafe fn open_software_video_decoder(
         hw_fallback_count: 0,
         rotation_quarter_turns,
         content_color,
-        tone_map_input: None,
+        hdr_shader: None,
     })
 }
 
@@ -1431,7 +1446,7 @@ where
 
         // Copied out before the `&mut video.output` borrow so both arms can
         // stamp surfaces with it without a disjoint-field borrow dance.
-        let tone_map_input = video.tone_map_input;
+        let hdr_shader = video.hdr_shader;
         let result = match &mut video.output {
             VideoDecoderOutput::Hardware => {
                 let pixel_format = (*frame).format as AVPixelFormat;
@@ -1464,7 +1479,7 @@ where
                         sar_num,
                         sar_den,
                         frame_surface_color(frame),
-                        tone_map_input,
+                        hdr_shader,
                     )
                     .map_err(|error| error.to_string())?;
 
@@ -1481,7 +1496,7 @@ where
                 }
             }
             VideoDecoderOutput::Software(converter) => {
-                let surface = converter.convert(frame, device, tone_map_input)?;
+                let surface = converter.convert(frame, device, hdr_shader)?;
                 let sar = (*frame).sample_aspect_ratio;
                 let sar_num = if sar.num > 0 && sar.den > 0 {
                     sar.num as u32
@@ -1529,7 +1544,7 @@ impl SoftwareVideoConverter {
         &mut self,
         frame: *mut AVFrame,
         device: &D3D11Device,
-        tone_map_input: Option<DXGI_COLOR_SPACE_TYPE>,
+        hdr_shader: Option<(DXGI_COLOR_SPACE_TYPE, HdrShaderOutput)>,
     ) -> Result<VideoSurface, String> {
         let width = (*frame).width;
         let height = (*frame).height;
@@ -1597,7 +1612,7 @@ impl SoftwareVideoConverter {
                 sar_num,
                 sar_den,
                 frame_surface_color(frame),
-                tone_map_input,
+                hdr_shader,
             )
             .map_err(|e| e.to_string())
     }
