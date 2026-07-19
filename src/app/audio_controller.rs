@@ -18,9 +18,24 @@
 //! The clock *policy* (audio-is-master, video fallback, drift handling) stays
 //! in `PlaybackSession`; this type only holds the numbers that policy reads.
 
-use std::time::Duration;
+use std::{
+    cell::Cell,
+    time::{Duration, Instant},
+};
 
 use crate::audio::sink::AudioSink;
+
+/// Wall-clock extrapolation state for the staircase raw played position.
+#[derive(Clone, Copy)]
+struct ClockSmoothing {
+    /// The raw played position the last time it advanced.
+    base: Duration,
+    /// When that advance was observed.
+    at: Instant,
+    /// The last value returned, enforcing monotonicity across the moment
+    /// a raw advance lands below a clamped extrapolation.
+    last: Duration,
+}
 
 /// Audio master-clock accounting and persisted volume. Owned by
 /// `PlaybackSession`.
@@ -28,6 +43,9 @@ pub struct AudioController {
     clock_anchor_pts: Option<Duration>,
     submitted_frames: u64,
     saved_volume: f32,
+    /// Interior-mutable so the read-only master-clock query can update the
+    /// extrapolation state without threading `&mut` through every caller.
+    smoothing: Cell<Option<ClockSmoothing>>,
 }
 
 impl AudioController {
@@ -36,6 +54,7 @@ impl AudioController {
             clock_anchor_pts: None,
             submitted_frames: 0,
             saved_volume,
+            smoothing: Cell::new(None),
         }
     }
 
@@ -56,11 +75,61 @@ impl AudioController {
         self.clock_anchor_pts = pts;
     }
 
-    /// Reset the audio clock: drop the anchor and zero the submitted-frame
-    /// count. Used on seek/reopen/rate-change and underrun recovery.
+    /// Reset the audio clock: drop the anchor, zero the submitted-frame
+    /// count, and clear the smoothing state. Used on seek/reopen/rate-change
+    /// and underrun recovery.
     pub fn reset_clock(&mut self) {
         self.clock_anchor_pts = None;
         self.submitted_frames = 0;
+        self.smoothing.set(None);
+    }
+
+    /// Smooth the staircase raw played position into a continuously
+    /// advancing clock.
+    ///
+    /// The raw position is derived from WASAPI's `GetCurrentPadding`, which
+    /// in shared mode only updates once per audio-engine period (~10 ms) —
+    /// a 10 ms staircase. Video frames shorter than a tread (anything above
+    /// 100 fps) then become due two at a time on each step, and the
+    /// scheduler's catch-up path drops one of them: a structural ~17% drop
+    /// rate at 120 fps with no real lateness anywhere.
+    ///
+    /// Between raw advances this extrapolates from the last advance with
+    /// wall time (audio hardware consumes in real time at 1.0× — the only
+    /// rate the audio clock masters), clamped to `MAX_EXTRAPOLATION` past
+    /// the last raw observation so a stalled or glitching device can never
+    /// run the clock ahead unboundedly. The returned value is monotonic
+    /// non-decreasing; any residual lead over raw is bounded by the clamp
+    /// and converges as raw catches up.
+    pub fn smooth_played(&self, raw: Duration, now: Instant) -> Duration {
+        /// Slightly over one WASAPI engine period: covers normal staircase
+        /// treads while capping how far a dead device can lead.
+        const MAX_EXTRAPOLATION: Duration = Duration::from_millis(12);
+
+        let state = match self.smoothing.get() {
+            // Raw advanced: it becomes the new extrapolation base.
+            Some(state) if raw > state.base => ClockSmoothing {
+                base: raw,
+                at: now,
+                last: state.last,
+            },
+            Some(state) => state,
+            None => ClockSmoothing {
+                base: raw,
+                at: now,
+                last: raw,
+            },
+        };
+        let extrapolated = state.base.saturating_add(
+            now.saturating_duration_since(state.at)
+                .min(MAX_EXTRAPOLATION),
+        );
+        let value = extrapolated.max(state.last);
+        self.smoothing.set(Some(ClockSmoothing {
+            last: value,
+            ..state
+        }));
+        value
     }
 
     /// Record that `frames` more audio frames were written to the sink.
@@ -163,5 +232,56 @@ mod tests {
         a.set_clock_anchor(Some(ms(10)));
         a.set_clock_anchor(None);
         assert!(!a.is_clock_anchored());
+    }
+
+    #[test]
+    fn smooth_played_fills_the_staircase_between_raw_advances() {
+        // Raw position frozen (WASAPI padding not yet updated): the clock
+        // must keep advancing with wall time instead of stalling on the
+        // tread and then jumping a whole engine period at once.
+        let a = AudioController::new(1.0);
+        let t0 = Instant::now();
+        assert_eq!(a.smooth_played(ms(100), t0), ms(100));
+        let mid = a.smooth_played(ms(100), t0 + ms(4));
+        assert_eq!(mid, ms(104));
+        // Raw then advances a full 10 ms tread; the smoothed clock lands on
+        // it without ever having stalled.
+        assert_eq!(a.smooth_played(ms(110), t0 + ms(10)), ms(110));
+    }
+
+    #[test]
+    fn smooth_played_clamps_extrapolation_on_a_stalled_device() {
+        // Raw frozen far beyond one engine period (glitching endpoint): the
+        // clock may lead by at most the clamp, never unboundedly.
+        let a = AudioController::new(1.0);
+        let t0 = Instant::now();
+        a.smooth_played(ms(100), t0);
+        assert_eq!(a.smooth_played(ms(100), t0 + ms(50)), ms(112));
+        assert_eq!(a.smooth_played(ms(100), t0 + ms(500)), ms(112));
+    }
+
+    #[test]
+    fn smooth_played_is_monotonic_when_raw_lands_below_the_clamp() {
+        // Extrapolation reached the clamp (112), then raw advances to only
+        // 110: the returned clock must not step backward; it holds at 112
+        // until raw passes it.
+        let a = AudioController::new(1.0);
+        let t0 = Instant::now();
+        a.smooth_played(ms(100), t0);
+        assert_eq!(a.smooth_played(ms(100), t0 + ms(20)), ms(112));
+        assert_eq!(a.smooth_played(ms(110), t0 + ms(20)), ms(112));
+        // Raw catches up past the held value and the clock follows it again.
+        assert_eq!(a.smooth_played(ms(120), t0 + ms(21)), ms(120));
+    }
+
+    #[test]
+    fn reset_clock_clears_smoothing_state() {
+        // After a seek the raw position restarts near zero; stale smoothing
+        // state must not hold the clock at the pre-seek value.
+        let mut a = AudioController::new(1.0);
+        let t0 = Instant::now();
+        a.smooth_played(ms(5000), t0);
+        a.reset_clock();
+        assert_eq!(a.smooth_played(ms(0), t0 + ms(1)), ms(0));
     }
 }
