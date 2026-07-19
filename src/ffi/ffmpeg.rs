@@ -15,10 +15,7 @@ use std::{
 };
 
 use crate::{
-    ffi::{
-        d3d11::{D3D11Device, SurfaceColor, VideoSurface},
-        dxgi::query_hdr_presentation_capabilities,
-    },
+    ffi::d3d11::{D3D11Device, SurfaceColor, VideoSurface},
     media::{
         audio::AudioStreamFormat,
         source::MediaSource,
@@ -28,7 +25,7 @@ use crate::{
     render::hdr::{
         classify_color_tags, select_video_presentation_path, tone_map_stream_color_space,
         ContentColorInfo, ContentColorMode, ContentLightMetadata, HdrError,
-        MasteringDisplayMetadata, VideoPresentationPath,
+        HdrPresentationCapabilities, MasteringDisplayMetadata, VideoPresentationPath,
     },
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_TYPE;
@@ -255,6 +252,7 @@ impl DecodeSession {
     pub(crate) unsafe fn open(
         source: &MediaSource,
         device: &D3D11Device,
+        hdr_capabilities: HdrPresentationCapabilities,
         audio_output_format: AudioStreamFormat,
         start_position: Option<Duration>,
         decode_preference: VideoDecodePreference,
@@ -347,13 +345,13 @@ impl DecodeSession {
         // outcomes; passthrough and unsupported combinations remain typed
         // errors surfaced through the existing OpenFailed flow.
         //
-        // SDR short-circuits before any capability probing: an SDR open
-        // performs zero new COM work here, so a capability-query failure on
-        // exotic systems (headless/RDP output, drivers without the newer
-        // interfaces) can never regress SDR open availability.
+        // `hdr_capabilities` was snapshotted by the session on the main
+        // thread (the worker has no window objects; see
+        // `Presenter::query_hdr_capabilities`). That query is non-fatal by
+        // design — on any failure the snapshot is the all-false default —
+        // and SDR content never consults it, so a capability problem on
+        // exotic systems can never regress SDR open availability.
         if video.content_color.mode != ContentColorMode::Sdr {
-            let hdr_capabilities = query_hdr_presentation_capabilities(device, None)
-                .map_err(|error| error.to_string())?;
             match select_video_presentation_path(&video.content_color, &hdr_capabilities) {
                 // Unreachable for non-SDR modes (the decision function
                 // returns ExistingSdr only for Sdr content); kept as an

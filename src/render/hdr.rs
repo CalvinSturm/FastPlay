@@ -154,12 +154,11 @@ pub(crate) struct ContentLightMetadata {
     pub(crate) max_frame_average_light_level: Option<u32>,
 }
 
-/// Raw display descriptor fields preserved from `DXGI_OUTPUT_DESC1` for
-/// future display policy. Interpretation (notably whether the fields mean
-/// Windows HDR output is *active*, not merely that the panel is capable) is
-/// deliberately not done here.
+/// Raw display descriptor fields preserved from `DXGI_OUTPUT_DESC1`.
+/// Interpreted by [`display_hdr_state_from_descriptor`]; the luminance
+/// fields are additionally read by future display policy (e.g. adapting the
+/// HLG OOTF to the panel's peak).
 #[derive(Debug, Clone, Copy)]
-// Read by the HDR-VERIFY display-policy commit.
 #[allow(dead_code)]
 pub(crate) struct HdrDisplayDescriptor {
     pub(crate) color_space: DXGI_COLOR_SPACE_TYPE,
@@ -169,6 +168,25 @@ pub(crate) struct HdrDisplayDescriptor {
     pub(crate) max_full_frame_luminance: f32,
 }
 
+/// Interpret a raw `DXGI_OUTPUT_DESC1` snapshot as `(capable, active)`.
+///
+/// `DXGI_OUTPUT_DESC1.ColorSpace` reports the color space the desktop is
+/// composed in on that output: `DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020`
+/// exactly when Windows advanced color (the "Use HDR" toggle) is active,
+/// and `DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709` when the output is in SDR
+/// mode. Anything else is treated as not-HDR: an unrecognized desktop color
+/// space must dead-end in the tone-map path, never select PQ output.
+///
+/// `GetDesc1` cannot distinguish a capable-but-inactive panel from an
+/// SDR-only one, so `capable` mirrors `active`; nothing gates on `capable`
+/// alone, and treating inactive as incapable is the conservative reading.
+/// Validated on hardware by `bench/verify-hdr-caps.ps1` with the Windows
+/// HDR toggle in both positions.
+pub(crate) fn display_hdr_state_from_descriptor(descriptor: &HdrDisplayDescriptor) -> (bool, bool) {
+    let active = descriptor.color_space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    (active, active)
+}
+
 /// Everything the decision function needs to know about the display,
 /// swapchain, and video processor. `Default` is the conservative all-false
 /// state: with it, HDR content can never select passthrough.
@@ -176,13 +194,13 @@ pub(crate) struct HdrDisplayDescriptor {
 pub(crate) struct HdrPresentationCapabilities {
     /// `IDXGIOutput6` cast succeeded for the playback window's output.
     pub(crate) output6_available: bool,
-    /// The attached display advertises HDR capability.
-    /// HDR-VERIFY: interpretation of `DXGI_OUTPUT_DESC1` fields is
-    /// unresolved; this stays false until verified.
+    /// The attached display advertises HDR capability. Mirrors
+    /// `display_hdr_active` (see [`display_hdr_state_from_descriptor`]);
+    /// nothing gates on this alone.
     pub(crate) display_hdr_capable: bool,
-    /// Windows HDR output is currently active on that display. A capable
-    /// panel with HDR toggled off must leave this false.
-    /// HDR-VERIFY: activity detection policy is unresolved.
+    /// Windows HDR output is currently active on that display, per the
+    /// desktop color space in `DXGI_OUTPUT_DESC1`. A capable panel with the
+    /// HDR toggle off reports an SDR desktop color space and stays false.
     pub(crate) display_hdr_active: bool,
     /// `IDXGISwapChain3::CheckColorSpaceSupport` accepted the verified HDR10
     /// swapchain color space.
@@ -964,6 +982,51 @@ mod tests {
             swapchain_format_for_path(VideoPresentationPath::Hdr10Passthrough),
             DXGI_FORMAT_R10G10B10A2_UNORM
         );
+    }
+
+    fn descriptor_with_color_space(color_space: DXGI_COLOR_SPACE_TYPE) -> HdrDisplayDescriptor {
+        HdrDisplayDescriptor {
+            color_space,
+            bits_per_color: 10,
+            min_luminance: 0.0,
+            max_luminance: 1015.0,
+            max_full_frame_luminance: 1015.0,
+        }
+    }
+
+    #[test]
+    fn hdr_desktop_color_space_means_display_hdr_active() {
+        let descriptor = descriptor_with_color_space(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        assert_eq!(display_hdr_state_from_descriptor(&descriptor), (true, true));
+    }
+
+    #[test]
+    fn sdr_desktop_color_space_means_display_hdr_inactive() {
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        let descriptor = descriptor_with_color_space(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        assert_eq!(
+            display_hdr_state_from_descriptor(&descriptor),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn unrecognized_desktop_color_spaces_mean_display_hdr_inactive() {
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020,
+        };
+        // scRGB desktops (FP16 advanced color) and studio-range PQ are not
+        // the verified HDR10 desktop state; both must stay conservative.
+        for color_space in [
+            DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+            DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020,
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
+        ] {
+            assert_eq!(
+                display_hdr_state_from_descriptor(&descriptor_with_color_space(color_space)),
+                (false, false)
+            );
+        }
     }
 
     #[test]

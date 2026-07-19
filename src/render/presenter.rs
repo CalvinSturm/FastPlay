@@ -199,6 +199,27 @@ impl Presenter {
         &self.device
     }
 
+    /// Snapshot the display/swapchain/device capabilities that gate HDR
+    /// presentation. Must run on the main thread, where the window's swap
+    /// chain lives: `GetContainingOutput` on that chain identifies the
+    /// display the window is actually on (per-monitor correct).
+    ///
+    /// Non-fatal by design: any failure — no swap chain, headless/RDP
+    /// output, drivers without the newer interfaces — returns the all-false
+    /// default, which can only make HDR content dead-end in a typed error.
+    /// It can never affect SDR selection, so exotic systems cannot regress
+    /// SDR open availability.
+    pub fn query_hdr_capabilities(&self) -> crate::render::hdr::HdrPresentationCapabilities {
+        let Some(sc) = self.swap_chain.as_ref() else {
+            return crate::render::hdr::HdrPresentationCapabilities::default();
+        };
+        crate::ffi::dxgi::query_hdr_presentation_capabilities(
+            &self.device,
+            Some(sc.raw_swap_chain()),
+        )
+        .unwrap_or_default()
+    }
+
     pub fn register_surface(
         &mut self,
         open_gen: crate::playback::generations::OpenGeneration,

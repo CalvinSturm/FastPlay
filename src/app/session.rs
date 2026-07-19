@@ -1365,17 +1365,23 @@ impl PlaybackSession {
             .map(|sink| sink.format())
             .unwrap_or_else(AudioStreamFormat::stereo_f32_48khz);
         let decode_preference = self.decode_preference;
+        // HDR capability snapshot for this open, taken here on the main
+        // thread: the worker has no window objects, and the swap chain's
+        // containing output identifies the monitor the window is actually
+        // on. Constant for the lifetime of the open (decide-at-open policy).
+        let hdr_capabilities = self.presenter.query_hdr_capabilities();
         let control = Arc::new(DecodeControl::new());
         let worker_count = self
             .decode_thread
             .prepare_spawn(control.clone(), decode_preference);
 
         flog!(
-            "[spawn_decode_thread] open={} seek={} op={:?} workers_now={}",
+            "[spawn_decode_thread] open={} seek={} op={:?} workers_now={} hdr_caps={:?}",
             open_gen.0,
             seek_gen.0,
             op_id,
-            self.decode_thread.worker_count()
+            self.decode_thread.worker_count(),
+            hdr_capabilities
         );
 
         let handle = thread::spawn(move || {
@@ -1452,6 +1458,7 @@ impl PlaybackSession {
                 DecodeSession::open(
                     &source,
                     &device,
+                    hdr_capabilities,
                     audio_format,
                     start_position,
                     decode_preference,
