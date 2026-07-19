@@ -892,6 +892,50 @@ impl DxgiSwapChain {
         device.capture_bgra_texture(backbuffer)
     }
 
+    /// Dev-only HDR overlay validation pass (`bench/verify-overlay-hdr.ps1`):
+    /// clear this (HDR) swapchain's backbuffer to opaque black, draw
+    /// `overlay` through the PRODUCTION overlay renderer with the PQ-chain
+    /// shader variant (selected by this chain's kind, exactly as production
+    /// does), then read the raw R10G10B10A2 pixels back without presenting.
+    // Called only by the env-gated validation entry (render::hdr_validate).
+    #[allow(dead_code)]
+    pub fn hdr_overlay_validation_pass(
+        &mut self,
+        device: &D3D11Device,
+        overlay: &SubtitleOverlay,
+    ) -> Result<BgraFrameCapture, Box<dyn Error>> {
+        let render_target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain render target is not bound".into()))?;
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain backbuffer is not bound".into()))?;
+        let (output_width, output_height) = current_backbuffer_size(backbuffer)?;
+        device.clear_render_target(render_target, [0.0, 0.0, 0.0, 1.0]);
+        let renderer = self
+            .subtitle_renderer
+            .get_or_insert(device.create_subtitle_renderer()?);
+        let render_target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain render target is not bound".into()))?;
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain backbuffer is not bound".into()))?;
+        device.render_subtitle_overlay(
+            renderer,
+            overlay,
+            render_target,
+            output_width,
+            output_height,
+            self.kind,
+        )?;
+        device.capture_bgra_texture(backbuffer)
+    }
+
     /// Dev-only HDR shader validation pass (`bench/verify-colors-pq.ps1
     /// -Mode shader-pq` / `bench/verify-hlg-pq.ps1`): render `surface`
     /// through the PRODUCTION tone-map renderer in PQ-output mode into this
@@ -975,6 +1019,7 @@ impl DxgiSwapChain {
                 render_target,
                 self.width,
                 self.height,
+                self.kind,
             )?;
         }
 
@@ -1029,6 +1074,7 @@ impl DxgiSwapChain {
                 render_target,
                 self.width,
                 self.height,
+                self.kind,
             )?;
         }
 
@@ -1088,6 +1134,7 @@ impl DxgiSwapChain {
                 render_target,
                 output_width,
                 output_height,
+                self.kind,
             )?;
         }
 
@@ -1152,6 +1199,7 @@ impl DxgiSwapChain {
                 render_target,
                 output_width,
                 output_height,
+                self.kind,
             )?;
         }
 
