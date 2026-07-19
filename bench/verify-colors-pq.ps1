@@ -57,8 +57,12 @@ param(
     [int]$Tolerance = 12,
     [ValidateSet("vp", "shader-pq")]
     [string]$Mode = "vp",
-    [switch]$WrongMatrix
+    [switch]$WrongMatrix,
+    # shader-pq only: generate FULL-range PQ bars and tag the input
+    # full-range (the Topaz Video AI "HDR Enhanced" 8-bit export shape).
+    [switch]$FullRange
 )
+if ($FullRange -and $Mode -ne "shader-pq") { throw "-FullRange applies to -Mode shader-pq only" }
 
 $ErrorActionPreference = "Stop"
 $W = 1280; $H = 720
@@ -71,12 +75,14 @@ New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 # smptebars RGB -> BT.2020 NCL limited-range YCbCr, then tagged PQ. The
 # transfer tag reinterprets the values; correctness of YCbCr<->RGB math is
 # what we measure, and both sides of the comparison use the same encoding.
-$clip = Join-Path $WorkDir "bars2020pq.mp4"
-$nv12 = Join-Path $WorkDir "bars2020pq.nv12"
+$rangeSlug = if ($FullRange) { "full" } else { "tv" }
+$clip = Join-Path $WorkDir "bars2020pq-$rangeSlug.mp4"
+$nv12 = Join-Path $WorkDir "bars2020pq-$rangeSlug.nv12"
 if (-not (Test-Path $clip)) {
+    $rangeArg = if ($FullRange) { "pc" } else { "tv" }
     & $Ffmpeg -y -hide_banner -loglevel error `
         -f lavfi -i "smptebars=duration=1:size=${W}x${H}:rate=30" `
-        -vf "scale=out_color_matrix=bt2020:out_range=tv,format=yuv420p,setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084:range=tv" `
+        -vf "scale=out_color_matrix=bt2020:out_range=$rangeArg,format=yuv420p,setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084:range=$rangeArg" `
         -c:v libx264 -preset veryfast $clip
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed generating $clip" }
 }
@@ -87,13 +93,14 @@ if (-not (Test-Path $clip)) {
 if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed extracting NV12" }
 
 # --- Run the validator ------------------------------------------------------
-$outBin = Join-Path $WorkDir "backbuffer-r10-$Mode.bin"
+$outBin = Join-Path $WorkDir "backbuffer-r10-$Mode-$rangeSlug.bin"
 if (Test-Path $outBin) { Remove-Item $outBin -Force }
 $env:FASTPLAY_HDR_VALIDATE_NV12 = $nv12
 $env:FASTPLAY_HDR_VALIDATE_SIZE = "${W}x${H}"
 $env:FASTPLAY_HDR_VALIDATE_OUT = $outBin
 $env:FASTPLAY_HDR_VALIDATE_MODE = $Mode
 if ($WrongMatrix) { $env:FASTPLAY_HDR_VALIDATE_WRONG_MATRIX = "1" }
+if ($FullRange) { $env:FASTPLAY_HDR_VALIDATE_FULL_RANGE = "1" }
 try {
     & $Exe
     if ($LASTEXITCODE -ne 0) { throw "validator exited with code $LASTEXITCODE" }
@@ -101,7 +108,7 @@ try {
 finally {
     Remove-Item Env:FASTPLAY_HDR_VALIDATE_NV12, Env:FASTPLAY_HDR_VALIDATE_SIZE,
         Env:FASTPLAY_HDR_VALIDATE_OUT, Env:FASTPLAY_HDR_VALIDATE_MODE -ErrorAction SilentlyContinue
-    Remove-Item Env:FASTPLAY_HDR_VALIDATE_WRONG_MATRIX -ErrorAction SilentlyContinue
+    Remove-Item Env:FASTPLAY_HDR_VALIDATE_WRONG_MATRIX, Env:FASTPLAY_HDR_VALIDATE_FULL_RANGE -ErrorAction SilentlyContinue
 }
 if (-not (Test-Path $outBin)) { throw "validator produced no readback file" }
 
@@ -120,15 +127,22 @@ function Get-BackbufferPixel([int]$x, [int]$y) {
     @(($dw -band 0x3FF), (($dw -shr 10) -band 0x3FF), (($dw -shr 20) -band 0x3FF))
 }
 function Get-ReferencePixel([int]$x, [int]$y) {
-    # ITU-R BT.2020 non-constant-luminance, limited (studio) range, in
-    # double precision on the same NV12 bytes the GPU consumed. Sampled
+    # ITU-R BT.2020 non-constant-luminance in double precision on the same
+    # NV12 bytes the GPU consumed; studio (16-235/16-240) or full (0-255,
+    # chroma centered on 128) normalization per -FullRange. Sampled
     # positions are flat bar interiors, so nearest-neighbor chroma is exact.
     $Y = [double]$src[$y * $W + $x]
     $uv = $W * $H + [int][Math]::Floor($y / 2) * $W + 2 * [int][Math]::Floor($x / 2)
     $Cb = [double]$src[$uv]; $Cr = [double]$src[$uv + 1]
-    $Yn = ($Y - 16.0) / 219.0
-    $Cbn = ($Cb - 128.0) / 224.0
-    $Crn = ($Cr - 128.0) / 224.0
+    if ($FullRange) {
+        $Yn = $Y / 255.0
+        $Cbn = ($Cb - 128.0) / 255.0
+        $Crn = ($Cr - 128.0) / 255.0
+    } else {
+        $Yn = ($Y - 16.0) / 219.0
+        $Cbn = ($Cb - 128.0) / 224.0
+        $Crn = ($Cr - 128.0) / 224.0
+    }
     # BT.2020 NCL: Kr = 0.2627, Kb = 0.0593.
     $R = $Yn + 1.4746 * $Crn
     $G = $Yn - 0.16455313 * $Cbn - 0.57135313 * $Crn

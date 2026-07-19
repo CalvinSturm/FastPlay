@@ -15,10 +15,7 @@
 
 use std::{error::Error, fs, path::PathBuf};
 
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
-    DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020,
-};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
 
 use crate::{
     ffi::{
@@ -32,7 +29,9 @@ use crate::{
         },
     },
     platform::window::NativeWindow,
-    render::hdr::{ContentColorInfo, ContentColorMode, HdrShaderOutput},
+    render::hdr::{
+        ContentColorInfo, ContentColorMode, HdrShaderOutput, HdrToneMapSignal, HdrTransfer,
+    },
 };
 
 /// Which HDR pipeline the validation frame is rendered through.
@@ -62,6 +61,9 @@ pub struct HdrValidateConfig {
     /// modes it is the *other* HDR transfer (PQ↔HLG), the wrong constant
     /// that pipeline could actually be handed.
     wrong_matrix: bool,
+    /// Shader modes: tag the input as full-range (0–255) instead of
+    /// studio-range, matching full-range HDR files in the wild.
+    full_range: bool,
 }
 
 /// `None` unless the validation env vars are all present — the ordinary
@@ -90,6 +92,7 @@ pub fn config_from_env() -> Option<HdrValidateConfig> {
         out_path: out_path.into(),
         mode,
         wrong_matrix: std::env::var_os("FASTPLAY_HDR_VALIDATE_WRONG_MATRIX").is_some(),
+        full_range: std::env::var_os("FASTPLAY_HDR_VALIDATE_FULL_RANGE").is_some(),
     })
 }
 
@@ -168,19 +171,26 @@ pub fn run(config: HdrValidateConfig) -> Result<(), Box<dyn Error>> {
             .into());
         }
 
-        // The shader modes read the input transfer and PQ output encode
-        // from the surface's tag, exactly as production does; the
-        // wrong-matrix control swaps in the other HDR transfer. The VP
-        // mode attaches no tag (its blt reads the verified_* helpers) and
-        // its control stays the SDR BT.709 space.
+        // The shader modes read the input signal and PQ output encode from
+        // the surface's tag, exactly as production does; the wrong-matrix
+        // control swaps in the other HDR transfer. The VP mode attaches no
+        // tag (its blt reads the verified_* helpers) and its control stays
+        // the SDR BT.709 space. FASTPLAY_HDR_VALIDATE_FULL_RANGE marks the
+        // input as full-range (the Topaz-style full-range PQ case).
         let tone_map_tag = match (config.mode, config.wrong_matrix) {
             (ValidateMode::Vp | ValidateMode::Overlay, _) => None,
             (ValidateMode::ShaderPq, false) | (ValidateMode::ShaderHlg, true) => Some((
-                DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
+                HdrToneMapSignal {
+                    transfer: HdrTransfer::Pq,
+                    full_range: config.full_range,
+                },
                 HdrShaderOutput::PqPassthrough,
             )),
             (ValidateMode::ShaderPq, true) | (ValidateMode::ShaderHlg, false) => Some((
-                DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020,
+                HdrToneMapSignal {
+                    transfer: HdrTransfer::Hlg,
+                    full_range: config.full_range,
+                },
                 HdrShaderOutput::PqPassthrough,
             )),
         };
