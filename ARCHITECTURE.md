@@ -33,7 +33,8 @@ The following are explicitly **out of scope** for initial implementation:
 - browser/web UI
 - plugin system
 - advanced subtitle styling engine
-- native HDR passthrough (HDR *is* tone-mapped to SDR since v0.4.2 — see §21)
+- metadata-driven tone mapping (HDR presents natively on HDR displays and
+  tone-maps to SDR otherwise — see §21; the curve/OOTF are fixed)
 - frame interpolation
 - AI enhancement during playback
 - cross-platform support
@@ -650,30 +651,40 @@ Correctness and stability take priority over ambitious HDR handling.
 * P010 accepted conservatively
 * preserve range metadata where possible
 
-### Shipped HDR behavior (v0.4.2)
+### Shipped HDR behavior
 
-* HDR10 PQ and HLG play, tone-mapped to SDR. The active conversion is
-  FastPlay's own pixel shader (`HdrToneMapRenderer`, `src/ffi/d3d11.rs`) — not
-  the GPU video processor, whose HDR→8-bit-SDR conversion is unavailable on
-  real hardware (probed on NVIDIA; see `docs/release-notes-v0.4.2.md`).
-* Output stays the ordinary SDR `B8G8R8A8` swap chain. Production never calls
-  `SetColorSpace1` or `SetHDRMetaData`.
-* Native HDR passthrough is not enabled. `display_hdr_active` (in
-  `HdrPresentationCapabilities`) stays false pending separate passthrough
-  validation, so the passthrough path is unreachable in production.
-* The tone map is fixed (203 cd/m² diffuse white, knee 0.75), not
-  metadata-driven: mastering-display and content-light metadata are not used
-  to drive the curve.
-* Software decoding may reduce 10-bit HDR to 8-bit NV12 before tone mapping,
+* On an HDR-active display (Windows "Use HDR" on), HDR10 PQ and HLG present
+  natively (`VideoPresentationPath::HdrPqOutput`): a per-open 10-bit
+  `R10G10B10A2` swap chain committed to `RGB_FULL_G2084_NONE_P2020`
+  (`SetColorSpace1`), with FastPlay's own pixel shader writing PQ — PQ input
+  passes through bit-transparently, HLG is completed to display light
+  (BT.2100 OOTF, 1000-nit nominal) and PQ-encoded. Overlays go through a
+  PQ-aware shader variant (sRGB → BT.2020 → 203-nit reference → PQ);
+  screenshots CPU-tone-map the 10-bit readback to SDR.
+* On an SDR display (or when any gate bit is missing), HDR tone-maps to SDR
+  through the same shader into the ordinary `B8G8R8A8` chain. In both cases
+  the conversion is never the GPU video processor, whose HDR conversions
+  are unavailable on real hardware (probed on NVIDIA; see
+  `docs/release-notes-v0.4.2.md`).
+* The swapchain kind is decided per open (`PresentationPathSelected` event →
+  `Presenter::ensure_swapchain_for_path`); it is never changed mid-playback,
+  and resize/device recovery rebuild the current kind. A surface whose
+  output mode disagrees with the live chain is a typed render error.
+* The capability snapshot (`HdrPresentationCapabilities`) is taken on the
+  main thread at open from the live swap chain's containing output;
+  `display_hdr_active` = the output's desktop color space is G2084/P2020.
+* The tone map / HLG OOTF are fixed (203 cd/m² diffuse white, knee 0.75,
+  1000-nit HLG peak), not metadata-driven. `SetHDRMetaData` is not called
+  (static metadata is a recorded follow-up; DWM composites without it).
+* Software decoding may reduce 10-bit HDR to 8-bit NV12 before conversion,
   which can introduce banding.
 * Classification is conservative: contradictory or incomplete HDR signalling
   is declined at open with a typed error, never guessed into a path.
 
 ### Deferred
 
-* native HDR passthrough (skeleton exists; gated off)
-* metadata-aware tone mapping
-* validation on an HDR-active Windows desktop
+* HDR10 static metadata (`SetHDRMetaData`)
+* metadata-aware / display-peak-adaptive tone mapping
 * wide gamut correctness polish
 * full HDR UX
 
