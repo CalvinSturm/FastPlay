@@ -72,8 +72,9 @@ use crate::{
     },
     platform::input::InputEvent,
     render::hdr::{
-        swapchain_format_for_path, verified_hdr10_swapchain_color_space, ContentColorInfo,
-        HdrDisplayDescriptor, HdrError, HdrPresentationCapabilities, VideoPresentationPath,
+        display_hdr_state_from_descriptor, swapchain_format_for_path,
+        verified_hdr10_swapchain_color_space, ContentColorInfo, HdrDisplayDescriptor, HdrError,
+        HdrPresentationCapabilities, VideoPresentationPath,
     },
 };
 
@@ -658,6 +659,13 @@ pub struct DxgiSwapChain {
 }
 
 impl DxgiSwapChain {
+    /// The underlying DXGI swap chain, for read-only capability queries
+    /// (`query_hdr_presentation_capabilities`) that need the containing
+    /// output of the window this chain presents to.
+    pub fn raw_swap_chain(&self) -> &IDXGISwapChain1 {
+        &self.swap_chain
+    }
+
     /// Release all resources derived from the swap chain's backbuffer so
     /// that the swap chain's COM refcount can reach zero.  Must be called
     /// before dropping the struct when another swap chain will be created
@@ -1199,13 +1207,11 @@ fn current_backbuffer_size(backbuffer: &ID3D11Texture2D) -> Result<(u32, u32), B
 /// presentation. Pure data out; the decision itself lives in
 /// [`select_video_presentation_path`](crate::render::hdr::select_video_presentation_path).
 ///
-/// `swap_chain` is `None` when called from the decode worker at open time
-/// (the worker has no window objects); all display-dependent capabilities
-/// then stay conservatively false, which can only make HDR content dead-end
-/// in a typed error — it can never affect SDR selection.
-///
-/// An HDR-*capable* display is deliberately not treated as HDR-*active*:
-/// both flags stay false until their interpretation is verified.
+/// `swap_chain` carries the playback window's swap chain, whose containing
+/// output identifies the display the window is actually on. With `None`
+/// (no window objects available) all display-dependent capabilities stay
+/// conservatively false, which can only make HDR content dead-end in a
+/// typed error — it can never affect SDR selection.
 pub fn query_hdr_presentation_capabilities(
     device: &D3D11Device,
     swap_chain: Option<&IDXGISwapChain1>,
@@ -1226,19 +1232,17 @@ pub fn query_hdr_presentation_capabilities(
                 // SAFETY: GetDesc1 fills a plain descriptor struct.
                 let desc = unsafe { output6.GetDesc1()? };
                 // Preserve the raw fields future display policy needs.
-                capabilities.display_descriptor = Some(HdrDisplayDescriptor {
+                let descriptor = HdrDisplayDescriptor {
                     color_space: desc.ColorSpace,
                     bits_per_color: desc.BitsPerColor,
                     min_luminance: desc.MinLuminance,
                     max_luminance: desc.MaxLuminance,
                     max_full_frame_luminance: desc.MaxFullFrameLuminance,
-                });
-                // HDR-VERIFY: interpretation of DXGI_OUTPUT_DESC1 (which
-                // ColorSpace values mean HDR output is ACTIVE, not merely
-                // that the panel is capable) is unresolved. Both flags stay
-                // false until verified.
-                capabilities.display_hdr_capable = false;
-                capabilities.display_hdr_active = false;
+                };
+                let (capable, active) = display_hdr_state_from_descriptor(&descriptor);
+                capabilities.display_descriptor = Some(descriptor);
+                capabilities.display_hdr_capable = capable;
+                capabilities.display_hdr_active = active;
             }
         }
 

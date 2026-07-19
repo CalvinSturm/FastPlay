@@ -99,6 +99,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return render::hdr_validate::run(config);
     }
 
+    // Dev-gated HDR capability dump (bench/verify-hdr-caps.ps1): creates the
+    // ordinary window + SDR swapchain, prints the HDR presentation
+    // capabilities as queried from the live chain's containing output, then
+    // exits. This is the instrument that verifies display_hdr_active tracks
+    // the Windows HDR toggle, and answers whether an SDR-format swapchain
+    // reports PRESENT support for the HDR10 color space
+    // (swapchain_hdr10_color_space_supported) while the display is HDR-active.
+    if std::env::var_os("FASTPLAY_HDR_CAPS_DUMP").is_some() {
+        let window = NativeWindow::create("FastPlay", 1280, 720)?;
+        let presenter = render::presenter::Presenter::new(&window)?;
+        let capabilities = presenter.query_hdr_capabilities();
+        println!("{capabilities:#?}");
+        // Same shutdown discipline as hdr_validate and normal close: never
+        // tear down D3D objects in-process (see the comment at the end of
+        // run()); the OS reclaims them at process exit.
+        std::mem::forget(presenter);
+        return Ok(());
+    }
+
     let media_path = parse_media_source_from_args()?;
     let window = NativeWindow::create("FastPlay", 1280, 720)?;
     let mut session = PlaybackSession::new(window)?;

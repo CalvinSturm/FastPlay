@@ -84,6 +84,11 @@ impl SwapChainPresenter {
         self.swap_chain.release_resources();
     }
 
+    /// The underlying DXGI swap chain, for read-only capability queries.
+    pub fn raw_swap_chain(&self) -> &windows::Win32::Graphics::Dxgi::IDXGISwapChain1 {
+        self.swap_chain.raw_swap_chain()
+    }
+
     pub fn new(
         window: &NativeWindow,
         device: &D3D11Device,
