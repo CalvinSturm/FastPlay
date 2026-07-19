@@ -2531,6 +2531,11 @@ impl PlaybackSession {
                 let sample_rate = sink.format().sample_rate;
                 if sample_rate > 0 {
                     let played = Duration::from_secs_f64(played_frames as f64 / sample_rate as f64);
+                    // WASAPI's padding only updates once per engine period
+                    // (~10 ms), making the raw position a staircase that
+                    // strands sub-10ms frame cadences (120 fps) — smooth it
+                    // so at most one frame becomes due per scheduler pass.
+                    let played = self.audio.smooth_played(played, now);
                     return Some(self.media_time_for_pts(anchor_pts).saturating_add(played));
                 }
             }
