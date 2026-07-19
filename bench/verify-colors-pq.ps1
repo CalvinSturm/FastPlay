@@ -32,7 +32,18 @@
 
 .EXAMPLE
     pwsh -File bench/verify-colors-pq.ps1
-    pwsh -File bench/verify-colors-pq.ps1 -WrongMatrix   # expect FAIL
+    pwsh -File bench/verify-colors-pq.ps1 -WrongMatrix       # expect FAIL
+    pwsh -File bench/verify-colors-pq.ps1 -Mode shader-pq    # tone-map shader, PQ output
+
+.NOTES
+    -Mode vp        (default) the dedicated hdr10_validation_blt through the
+                    video processor with ColorSpace1 configuration.
+    -Mode shader-pq the PRODUCTION tone-map shader in PQ-output mode
+                    (HdrPqOutput). PQ code values pass through the shader
+                    bit-transparently (the YCbCr->R'G'B' matrix is the whole
+                    conversion), so the same spec-math reference applies.
+                    Its -WrongMatrix control forces the HLG transfer instead
+                    of the SDR BT.709 space.
 #>
 [CmdletBinding()]
 param(
@@ -44,6 +55,8 @@ param(
     # GPU promoting 8-bit NV12 to 10-bit as x*1023/255 vs the reference's
     # x*4) while staying far under the wrong-matrix signal (35+).
     [int]$Tolerance = 12,
+    [ValidateSet("vp", "shader-pq")]
+    [string]$Mode = "vp",
     [switch]$WrongMatrix
 )
 
@@ -74,11 +87,12 @@ if (-not (Test-Path $clip)) {
 if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed extracting NV12" }
 
 # --- Run the validator ------------------------------------------------------
-$outBin = Join-Path $WorkDir "backbuffer-r10.bin"
+$outBin = Join-Path $WorkDir "backbuffer-r10-$Mode.bin"
 if (Test-Path $outBin) { Remove-Item $outBin -Force }
 $env:FASTPLAY_HDR_VALIDATE_NV12 = $nv12
 $env:FASTPLAY_HDR_VALIDATE_SIZE = "${W}x${H}"
 $env:FASTPLAY_HDR_VALIDATE_OUT = $outBin
+$env:FASTPLAY_HDR_VALIDATE_MODE = $Mode
 if ($WrongMatrix) { $env:FASTPLAY_HDR_VALIDATE_WRONG_MATRIX = "1" }
 try {
     & $Exe
@@ -86,7 +100,7 @@ try {
 }
 finally {
     Remove-Item Env:FASTPLAY_HDR_VALIDATE_NV12, Env:FASTPLAY_HDR_VALIDATE_SIZE,
-        Env:FASTPLAY_HDR_VALIDATE_OUT -ErrorAction SilentlyContinue
+        Env:FASTPLAY_HDR_VALIDATE_OUT, Env:FASTPLAY_HDR_VALIDATE_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:FASTPLAY_HDR_VALIDATE_WRONG_MATRIX -ErrorAction SilentlyContinue
 }
 if (-not (Test-Path $outBin)) { throw "validator produced no readback file" }
@@ -149,7 +163,7 @@ if ($WrongMatrix) {
     exit 1
 }
 if ($maxDelta -le $Tolerance) {
-    "PASS: HDR10 backbuffer within +/-$Tolerance/1023 of ffmpeg reference (max delta $maxDelta)"
+    "PASS ($Mode): HDR10 backbuffer within +/-$Tolerance/1023 of ffmpeg reference (max delta $maxDelta)"
     exit 0
 }
 "FAIL: max per-channel delta $maxDelta exceeds tolerance $Tolerance"

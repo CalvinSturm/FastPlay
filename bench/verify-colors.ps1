@@ -77,22 +77,27 @@ public class FpWin {
     public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wp, IntPtr lp);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 }
 "@
 
-function Find-FastPlayWindow {
-    # The render window title is "<file> - FastPlay" ("FastPlay" when idle).
-    # Never match by class or process main window: the debug build's console
-    # window would match first.
+function Find-FastPlayWindow([uint32]$TargetPid) {
+    # Match by PID (a dev machine routinely has other FastPlay windows open,
+    # and the debug build's console window also carries a title) AND require
+    # the "<file> - FastPlay" playing title: the bare idle "FastPlay" title
+    # means the open has not completed yet, and capturing then reads the
+    # background instead of the video (the cold-start flake this fixes).
     $found = [IntPtr]::Zero
     $cb = [FpWin+EnumProc]{ param($h, $lp)
         if (-not [FpWin]::IsWindowVisible($h)) { return $true }
+        $procId = 0
+        [FpWin]::GetWindowThreadProcessId($h, [ref]$procId) | Out-Null
+        if ($procId -ne $TargetPid) { return $true }
         $len = [FpWin]::GetWindowTextLength($h)
         if ($len -eq 0) { return $true }
         $sb = New-Object System.Text.StringBuilder ($len + 1)
         [FpWin]::GetWindowText($h, $sb, $sb.Capacity) | Out-Null
-        $t = $sb.ToString()
-        if ($t.EndsWith(" - FastPlay") -or $t -eq "FastPlay") {
+        if ($sb.ToString().EndsWith(" - FastPlay")) {
             (Get-Variable found -Scope 1).Value = $h
             return $false
         }
@@ -111,7 +116,7 @@ $bmpPath = $null
 try {
     foreach ($attempt in 1..30) {
         Start-Sleep -Milliseconds 500
-        $hwnd = Find-FastPlayWindow
+        $hwnd = Find-FastPlayWindow $proc.Id
         if ($hwnd -ne [IntPtr]::Zero) { break }
     }
     if ($hwnd -eq [IntPtr]::Zero) { throw "FastPlay render window not found" }

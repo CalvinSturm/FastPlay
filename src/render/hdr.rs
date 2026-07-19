@@ -78,10 +78,18 @@ pub(crate) enum ContentColorMode {
 pub(crate) enum VideoPresentationPath {
     /// The pixel-verified SDR pipeline, byte-for-byte the pre-HDR flow.
     ExistingSdr,
-    /// HDR10 content presented on an active HDR display without tone
-    /// mapping. Requires every capability bit checked in
+    /// HDR content (PQ or HLG) presented on an active HDR display through
+    /// a 10-bit PQ (R10G10B10A2, G2084/BT.2020) swapchain. PQ is written
+    /// through with no tone mapping; HLG is converted to PQ display light
+    /// in our own pixel shader. Requires every capability bit checked in
     /// [`select_video_presentation_path`].
-    Hdr10Passthrough,
+    ///
+    /// This is shader-based, not video-processor-based, for the same
+    /// hardware reason as the tone-map path below: NVIDIA's video
+    /// processor advertises no GHLG input conversion at all, so an HLG
+    /// path must do its own transfer math regardless — and sharing one
+    /// shader keeps geometry and pixel validation common to both.
+    HdrPqOutput,
     /// HDR content tone-mapped to SDR in our own pixel shader and presented
     /// through the existing SDR swapchain. The stream's colorimetry is
     /// resolved to a DXGI color space ([`tone_map_stream_color_space`]) and
@@ -94,8 +102,10 @@ pub(crate) enum VideoPresentationPath {
     /// gamma-2.2 sRGB the 8-bit SDR backbuffer scans out. Driver conversion
     /// tables are not a portable substitute for doing the transfer math.
     ///
-    /// Selected for HDR10 on an SDR display (and, until passthrough is
-    /// implemented, whenever passthrough is not available) and for HLG.
+    /// Selected for any HDR content when [`HdrPqOutput`]'s capability gate
+    /// is not met (SDR display, missing shader sampling support).
+    ///
+    /// [`HdrPqOutput`]: VideoPresentationPath::HdrPqOutput
     HdrToSdrToneMapRequired,
     /// Any HDR-signalled combination we cannot present correctly.
     UnsupportedHdr,
@@ -154,12 +164,11 @@ pub(crate) struct ContentLightMetadata {
     pub(crate) max_frame_average_light_level: Option<u32>,
 }
 
-/// Raw display descriptor fields preserved from `DXGI_OUTPUT_DESC1` for
-/// future display policy. Interpretation (notably whether the fields mean
-/// Windows HDR output is *active*, not merely that the panel is capable) is
-/// deliberately not done here.
+/// Raw display descriptor fields preserved from `DXGI_OUTPUT_DESC1`.
+/// Interpreted by [`display_hdr_state_from_descriptor`]; the luminance
+/// fields are additionally read by future display policy (e.g. adapting the
+/// HLG OOTF to the panel's peak).
 #[derive(Debug, Clone, Copy)]
-// Read by the HDR-VERIFY display-policy commit.
 #[allow(dead_code)]
 pub(crate) struct HdrDisplayDescriptor {
     pub(crate) color_space: DXGI_COLOR_SPACE_TYPE,
@@ -169,6 +178,25 @@ pub(crate) struct HdrDisplayDescriptor {
     pub(crate) max_full_frame_luminance: f32,
 }
 
+/// Interpret a raw `DXGI_OUTPUT_DESC1` snapshot as `(capable, active)`.
+///
+/// `DXGI_OUTPUT_DESC1.ColorSpace` reports the color space the desktop is
+/// composed in on that output: `DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020`
+/// exactly when Windows advanced color (the "Use HDR" toggle) is active,
+/// and `DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709` when the output is in SDR
+/// mode. Anything else is treated as not-HDR: an unrecognized desktop color
+/// space must dead-end in the tone-map path, never select PQ output.
+///
+/// `GetDesc1` cannot distinguish a capable-but-inactive panel from an
+/// SDR-only one, so `capable` mirrors `active`; nothing gates on `capable`
+/// alone, and treating inactive as incapable is the conservative reading.
+/// Validated on hardware by `bench/verify-hdr-caps.ps1` with the Windows
+/// HDR toggle in both positions.
+pub(crate) fn display_hdr_state_from_descriptor(descriptor: &HdrDisplayDescriptor) -> (bool, bool) {
+    let active = descriptor.color_space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    (active, active)
+}
+
 /// Everything the decision function needs to know about the display,
 /// swapchain, and video processor. `Default` is the conservative all-false
 /// state: with it, HDR content can never select passthrough.
@@ -176,26 +204,36 @@ pub(crate) struct HdrDisplayDescriptor {
 pub(crate) struct HdrPresentationCapabilities {
     /// `IDXGIOutput6` cast succeeded for the playback window's output.
     pub(crate) output6_available: bool,
-    /// The attached display advertises HDR capability.
-    /// HDR-VERIFY: interpretation of `DXGI_OUTPUT_DESC1` fields is
-    /// unresolved; this stays false until verified.
+    /// The attached display advertises HDR capability. Mirrors
+    /// `display_hdr_active` (see [`display_hdr_state_from_descriptor`]);
+    /// nothing gates on this alone.
     pub(crate) display_hdr_capable: bool,
-    /// Windows HDR output is currently active on that display. A capable
-    /// panel with HDR toggled off must leave this false.
-    /// HDR-VERIFY: activity detection policy is unresolved.
+    /// Windows HDR output is currently active on that display, per the
+    /// desktop color space in `DXGI_OUTPUT_DESC1`. A capable panel with the
+    /// HDR toggle off reports an SDR desktop color space and stays false.
     pub(crate) display_hdr_active: bool,
     /// `IDXGISwapChain3::CheckColorSpaceSupport` accepted the verified HDR10
     /// swapchain color space.
     pub(crate) swapchain_hdr10_color_space_supported: bool,
-    /// `ID3D11VideoContext1` is available on the device.
+    /// `ID3D11VideoContext1` is available on the device. Informational
+    /// (caps dump); no presentation path gates on it — HDR presentation is
+    /// shader-based, not video-processor-based.
+    // Read only through the Debug caps dump (FASTPLAY_HDR_CAPS_DUMP),
+    // which derived Debug does not count as a use.
+    #[allow(dead_code)]
     pub(crate) video_context1_available: bool,
-    /// `CheckVideoProcessorFormatConversion` accepted NV12 HDR10 input to
-    /// the HDR output format with the verified color spaces.
-    /// HDR-VERIFY: the open-time probe still needs wiring to a live
-    /// processor enumerator (passthrough commit); P010 input is unprobed.
-    pub(crate) hdr10_format_conversion_supported: bool,
-    /// Same, for HLG input. HDR-VERIFY: unresolved.
-    pub(crate) hlg_format_conversion_supported: bool,
+    /// The device can create the per-plane shader resource views the HDR
+    /// shader samples decoded NV12/P010 through
+    /// (`D3D11Device::supports_hdr_shader_tone_map`). Gates [`HdrPqOutput`]
+    /// alongside the display bits; the tone-map fallback re-checks the same
+    /// probe itself at open.
+    ///
+    /// Hardcoded false in `query_hdr_presentation_capabilities` until the
+    /// integration commit flips it, keeping [`HdrPqOutput`] unreachable
+    /// while its render path is built.
+    ///
+    /// [`HdrPqOutput`]: VideoPresentationPath::HdrPqOutput
+    pub(crate) hdr_shader_sampling_supported: bool,
     /// Raw descriptor preserved for future display policy; `None` when the
     /// output could not be queried.
     pub(crate) display_descriptor: Option<HdrDisplayDescriptor>,
@@ -215,7 +253,6 @@ pub(crate) enum HdrError {
     #[allow(dead_code)]
     HdrFormatConversionUnsupported,
     HdrColorSpaceUnverified,
-    HdrMetadataConversionUnverified,
     SwapChain4Unavailable,
     /// The tone-map shader cannot sample the decoder's output format on this
     /// device (no NV12/P010 shader-resource views). Raised at open, never at
@@ -245,9 +282,6 @@ impl fmt::Display for HdrError {
             }
             Self::HdrColorSpaceUnverified => {
                 "HDR playback is not available yet: the HDR color-space mapping is unverified"
-            }
-            Self::HdrMetadataConversionUnverified => {
-                "HDR playback is not available yet: HDR metadata conversion is unverified"
             }
             Self::SwapChain4Unavailable => {
                 "HDR metadata requires IDXGISwapChain4, which this system does not expose"
@@ -349,31 +383,55 @@ pub(crate) fn select_video_presentation_path(
 ) -> VideoPresentationPath {
     match content.mode {
         ContentColorMode::Sdr => VideoPresentationPath::ExistingSdr,
-        ContentColorMode::Hdr10Pq => {
+        // Both HDR modes share one gate: the display must be in HDR mode,
+        // the swapchain must accept the verified HDR10 color space, and the
+        // device must support the plane SRVs the HDR shader samples through
+        // (PQ passes through the shader untouched; HLG is converted to PQ
+        // display light in the same shader).
+        ContentColorMode::Hdr10Pq | ContentColorMode::Hlg => {
             if capabilities.display_hdr_active
                 && capabilities.swapchain_hdr10_color_space_supported
-                && capabilities.video_context1_available
-                && capabilities.hdr10_format_conversion_supported
+                && capabilities.hdr_shader_sampling_supported
             {
-                VideoPresentationPath::Hdr10Passthrough
+                VideoPresentationPath::HdrPqOutput
             } else {
-                // SDR display, or an HDR display missing some required
-                // passthrough capability: only an explicit HDR-to-SDR
-                // conversion may present this. It must never fall through
-                // to the existing SDR path. (The tone-map path performs its
-                // own structural checks — ID3D11VideoContext1 at open,
-                // CheckVideoProcessorFormatConversion at the blt — and
-                // dead-ends as a typed error when they fail.)
+                // SDR display, or a device that cannot sample the decoded
+                // planes: only an explicit HDR-to-SDR conversion may
+                // present this. It must never fall through to the existing
+                // SDR path. (The tone-map path re-checks the shader
+                // sampling probe itself at open and dead-ends as a typed
+                // error when it fails.)
                 VideoPresentationPath::HdrToSdrToneMapRequired
             }
         }
-        // HLG is never auto-classified as HDR10 passthrough and never
-        // reaches the plain SDR path; it presents through the explicit
-        // HDR-to-SDR conversion (GHLG stream color space). A native HLG
-        // passthrough path is future work.
-        ContentColorMode::Hlg => VideoPresentationPath::HdrToSdrToneMapRequired,
         // HDR-signalled but ambiguous content dead-ends explicitly.
         ContentColorMode::Unknown => VideoPresentationPath::UnsupportedHdr,
+    }
+}
+
+/// Which of the two swapchain constructions a window currently presents
+/// through. The session recreates the swapchain only when an open's
+/// selected path maps to a different kind than the live chain — never
+/// mid-playback, and a same-kind open must be a strict no-op so the
+/// pixel-verified SDR chain object is never churned by SDR↔SDR opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwapchainKind {
+    /// The verified 8-bit B8G8R8A8 sRGB chain (`DxgiSwapChain::create`).
+    Sdr,
+    /// The 10-bit R10G10B10A2 chain committed to
+    /// RGB_FULL_G2084_NONE_P2020 (`DxgiSwapChain::create_hdr10_skeleton`).
+    Hdr10Pq,
+}
+
+/// Swapchain kind per presentation path. Must always agree with
+/// [`swapchain_format_for_path`] (unit-tested): the SDR format pairs with
+/// `Sdr`, the 10-bit format with `Hdr10Pq`.
+pub(crate) fn swapchain_kind_for_path(path: VideoPresentationPath) -> SwapchainKind {
+    match path {
+        VideoPresentationPath::ExistingSdr
+        | VideoPresentationPath::HdrToSdrToneMapRequired
+        | VideoPresentationPath::UnsupportedHdr => SwapchainKind::Sdr,
+        VideoPresentationPath::HdrPqOutput => SwapchainKind::Hdr10Pq,
     }
 }
 
@@ -384,7 +442,7 @@ pub(crate) fn select_video_presentation_path(
 pub(crate) fn swapchain_format_for_path(path: VideoPresentationPath) -> DXGI_FORMAT {
     match path {
         VideoPresentationPath::ExistingSdr => DXGI_FORMAT_B8G8R8A8_UNORM,
-        VideoPresentationPath::Hdr10Passthrough => DXGI_FORMAT_R10G10B10A2_UNORM,
+        VideoPresentationPath::HdrPqOutput => DXGI_FORMAT_R10G10B10A2_UNORM,
         // Tone mapping renders SDR output; unsupported never creates one.
         VideoPresentationPath::HdrToSdrToneMapRequired => DXGI_FORMAT_B8G8R8A8_UNORM,
         VideoPresentationPath::UnsupportedHdr => DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -490,6 +548,21 @@ pub(crate) fn tone_map_stream_color_space(
     }
 }
 
+/// Which encode the HDR shader writes to its render target. Orthogonal to
+/// the input signal: the front half of the shader (plane sampling, range
+/// normalization, BT.2020 NCL matrix) is shared by both outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HdrShaderOutput {
+    /// Tone-map to SDR and sRGB-encode into the 8-bit SDR swapchain — the
+    /// pixel-verified HDR→SDR path (`bench/verify-tonemap.ps1`).
+    SdrToneMap,
+    /// Encode PQ/BT.2020 display light into the 10-bit HDR10 swapchain
+    /// ([`VideoPresentationPath::HdrPqOutput`]): PQ input passes through
+    /// bit-transparently (the YCbCr matrix is the entire conversion), HLG
+    /// is completed to display light by the BT.2100 OOTF and PQ-encoded.
+    PqPassthrough,
+}
+
 /// The transfer function carried by a frame on the tone-map path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HdrTransfer {
@@ -553,19 +626,159 @@ pub(crate) fn tone_map_signal(
     Err(HdrError::HdrColorSpaceUnverified)
 }
 
-/// Conversion boundary between FFmpeg-sourced metadata and DXGI.
+/// Convert a raw R10G10B10A2 PQ backbuffer readback into SDR BGRA8 —
+/// what an SDR viewer of the same content would have seen. This is the
+/// tone-map shader's SDR branch (`HDR_TONE_MAP_PIXEL_SHADER`, audited by
+/// `bench/verify-tonemap.ps1`) in double precision: ST 2084 EOTF →
+/// normalize to 203-nit diffuse white → knee/exponential-shoulder tone
+/// curve (knee 0.75) → BT.2020→BT.709 → sRGB encode. Constants must stay
+/// identical to the shader's.
 ///
-/// HDR-VERIFY: `DXGI_HDR_METADATA_HDR10` units, scaling, rounding, clamping,
-/// FFmpeg rational conversion, and the missing-value fallback policy are all
-/// unresolved. Mastering metadata must not become mandatory for HDR
-/// playback when this is implemented.
-// Wired to apply_hdr10_metadata by the passthrough commit.
-#[allow(dead_code)]
+/// Used by the screenshot path when the capture came from the HDR10
+/// chain; also the capture tap the end-to-end passthrough bench composes
+/// its model against. Alpha is forced opaque.
+pub(crate) fn pq10_capture_to_sdr_bgra(pixels: &[u8]) -> Vec<u8> {
+    const KNEE: f64 = 0.75;
+
+    fn pq_eotf(signal: f64) -> f64 {
+        const M1: f64 = 0.1593017578125;
+        const M2: f64 = 78.84375;
+        const C1: f64 = 0.8359375;
+        const C2: f64 = 18.8515625;
+        const C3: f64 = 18.6875;
+        let encoded = signal.max(0.0).powf(1.0 / M2);
+        let numerator = (encoded - C1).max(0.0);
+        let denominator = (C2 - C3 * encoded).max(1e-6);
+        (numerator / denominator).powf(1.0 / M1)
+    }
+
+    fn tone_curve(value: f64) -> f64 {
+        if value <= KNEE {
+            return value;
+        }
+        let headroom = 1.0 - KNEE;
+        KNEE + headroom * (1.0 - (-(value - KNEE) / headroom).exp())
+    }
+
+    fn srgb_encode(value: f64) -> f64 {
+        if value <= 0.0031308 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    let mut out = Vec::with_capacity(pixels.len());
+    for dword in pixels.chunks_exact(4) {
+        let dw = u32::from_le_bytes([dword[0], dword[1], dword[2], dword[3]]);
+        let signal = [
+            f64::from(dw & 0x3FF) / 1023.0,
+            f64::from((dw >> 10) & 0x3FF) / 1023.0,
+            f64::from((dw >> 20) & 0x3FF) / 1023.0,
+        ];
+        // PQ → linear light in units of diffuse white, then the shader's
+        // per-channel roll-off.
+        let mapped = signal.map(|s| tone_curve(pq_eotf(s) * (10000.0 / 203.0)));
+        // BT.2020 → BT.709 primaries in linear light (shader constants),
+        // clipped like the shader's saturate.
+        let [r, g, b] = mapped;
+        let rgb709 = [
+            1.66049 * r - 0.58764 * g - 0.07285 * b,
+            -0.12455 * r + 1.13290 * g - 0.00835 * b,
+            -0.01824 * r - 0.10057 * g + 1.11881 * b,
+        ]
+        .map(|v| v.clamp(0.0, 1.0));
+        let encode = |v: f64| (srgb_encode(v) * 255.0).round().clamp(0.0, 255.0) as u8;
+        out.push(encode(rgb709[2]));
+        out.push(encode(rgb709[1]));
+        out.push(encode(rgb709[0]));
+        out.push(255);
+    }
+    out
+}
+
+/// Convert FFmpeg-sourced HDR10 static metadata into
+/// `DXGI_HDR_METADATA_HDR10` for `SetHDRMetaData`.
+///
+/// Units per the MSDN definition (dxgi1_5.h, verified against its worked
+/// example in the unit tests): chromaticity coordinates are the CIE 1931
+/// xy values normalized to 50 000 (`u16`); `MaxMasteringLuminance` is in
+/// WHOLE nits (`u32`) while `MinMasteringLuminance` is in 0.0001-nit units
+/// (`u32`) — they deliberately differ; MaxCLL / MaxFALL are whole nits
+/// (`u16`). FFmpeg's side carries CIE xy rationals and cd/m² rationals
+/// (`AVMasteringDisplayMetadata`) and plain cd/m² integers
+/// (`AVContentLightMetadata`).
+///
+/// Zero means "unknown" throughout (CTA-861.3), so absent or invalid
+/// blocks (missing flags, zero-denominator rationals) stay zero rather
+/// than failing — static metadata is advisory and must never gate
+/// playback. Returns `None` when nothing at all is known, in which case
+/// `SetHDRMetaData` should not be called.
 pub(crate) fn build_dxgi_hdr10_metadata(
-    _mastering: Option<&MasteringDisplayMetadata>,
-    _content_light: Option<&ContentLightMetadata>,
-) -> Result<DXGI_HDR_METADATA_HDR10, HdrError> {
-    Err(HdrError::HdrMetadataConversionUnverified)
+    mastering: Option<&MasteringDisplayMetadata>,
+    content_light: Option<&ContentLightMetadata>,
+) -> Option<DXGI_HDR_METADATA_HDR10> {
+    fn rational(r: HdrRational) -> Option<f64> {
+        (r.den != 0).then(|| f64::from(r.num) / f64::from(r.den))
+    }
+    fn chromaticity(r: HdrRational) -> Option<u16> {
+        rational(r).map(|v| (v.clamp(0.0, 1.0) * 50000.0).round() as u16)
+    }
+    fn luminance(r: HdrRational, per_nit_units: f64, max: f64) -> Option<u32> {
+        rational(r).map(|v| ((v * per_nit_units).clamp(0.0, max)).round() as u32)
+    }
+
+    let mut metadata = DXGI_HDR_METADATA_HDR10::default();
+    let mut any = false;
+
+    if let Some(mastering) = mastering {
+        if mastering.has_primaries {
+            // All-or-nothing: a partially invalid primary set stays fully
+            // "unknown" rather than mixing real and zero coordinates.
+            let coords: Option<[[u16; 2]; 4]> = (|| {
+                let p = &mastering.display_primaries;
+                Some([
+                    [chromaticity(p[0][0])?, chromaticity(p[0][1])?],
+                    [chromaticity(p[1][0])?, chromaticity(p[1][1])?],
+                    [chromaticity(p[2][0])?, chromaticity(p[2][1])?],
+                    [
+                        chromaticity(mastering.white_point[0])?,
+                        chromaticity(mastering.white_point[1])?,
+                    ],
+                ])
+            })();
+            if let Some([red, green, blue, white]) = coords {
+                // FFmpeg documents display_primaries in r, g, b order.
+                metadata.RedPrimary = red;
+                metadata.GreenPrimary = green;
+                metadata.BluePrimary = blue;
+                metadata.WhitePoint = white;
+                any = true;
+            }
+        }
+        if mastering.has_luminance {
+            let max = luminance(mastering.max_luminance, 1.0, f64::from(u32::MAX));
+            let min = luminance(mastering.min_luminance, 10000.0, f64::from(u32::MAX));
+            if let (Some(max), Some(min)) = (max, min) {
+                metadata.MaxMasteringLuminance = max;
+                metadata.MinMasteringLuminance = min;
+                any = true;
+            }
+        }
+    }
+
+    if let Some(content_light) = content_light {
+        if let Some(max_cll) = content_light.max_content_light_level {
+            metadata.MaxContentLightLevel = max_cll.min(u32::from(u16::MAX)) as u16;
+            any |= max_cll != 0;
+        }
+        if let Some(max_fall) = content_light.max_frame_average_light_level {
+            metadata.MaxFrameAverageLightLevel = max_fall.min(u32::from(u16::MAX)) as u16;
+            any |= max_fall != 0;
+        }
+    }
+
+    any.then_some(metadata)
 }
 
 #[cfg(test)]
@@ -612,10 +825,28 @@ mod tests {
             display_hdr_active: true,
             swapchain_hdr10_color_space_supported: true,
             video_context1_available: true,
-            hdr10_format_conversion_supported: true,
-            hlg_format_conversion_supported: true,
+            hdr_shader_sampling_supported: true,
             display_descriptor: None,
         }
+    }
+
+    /// Every single-bit degradation of the PQ-output gate, plus all-false.
+    fn degraded_capabilities() -> [HdrPresentationCapabilities; 4] {
+        [
+            HdrPresentationCapabilities::default(),
+            HdrPresentationCapabilities {
+                display_hdr_active: false,
+                ..full_capabilities()
+            },
+            HdrPresentationCapabilities {
+                swapchain_hdr10_color_space_supported: false,
+                ..full_capabilities()
+            },
+            HdrPresentationCapabilities {
+                hdr_shader_sampling_supported: false,
+                ..full_capabilities()
+            },
+        ]
     }
 
     #[test]
@@ -632,67 +863,27 @@ mod tests {
     }
 
     #[test]
-    fn pq_with_full_capabilities_selects_passthrough() {
+    fn pq_with_full_capabilities_selects_pq_output() {
         assert_eq!(
             select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &full_capabilities()),
-            VideoPresentationPath::Hdr10Passthrough
+            VideoPresentationPath::HdrPqOutput
         );
     }
 
     #[test]
-    fn pq_on_sdr_display_requires_tone_mapping() {
-        let caps = HdrPresentationCapabilities {
-            display_hdr_active: false,
-            ..full_capabilities()
-        };
+    fn hlg_with_full_capabilities_selects_pq_output() {
         assert_eq!(
-            select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps),
-            VideoPresentationPath::HdrToSdrToneMapRequired
+            select_video_presentation_path(&info(ContentColorMode::Hlg), &full_capabilities()),
+            VideoPresentationPath::HdrPqOutput
         );
     }
 
     #[test]
-    fn pq_without_video_context1_does_not_select_passthrough() {
-        let caps = HdrPresentationCapabilities {
-            video_context1_available: false,
-            ..full_capabilities()
-        };
-        let path = select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps);
-        assert_ne!(path, VideoPresentationPath::Hdr10Passthrough);
-        assert_ne!(path, VideoPresentationPath::ExistingSdr);
-    }
-
-    #[test]
-    fn pq_without_format_conversion_does_not_select_passthrough() {
-        let caps = HdrPresentationCapabilities {
-            hdr10_format_conversion_supported: false,
-            ..full_capabilities()
-        };
-        let path = select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps);
-        assert_ne!(path, VideoPresentationPath::Hdr10Passthrough);
-        assert_ne!(path, VideoPresentationPath::ExistingSdr);
-    }
-
-    #[test]
-    fn pq_without_passthrough_capabilities_selects_tone_map_never_sdr() {
-        // Missing passthrough capability (SDR display, no context1, no
-        // format conversion) routes PQ to the explicit tone-map path —
-        // never the plain SDR path, never a dead end.
-        for caps in [
-            HdrPresentationCapabilities::default(),
-            HdrPresentationCapabilities {
-                display_hdr_active: false,
-                ..full_capabilities()
-            },
-            HdrPresentationCapabilities {
-                video_context1_available: false,
-                ..full_capabilities()
-            },
-            HdrPresentationCapabilities {
-                hdr10_format_conversion_supported: false,
-                ..full_capabilities()
-            },
-        ] {
+    fn pq_with_any_missing_capability_selects_tone_map_never_sdr() {
+        // Any missing gate bit (SDR display, swapchain rejecting the HDR10
+        // color space, no shader plane sampling) routes PQ to the explicit
+        // tone-map path — never the plain SDR path, never a dead end.
+        for caps in degraded_capabilities() {
             assert_eq!(
                 select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps),
                 VideoPresentationPath::HdrToSdrToneMapRequired
@@ -701,10 +892,28 @@ mod tests {
     }
 
     #[test]
-    fn hlg_selects_tone_map_never_passthrough_or_existing_sdr() {
-        for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
-            let path = select_video_presentation_path(&info(ContentColorMode::Hlg), &caps);
-            assert_eq!(path, VideoPresentationPath::HdrToSdrToneMapRequired);
+    fn hlg_with_any_missing_capability_selects_tone_map_never_sdr() {
+        for caps in degraded_capabilities() {
+            assert_eq!(
+                select_video_presentation_path(&info(ContentColorMode::Hlg), &caps),
+                VideoPresentationPath::HdrToSdrToneMapRequired
+            );
+        }
+    }
+
+    #[test]
+    fn video_context1_no_longer_gates_pq_output() {
+        // HDR presentation is shader-based; the video-processor interface
+        // bit is informational and must not withhold PQ output.
+        let caps = HdrPresentationCapabilities {
+            video_context1_available: false,
+            ..full_capabilities()
+        };
+        for mode in [ContentColorMode::Hdr10Pq, ContentColorMode::Hlg] {
+            assert_eq!(
+                select_video_presentation_path(&info(mode), &caps),
+                VideoPresentationPath::HdrPqOutput
+            );
         }
     }
 
@@ -843,10 +1052,10 @@ mod tests {
     }
 
     #[test]
-    fn classified_hlg_routes_to_tone_map_never_sdr_or_passthrough() {
+    fn classified_hlg_routes_to_pq_output_or_tone_map_never_sdr() {
         // End to end: standard BT.2100 HLG classifies as Hlg and routes to
-        // the explicit HDR-to-SDR conversion under any capabilities — never
-        // HDR10 passthrough, never the ordinary SDR path.
+        // PQ output under full capabilities, or to the explicit HDR-to-SDR
+        // conversion otherwise — never the ordinary SDR path.
         let mode = classify_color_tags(
             AVColorPrimaries_AVCOL_PRI_BT2020,
             AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
@@ -855,7 +1064,11 @@ mod tests {
         let mut content = info(mode);
         content.color_primaries = AVColorPrimaries_AVCOL_PRI_BT2020;
         content.color_transfer = AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67;
-        for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
+        assert_eq!(
+            select_video_presentation_path(&content, &full_capabilities()),
+            VideoPresentationPath::HdrPqOutput
+        );
+        for caps in degraded_capabilities() {
             assert_eq!(
                 select_video_presentation_path(&content, &caps),
                 VideoPresentationPath::HdrToSdrToneMapRequired
@@ -934,8 +1147,7 @@ mod tests {
     #[test]
     fn classified_standard_pq_still_selects_passthrough() {
         // End to end: the valid HDR10 signal still classifies as Hdr10Pq and
-        // still selects the passthrough/skeleton path under full
-        // capabilities.
+        // still selects the PQ-output path under full capabilities.
         let mode = classify_color_tags(
             AVColorPrimaries_AVCOL_PRI_BT2020,
             AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
@@ -946,7 +1158,7 @@ mod tests {
         content.color_transfer = AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084;
         assert_eq!(
             select_video_presentation_path(&content, &full_capabilities()),
-            VideoPresentationPath::Hdr10Passthrough
+            VideoPresentationPath::HdrPqOutput
         );
     }
 
@@ -961,9 +1173,131 @@ mod tests {
     #[test]
     fn hdr10_swapchain_format_is_r10g10b10a2() {
         assert_eq!(
-            swapchain_format_for_path(VideoPresentationPath::Hdr10Passthrough),
+            swapchain_format_for_path(VideoPresentationPath::HdrPqOutput),
             DXGI_FORMAT_R10G10B10A2_UNORM
         );
+    }
+
+    /// Independent PQ inverse EOTF (ST 2084) for generating test inputs —
+    /// the production code only ever decodes.
+    fn pq_code_for_nits(nits: f64) -> u32 {
+        let (m1, m2, c1, c2, c3) = (0.1593017578125, 78.84375, 0.8359375, 18.8515625, 18.6875);
+        let y = (nits / 10000.0).powf(m1);
+        let n = ((c1 + c2 * y) / (1.0 + c3 * y)).powf(m2);
+        (1023.0 * n).round() as u32
+    }
+
+    fn pq10_dword(r: u32, g: u32, b: u32) -> [u8; 4] {
+        (r | (g << 10) | (b << 20) | (0b11 << 30)).to_le_bytes()
+    }
+
+    #[test]
+    fn pq10_black_converts_to_sdr_black() {
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(0, 0, 0));
+        assert_eq!(out, vec![0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn pq10_full_scale_white_converts_to_sdr_white() {
+        // 10 000 nits on every channel: far past the knee, the shoulder is
+        // asymptotic to 1.0 and this deep in it reaches it exactly in f64.
+        let code = pq_code_for_nits(10000.0);
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(code, code, code));
+        assert_eq!(out, vec![255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn pq10_midtone_gray_below_knee_is_identity_tone_mapped() {
+        // 100 nits ≈ 0.4926 of diffuse white — below the 0.75 knee, so the
+        // tone curve is the identity and gray stays gray through the
+        // 2020→709 matrix (its rows sum to 1). sRGB encode of 100/203 is
+        // 1.055·(100/203)^(1/2.4) − 0.055 ≈ 0.7305 → 186/255. ±2 covers
+        // the 10-bit quantization of the generated input code.
+        let code = pq_code_for_nits(100.0);
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(code, code, code));
+        assert_eq!(out[3], 255);
+        for channel in &out[..3] {
+            assert!(
+                (i32::from(*channel) - 186).abs() <= 2,
+                "expected ~186, got {channel}"
+            );
+        }
+        assert_eq!(out[0], out[1]);
+        assert_eq!(out[1], out[2]);
+    }
+
+    #[test]
+    fn pq10_output_is_bgra_ordered() {
+        // A red-only BT.2020 signal must land in the BMP's R byte (index
+        // 2 of BGRA), with green/blue clipped near zero by the 2020→709
+        // matrix.
+        let code = pq_code_for_nits(100.0);
+        let out = pq10_capture_to_sdr_bgra(&pq10_dword(code, 0, 0));
+        assert!(out[2] > 150, "red byte should be bright, got {}", out[2]);
+        assert_eq!(out[1], 0, "green must clip to 0");
+        assert_eq!(out[0], 0, "blue must clip to 0");
+        assert_eq!(out[3], 255);
+    }
+
+    #[test]
+    fn swapchain_kind_agrees_with_swapchain_format_on_every_path() {
+        for path in [
+            VideoPresentationPath::ExistingSdr,
+            VideoPresentationPath::HdrPqOutput,
+            VideoPresentationPath::HdrToSdrToneMapRequired,
+            VideoPresentationPath::UnsupportedHdr,
+        ] {
+            let expected_format = match swapchain_kind_for_path(path) {
+                SwapchainKind::Sdr => DXGI_FORMAT_B8G8R8A8_UNORM,
+                SwapchainKind::Hdr10Pq => DXGI_FORMAT_R10G10B10A2_UNORM,
+            };
+            assert_eq!(swapchain_format_for_path(path), expected_format);
+        }
+    }
+
+    fn descriptor_with_color_space(color_space: DXGI_COLOR_SPACE_TYPE) -> HdrDisplayDescriptor {
+        HdrDisplayDescriptor {
+            color_space,
+            bits_per_color: 10,
+            min_luminance: 0.0,
+            max_luminance: 1015.0,
+            max_full_frame_luminance: 1015.0,
+        }
+    }
+
+    #[test]
+    fn hdr_desktop_color_space_means_display_hdr_active() {
+        let descriptor = descriptor_with_color_space(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        assert_eq!(display_hdr_state_from_descriptor(&descriptor), (true, true));
+    }
+
+    #[test]
+    fn sdr_desktop_color_space_means_display_hdr_inactive() {
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        let descriptor = descriptor_with_color_space(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        assert_eq!(
+            display_hdr_state_from_descriptor(&descriptor),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn unrecognized_desktop_color_spaces_mean_display_hdr_inactive() {
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020,
+        };
+        // scRGB desktops (FP16 advanced color) and studio-range PQ are not
+        // the verified HDR10 desktop state; both must stay conservative.
+        for color_space in [
+            DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+            DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020,
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
+        ] {
+            assert_eq!(
+                display_hdr_state_from_descriptor(&descriptor_with_color_space(color_space)),
+                (false, false)
+            );
+        }
     }
 
     #[test]
@@ -1196,10 +1530,91 @@ mod tests {
     }
 
     #[test]
-    fn metadata_conversion_remains_a_typed_error() {
-        assert!(matches!(
-            build_dxgi_hdr10_metadata(None, None),
-            Err(HdrError::HdrMetadataConversionUnverified)
-        ));
+    fn metadata_absent_builds_nothing() {
+        // No metadata at all → None: SetHDRMetaData must not be called
+        // with an all-unknown struct.
+        assert_eq!(build_dxgi_hdr10_metadata(None, None), None);
+    }
+
+    fn exact(num: i32, den: i32) -> HdrRational {
+        HdrRational { num, den }
+    }
+
+    /// The MSDN worked example for DXGI_HDR_METADATA_HDR10: DCI-P3
+    /// primaries, D65 white point, 1000-nit max / 0.001-nit min mastering
+    /// luminance, MaxCLL 2000, MaxFALL 500.
+    fn msdn_example_mastering() -> MasteringDisplayMetadata {
+        MasteringDisplayMetadata {
+            display_primaries: [
+                [exact(680, 1000), exact(320, 1000)],
+                [exact(265, 1000), exact(690, 1000)],
+                [exact(150, 1000), exact(60, 1000)],
+            ],
+            white_point: [exact(3127, 10000), exact(3290, 10000)],
+            min_luminance: exact(1, 1000),
+            max_luminance: exact(1000, 1),
+            has_primaries: true,
+            has_luminance: true,
+        }
+    }
+
+    #[test]
+    fn metadata_conversion_matches_the_msdn_worked_example() {
+        let content_light = ContentLightMetadata {
+            max_content_light_level: Some(2000),
+            max_frame_average_light_level: Some(500),
+        };
+        let metadata =
+            build_dxgi_hdr10_metadata(Some(&msdn_example_mastering()), Some(&content_light))
+                .expect("full metadata must build");
+        // Chromaticities ×50000.
+        assert_eq!(metadata.RedPrimary, [34000, 16000]);
+        assert_eq!(metadata.GreenPrimary, [13250, 34500]);
+        assert_eq!(metadata.BluePrimary, [7500, 3000]);
+        assert_eq!(metadata.WhitePoint, [15635, 16450]);
+        // Max in whole nits; min in 0.0001-nit units — deliberately
+        // different units per the DXGI definition.
+        assert_eq!(metadata.MaxMasteringLuminance, 1000);
+        assert_eq!(metadata.MinMasteringLuminance, 10);
+        // CLL/FALL in whole nits.
+        assert_eq!(metadata.MaxContentLightLevel, 2000);
+        assert_eq!(metadata.MaxFrameAverageLightLevel, 500);
+    }
+
+    #[test]
+    fn metadata_content_light_alone_builds_with_unknown_mastering() {
+        let content_light = ContentLightMetadata {
+            max_content_light_level: Some(1000),
+            max_frame_average_light_level: Some(400),
+        };
+        let metadata = build_dxgi_hdr10_metadata(None, Some(&content_light))
+            .expect("content light alone must build");
+        // Unknown blocks stay zero (CTA-861.3 "unknown"), known ones apply.
+        assert_eq!(metadata.RedPrimary, [0, 0]);
+        assert_eq!(metadata.MaxMasteringLuminance, 0);
+        assert_eq!(metadata.MinMasteringLuminance, 0);
+        assert_eq!(metadata.MaxContentLightLevel, 1000);
+        assert_eq!(metadata.MaxFrameAverageLightLevel, 400);
+    }
+
+    #[test]
+    fn metadata_invalid_rationals_never_partially_apply() {
+        // A zero-denominator primary invalidates the whole primaries
+        // block; with luminance also flagged off, nothing is known and no
+        // metadata is built.
+        let mut mastering = msdn_example_mastering();
+        mastering.display_primaries[1][0] = exact(265, 0);
+        mastering.has_luminance = false;
+        assert_eq!(build_dxgi_hdr10_metadata(Some(&mastering), None), None);
+        // With valid luminance still present, the luminance block applies
+        // and the broken primaries stay unknown.
+        let mut mastering = msdn_example_mastering();
+        mastering.display_primaries[1][0] = exact(265, 0);
+        let metadata = build_dxgi_hdr10_metadata(Some(&mastering), None)
+            .expect("valid luminance must still build");
+        assert_eq!(metadata.RedPrimary, [0, 0]);
+        assert_eq!(metadata.GreenPrimary, [0, 0]);
+        assert_eq!(metadata.MaxMasteringLuminance, 1000);
+        assert_eq!(metadata.MinMasteringLuminance, 10);
     }
 }

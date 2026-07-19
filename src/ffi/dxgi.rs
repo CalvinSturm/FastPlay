@@ -72,8 +72,9 @@ use crate::{
     },
     platform::input::InputEvent,
     render::hdr::{
-        swapchain_format_for_path, verified_hdr10_swapchain_color_space, ContentColorInfo,
-        HdrDisplayDescriptor, HdrError, HdrPresentationCapabilities, VideoPresentationPath,
+        display_hdr_state_from_descriptor, swapchain_format_for_path,
+        verified_hdr10_swapchain_color_space, ContentColorInfo, HdrDisplayDescriptor, HdrError,
+        HdrPresentationCapabilities, SwapchainKind, VideoPresentationPath,
     },
 };
 
@@ -655,9 +656,44 @@ pub struct DxgiSwapChain {
     /// Built lazily on the first HDR frame, so SDR playback never compiles the
     /// tone-map shaders. Holds no backbuffer-derived resources.
     hdr_tone_map_renderer: Option<HdrToneMapRenderer>,
+    /// Which construction this chain came from — fixed at creation.
+    /// Resize and device recovery must rebuild the same kind; kind changes
+    /// happen only through the session's open-time swapchain swap.
+    kind: SwapchainKind,
 }
 
 impl DxgiSwapChain {
+    /// The underlying DXGI swap chain, for read-only capability queries
+    /// (`query_hdr_presentation_capabilities`) that need the containing
+    /// output of the window this chain presents to.
+    pub fn raw_swap_chain(&self) -> &IDXGISwapChain1 {
+        &self.swap_chain
+    }
+
+    /// Which construction this chain came from (SDR or HDR10).
+    pub fn kind(&self) -> SwapchainKind {
+        self.kind
+    }
+
+    /// Apply HDR10 static metadata to this chain. Only meaningful on the
+    /// HDR10 kind — metadata on the SDR chain is a caller bug and errors
+    /// rather than silently informing DWM about pixels that are not PQ.
+    pub fn apply_hdr10_metadata(
+        &self,
+        metadata: &DXGI_HDR_METADATA_HDR10,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.kind != SwapchainKind::Hdr10Pq {
+            return Err(Box::new(DxgiError(
+                "HDR10 metadata applied to a non-HDR swapchain".into(),
+            )));
+        }
+        let swap_chain3: IDXGISwapChain3 = self
+            .swap_chain
+            .cast()
+            .map_err(|_| HdrError::SwapChain4Unavailable)?;
+        apply_hdr10_metadata(&swap_chain3, metadata)
+    }
+
     /// Release all resources derived from the swap chain's backbuffer so
     /// that the swap chain's COM refcount can reach zero.  Must be called
     /// before dropping the struct when another swap chain will be created
@@ -681,7 +717,29 @@ impl DxgiSwapChain {
         output_height: u32,
         view: &crate::render::ViewTransform,
     ) -> Result<(), Box<dyn Error>> {
-        if surface.hdr_tone_map.is_some() {
+        // A surface whose output mode disagrees with this chain's kind is a
+        // typed error, never a silent wrong-colors draw: the open-time
+        // PresentationPathSelected event swaps the chain before the first
+        // frame of its generation, so a mismatch here means an ordering bug.
+        use crate::render::hdr::HdrShaderOutput;
+        let surface_mode = surface.hdr_shader.map(|(_, output)| output);
+        let mode_matches_chain = matches!(
+            (surface_mode, self.kind),
+            (None, SwapchainKind::Sdr)
+                | (Some(HdrShaderOutput::SdrToneMap), SwapchainKind::Sdr)
+                | (Some(HdrShaderOutput::PqPassthrough), SwapchainKind::Hdr10Pq)
+        );
+        if !mode_matches_chain {
+            return Err(Box::new(DxgiError(
+                format!(
+                    "surface output mode {surface_mode:?} does not match the live {:?} swapchain",
+                    self.kind
+                )
+                .into(),
+            )));
+        }
+
+        if surface.hdr_shader.is_some() {
             if self.hdr_tone_map_renderer.is_none() {
                 self.hdr_tone_map_renderer = Some(device.create_hdr_tone_map_renderer()?);
             }
@@ -763,10 +821,11 @@ impl DxgiSwapChain {
             subtitle_renderer: None,
             vp_cache: None,
             hdr_tone_map_renderer: None,
+            kind: SwapchainKind::Sdr,
         })
     }
 
-    /// HDR10 swapchain skeleton for [`VideoPresentationPath::Hdr10Passthrough`].
+    /// HDR10 swapchain skeleton for [`VideoPresentationPath::HdrPqOutput`].
     ///
     /// The verified SDR [`create`](Self::create) above is untouched; this is
     /// a separate constructor selected only by the presentation-path fork.
@@ -774,17 +833,13 @@ impl DxgiSwapChain {
     /// before any COM object is created — no swapchain is ever created and
     /// then abandoned, and nothing is recreated mid-playback.
     ///
-    /// Created once per HDR playback session, never by resizing or device
-    /// recovery of an SDR session.
-    // Wired by SwapChainPresenter::new_for_path; today reached only from
-    // the env-gated validation entry (render::hdr_validate). Production
-    // wiring is the passthrough commit.
-    #[allow(dead_code)]
+    /// Created once per HDR playback session (or by device/resize recovery
+    /// of an HDR session, which rebuilds the same kind), reached through
+    /// `SwapChainPresenter::new_for_path` and the env-gated validation
+    /// entry (`render::hdr_validate`).
     pub fn create_hdr10_skeleton(
         window: &NativeWindowInner,
         device: &D3D11Device,
-        _content: &ContentColorInfo,
-        _capabilities: &HdrPresentationCapabilities,
     ) -> Result<Self, Box<dyn Error>> {
         // Resolved: RGB_FULL_G2084_NONE_P2020, validated structurally
         // (CheckColorSpaceSupport + SetColorSpace1 below on a live HDR
@@ -797,7 +852,7 @@ impl DxgiSwapChain {
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: 0,
             Height: 0,
-            Format: swapchain_format_for_path(VideoPresentationPath::Hdr10Passthrough),
+            Format: swapchain_format_for_path(VideoPresentationPath::HdrPqOutput),
             Stereo: BOOL(0),
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
@@ -841,6 +896,7 @@ impl DxgiSwapChain {
             subtitle_renderer: None,
             vp_cache: None,
             hdr_tone_map_renderer: None,
+            kind: SwapchainKind::Hdr10Pq,
         })
     }
 
@@ -870,6 +926,91 @@ impl DxgiSwapChain {
             output_height,
             content,
             stream_color_space_override,
+        )?;
+        device.capture_bgra_texture(backbuffer)
+    }
+
+    /// Dev-only HDR overlay validation pass (`bench/verify-overlay-hdr.ps1`):
+    /// clear this (HDR) swapchain's backbuffer to opaque black, draw
+    /// `overlay` through the PRODUCTION overlay renderer with the PQ-chain
+    /// shader variant (selected by this chain's kind, exactly as production
+    /// does), then read the raw R10G10B10A2 pixels back without presenting.
+    // Called only by the env-gated validation entry (render::hdr_validate).
+    #[allow(dead_code)]
+    pub fn hdr_overlay_validation_pass(
+        &mut self,
+        device: &D3D11Device,
+        overlay: &SubtitleOverlay,
+    ) -> Result<BgraFrameCapture, Box<dyn Error>> {
+        let render_target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain render target is not bound".into()))?;
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain backbuffer is not bound".into()))?;
+        let (output_width, output_height) = current_backbuffer_size(backbuffer)?;
+        device.clear_render_target(render_target, [0.0, 0.0, 0.0, 1.0]);
+        let renderer = self
+            .subtitle_renderer
+            .get_or_insert(device.create_subtitle_renderer()?);
+        let render_target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain render target is not bound".into()))?;
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain backbuffer is not bound".into()))?;
+        device.render_subtitle_overlay(
+            renderer,
+            overlay,
+            render_target,
+            output_width,
+            output_height,
+            self.kind,
+        )?;
+        device.capture_bgra_texture(backbuffer)
+    }
+
+    /// Dev-only HDR shader validation pass (`bench/verify-colors-pq.ps1
+    /// -Mode shader-pq` / `bench/verify-hlg-pq.ps1`): render `surface`
+    /// through the PRODUCTION tone-map renderer in PQ-output mode into this
+    /// (HDR) swapchain's backbuffer, then read the raw R10G10B10A2 pixels
+    /// back — deliberately WITHOUT presenting, so DWM never touches them.
+    /// The surface's `hdr_tone_map` tag selects the input transfer exactly
+    /// as production does.
+    // Called only by the env-gated validation entry (render::hdr_validate).
+    #[allow(dead_code)]
+    pub fn hdr_shader_validation_pass(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+    ) -> Result<BgraFrameCapture, Box<dyn Error>> {
+        if self.hdr_tone_map_renderer.is_none() {
+            self.hdr_tone_map_renderer = Some(device.create_hdr_tone_map_renderer()?);
+        }
+        let renderer = self
+            .hdr_tone_map_renderer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR tone-map renderer is not bound".into()))?;
+        let render_target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain render target is not bound".into()))?;
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain backbuffer is not bound".into()))?;
+        let (output_width, output_height) = current_backbuffer_size(backbuffer)?;
+        device.render_video_surface_tone_mapped(
+            surface,
+            renderer,
+            render_target,
+            output_width,
+            output_height,
+            &crate::render::ViewTransform::default(),
         )?;
         device.capture_bgra_texture(backbuffer)
     }
@@ -915,6 +1056,7 @@ impl DxgiSwapChain {
                 render_target,
                 self.width,
                 self.height,
+                self.kind,
             )?;
         }
 
@@ -936,6 +1078,7 @@ impl DxgiSwapChain {
                 BgraFrameCapture {
                     width: 1,
                     height: 1,
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
                     pixels: vec![0, 0, 0, 255],
                 },
             ));
@@ -969,6 +1112,7 @@ impl DxgiSwapChain {
                 render_target,
                 self.width,
                 self.height,
+                self.kind,
             )?;
         }
 
@@ -1028,6 +1172,7 @@ impl DxgiSwapChain {
                 render_target,
                 output_width,
                 output_height,
+                self.kind,
             )?;
         }
 
@@ -1050,6 +1195,7 @@ impl DxgiSwapChain {
                 BgraFrameCapture {
                     width: 1,
                     height: 1,
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
                     pixels: vec![0, 0, 0, 255],
                 },
             ));
@@ -1092,6 +1238,7 @@ impl DxgiSwapChain {
                 render_target,
                 output_width,
                 output_height,
+                self.kind,
             )?;
         }
 
@@ -1126,6 +1273,22 @@ impl DxgiSwapChain {
                 Default::default(),
                 DXGI_SWAP_CHAIN_FLAG(0),
             )?;
+        }
+
+        // The HDR10 chain's color space is documented to persist across
+        // ResizeBuffers, but re-committing it is free and idempotent —
+        // scanning PQ pixels out with an SDR interpretation would be a
+        // silent wrong-colors failure the pre-Present readback cannot see.
+        if self.kind == SwapchainKind::Hdr10Pq {
+            let hdr_color_space = verified_hdr10_swapchain_color_space()?;
+            let swap_chain3: IDXGISwapChain3 = self
+                .swap_chain
+                .cast()
+                .map_err(|_| HdrError::HdrSwapchainColorSpaceUnsupported)?;
+            // SAFETY: color-space commit on the live swap chain.
+            unsafe {
+                swap_chain3.SetColorSpace1(hdr_color_space)?;
+            }
         }
 
         let (backbuffer, render_target) = create_backbuffer_state(device, &self.swap_chain)?;
@@ -1199,13 +1362,11 @@ fn current_backbuffer_size(backbuffer: &ID3D11Texture2D) -> Result<(u32, u32), B
 /// presentation. Pure data out; the decision itself lives in
 /// [`select_video_presentation_path`](crate::render::hdr::select_video_presentation_path).
 ///
-/// `swap_chain` is `None` when called from the decode worker at open time
-/// (the worker has no window objects); all display-dependent capabilities
-/// then stay conservatively false, which can only make HDR content dead-end
-/// in a typed error — it can never affect SDR selection.
-///
-/// An HDR-*capable* display is deliberately not treated as HDR-*active*:
-/// both flags stay false until their interpretation is verified.
+/// `swap_chain` carries the playback window's swap chain, whose containing
+/// output identifies the display the window is actually on. With `None`
+/// (no window objects available) all display-dependent capabilities stay
+/// conservatively false, which can only make HDR content dead-end in a
+/// typed error — it can never affect SDR selection.
 pub fn query_hdr_presentation_capabilities(
     device: &D3D11Device,
     swap_chain: Option<&IDXGISwapChain1>,
@@ -1226,19 +1387,17 @@ pub fn query_hdr_presentation_capabilities(
                 // SAFETY: GetDesc1 fills a plain descriptor struct.
                 let desc = unsafe { output6.GetDesc1()? };
                 // Preserve the raw fields future display policy needs.
-                capabilities.display_descriptor = Some(HdrDisplayDescriptor {
+                let descriptor = HdrDisplayDescriptor {
                     color_space: desc.ColorSpace,
                     bits_per_color: desc.BitsPerColor,
                     min_luminance: desc.MinLuminance,
                     max_luminance: desc.MaxLuminance,
                     max_full_frame_luminance: desc.MaxFullFrameLuminance,
-                });
-                // HDR-VERIFY: interpretation of DXGI_OUTPUT_DESC1 (which
-                // ColorSpace values mean HDR output is ACTIVE, not merely
-                // that the panel is capable) is unresolved. Both flags stay
-                // false until verified.
-                capabilities.display_hdr_capable = false;
-                capabilities.display_hdr_active = false;
+                };
+                let (capable, active) = display_hdr_state_from_descriptor(&descriptor);
+                capabilities.display_descriptor = Some(descriptor);
+                capabilities.display_hdr_capable = capable;
+                capabilities.display_hdr_active = active;
             }
         }
 
@@ -1255,25 +1414,19 @@ pub fn query_hdr_presentation_capabilities(
         }
     }
 
-    // HDR-VERIFY: ID3D11VideoProcessorEnumerator1::
-    // CheckVideoProcessorFormatConversion needs a live processor enumerator,
-    // which exists only per-content in the render path
-    // (see D3D11Device::check_hdr_format_conversion). Both conversion
-    // capabilities stay false until that probe is wired with verified
-    // color-space values — interface availability alone must not count as
-    // support.
-    capabilities.hdr10_format_conversion_supported = false;
-    capabilities.hlg_format_conversion_supported = false;
+    // The real probe: can the HDR shader sample decoded NV12/P010 through
+    // per-plane SRVs on this device. The PQ-output render path behind it is
+    // pixel-validated (bench/verify-colors-pq.ps1 -Mode shader-pq,
+    // bench/verify-hlg-pq.ps1, bench/verify-overlay-hdr.ps1).
+    capabilities.hdr_shader_sampling_supported = device.supports_hdr_shader_tone_map();
 
     Ok(capabilities)
 }
 
 /// Apply HDR10 static metadata to an HDR swapchain. Called only on the
-/// `Hdr10Passthrough` path; the metadata itself comes from
-/// [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata),
-/// which is a typed error until its unit conversion is verified.
-// Wired by the HDR passthrough commit.
-#[allow(dead_code)]
+/// `HdrPqOutput` path; the metadata itself comes from
+/// [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata)
+/// (units unit-tested against the MSDN worked example).
 pub fn apply_hdr10_metadata(
     swap_chain3: &IDXGISwapChain3,
     metadata: &DXGI_HDR_METADATA_HDR10,
@@ -1297,7 +1450,7 @@ pub fn apply_hdr10_metadata(
 }
 
 /// HDR-only presentation state, grouped so no `is_hdr` flags leak into the
-/// SDR structs. Constructed only on the `Hdr10Passthrough` path;
+/// SDR structs. Constructed only on the `HdrPqOutput` path;
 /// [`VideoPresentationPath`] remains the sole control value.
 // Constructed by the HDR passthrough commit.
 #[allow(dead_code)]

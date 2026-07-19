@@ -118,7 +118,9 @@ this roadmap:
 - playlists / full media library
 - browser / web UI
 - plugin system
-- HDR tone mapping, frame interpolation
+- metadata-driven tone mapping (HDR10 PQ/HLG present natively on HDR-active
+  displays and tone-map to SDR otherwise, in FastPlay's own pixel shader;
+  see `ARCHITECTURE.md` §21), frame interpolation
 - CUDA/NVDEC split path or additional hardware decode backends
 - subtitle styling (ASS) engine
 - cross-platform support
