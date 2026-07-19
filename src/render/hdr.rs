@@ -218,6 +218,9 @@ pub(crate) struct HdrPresentationCapabilities {
     /// `ID3D11VideoContext1` is available on the device. Informational
     /// (caps dump); no presentation path gates on it — HDR presentation is
     /// shader-based, not video-processor-based.
+    // Read only through the Debug caps dump (FASTPLAY_HDR_CAPS_DUMP),
+    // which derived Debug does not count as a use.
+    #[allow(dead_code)]
     pub(crate) video_context1_available: bool,
     /// The device can create the per-plane shader resource views the HDR
     /// shader samples decoded NV12/P010 through
@@ -521,6 +524,21 @@ pub(crate) fn tone_map_stream_color_space(
         }
         ContentColorMode::Sdr | ContentColorMode::Unknown => Err(HdrError::HdrColorSpaceUnverified),
     }
+}
+
+/// Which encode the HDR shader writes to its render target. Orthogonal to
+/// the input signal: the front half of the shader (plane sampling, range
+/// normalization, BT.2020 NCL matrix) is shared by both outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HdrShaderOutput {
+    /// Tone-map to SDR and sRGB-encode into the 8-bit SDR swapchain — the
+    /// pixel-verified HDR→SDR path (`bench/verify-tonemap.ps1`).
+    SdrToneMap,
+    /// Encode PQ/BT.2020 display light into the 10-bit HDR10 swapchain
+    /// ([`VideoPresentationPath::HdrPqOutput`]): PQ input passes through
+    /// bit-transparently (the YCbCr matrix is the entire conversion), HLG
+    /// is completed to display light by the BT.2100 OOTF and PQ-encoded.
+    PqPassthrough,
 }
 
 /// The transfer function carried by a frame on the tone-map path.

@@ -708,6 +708,9 @@ impl DxgiSwapChain {
                 output_width,
                 output_height,
                 view,
+                // The SDR-swapchain tone-map path; the PQ-output encode is
+                // selected per surface by the integration commit.
+                crate::render::hdr::HdrShaderOutput::SdrToneMap,
             );
         }
 
@@ -878,6 +881,48 @@ impl DxgiSwapChain {
             output_height,
             content,
             stream_color_space_override,
+        )?;
+        device.capture_bgra_texture(backbuffer)
+    }
+
+    /// Dev-only HDR shader validation pass (`bench/verify-colors-pq.ps1
+    /// -Mode shader-pq` / `bench/verify-hlg-pq.ps1`): render `surface`
+    /// through the PRODUCTION tone-map renderer in PQ-output mode into this
+    /// (HDR) swapchain's backbuffer, then read the raw R10G10B10A2 pixels
+    /// back — deliberately WITHOUT presenting, so DWM never touches them.
+    /// The surface's `hdr_tone_map` tag selects the input transfer exactly
+    /// as production does.
+    // Called only by the env-gated validation entry (render::hdr_validate).
+    #[allow(dead_code)]
+    pub fn hdr_shader_validation_pass(
+        &mut self,
+        device: &D3D11Device,
+        surface: &VideoSurface,
+    ) -> Result<BgraFrameCapture, Box<dyn Error>> {
+        if self.hdr_tone_map_renderer.is_none() {
+            self.hdr_tone_map_renderer = Some(device.create_hdr_tone_map_renderer()?);
+        }
+        let renderer = self
+            .hdr_tone_map_renderer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR tone-map renderer is not bound".into()))?;
+        let render_target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain render target is not bound".into()))?;
+        let backbuffer = self
+            .backbuffer
+            .as_ref()
+            .ok_or_else(|| DxgiError("HDR swap-chain backbuffer is not bound".into()))?;
+        let (output_width, output_height) = current_backbuffer_size(backbuffer)?;
+        device.render_video_surface_tone_mapped(
+            surface,
+            renderer,
+            render_target,
+            output_width,
+            output_height,
+            &crate::render::ViewTransform::default(),
+            crate::render::hdr::HdrShaderOutput::PqPassthrough,
         )?;
         device.capture_bgra_texture(backbuffer)
     }

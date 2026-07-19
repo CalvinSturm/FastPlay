@@ -153,7 +153,7 @@ struct ToneMapParams {
     /// so it is computed on the CPU (see [`ToneMapParams::new`]) rather than
     /// branched on in the shader.
     range: [f32; 4],
-    /// `[sample_scale, transfer, knee, unused]`.
+    /// `[sample_scale, transfer, knee, output_encode]`.
     params: [f32; 4],
 }
 
@@ -167,7 +167,13 @@ const TONE_MAP_KNEE: f32 = 0.75;
 impl ToneMapParams {
     /// `ten_bit` selects the studio-range levels and the P010 sample scaling;
     /// it must reflect the *texture* format, not the stream's nominal depth.
-    fn new(signal: crate::render::hdr::HdrToneMapSignal, ten_bit: bool) -> Self {
+    /// `output` selects the encode the shader writes: SDR tone-map + sRGB
+    /// for the 8-bit swapchain, or PQ for the 10-bit HDR10 swapchain.
+    fn new(
+        signal: crate::render::hdr::HdrToneMapSignal,
+        ten_bit: bool,
+        output: crate::render::hdr::HdrShaderOutput,
+    ) -> Self {
         // Studio (limited) range levels, per BT.709/BT.2020, scaled to the
         // bit depth actually stored in the texture. Expressed as normalized
         // code values so the shader stays depth-agnostic.
@@ -203,9 +209,14 @@ impl ToneMapParams {
             crate::render::hdr::HdrTransfer::Hlg => 1.0,
         };
 
+        let output_encode = match output {
+            crate::render::hdr::HdrShaderOutput::SdrToneMap => 0.0,
+            crate::render::hdr::HdrShaderOutput::PqPassthrough => 1.0,
+        };
+
         Self {
             range,
-            params: [sample_scale, transfer, TONE_MAP_KNEE, 0.0],
+            params: [sample_scale, transfer, TONE_MAP_KNEE, output_encode],
         }
     }
 }
@@ -1304,6 +1315,7 @@ impl D3D11Device {
         output_width: u32,
         output_height: u32,
         view: &crate::render::ViewTransform,
+        output: crate::render::hdr::HdrShaderOutput,
     ) -> Result<(), Box<dyn Error>> {
         let color_space = surface.hdr_tone_map.ok_or(D3D11Error(
             "tone-map render path called with an SDR surface",
@@ -1317,7 +1329,7 @@ impl D3D11Device {
         let (luma_format, chroma_format) = plane_srv_formats(texture_desc.Format)?;
         let luma_view = create_plane_srv(&self.device, &surface.texture, luma_format)?;
         let chroma_view = create_plane_srv(&self.device, &surface.texture, chroma_format)?;
-        let params = ToneMapParams::new(signal, texture_desc.Format == DXGI_FORMAT_P010);
+        let params = ToneMapParams::new(signal, texture_desc.Format == DXGI_FORMAT_P010, output);
 
         // Geometry, identical to the video-processor path.
         let rotation_quarter_turns = view.rotation_quarter_turns % 4;
@@ -2251,7 +2263,8 @@ SamplerState      samp       : register(s0);
 
 cbuffer ToneMapParams : register(b0) {
     float4 range;   // y_offset, y_scale, c_offset, c_scale
-    float4 params;  // sample_scale, transfer (0 = PQ, 1 = HLG), knee, unused
+    float4 params;  // sample_scale, transfer (0 = PQ, 1 = HLG), knee,
+                    // output_encode (0 = SDR tone-map + sRGB, 1 = PQ)
 };
 
 // BT.2020 non-constant-luminance luma coefficients.
@@ -2272,6 +2285,18 @@ float3 pq_eotf(float3 signal) {
     float3 numerator = max(encoded - c1, 0.0f);
     float3 denominator = max(c2 - c3 * encoded, 1e-6f);
     return pow(numerator / denominator, 1.0f / m1);
+}
+
+// SMPTE ST 2084 inverse EOTF. Input [0,1] where 1.0 is PQ_PEAK_NITS;
+// returns the PQ-encoded signal. Same constants as pq_eotf above.
+float3 pq_inverse_eotf(float3 luminance) {
+    const float m1 = 0.1593017578125f;
+    const float m2 = 78.84375f;
+    const float c1 = 0.8359375f;
+    const float c2 = 18.8515625f;
+    const float c3 = 18.6875f;
+    float3 y = pow(max(luminance, 0.0f), m1);
+    return pow((c1 + c2 * y) / (1.0f + c3 * y), m2);
 }
 
 // BT.2100 HLG inverse OETF: signal -> scene light in [0,1].
@@ -2310,6 +2335,23 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
     signal.g = luma - 0.16455f * cb - 0.57135f * cr;
     signal.b = luma + 1.88140f * cb;
     signal = saturate(signal);
+
+    // PQ output onto the 10-bit G2084/BT.2020 swapchain (HdrPqOutput).
+    if (params.w > 0.5f) {
+        if (params.y < 0.5f) {
+            // PQ input: the swapchain scans out the very PQ/BT.2020
+            // encoding the stream carries, so the matrix above is the
+            // entire conversion -- no EOTF round trip, no tone curve.
+            return float4(signal, 1.0f);
+        }
+        // HLG input: inverse OETF to scene light, BT.2100 OOTF (system
+        // gamma 1.2 at the 1000-nit nominal peak) to display light in
+        // nits, then PQ-encode. BT.2020 primaries on both sides.
+        float3 scene = hlg_inverse_oetf(signal);
+        float scene_luma = max(dot(scene, LUMA_BT2020), 1e-6f);
+        float3 display_nits = scene * pow(scene_luma, 0.2f) * HLG_PEAK_NITS;
+        return float4(pq_inverse_eotf(display_nits / PQ_PEAK_NITS), 1.0f);
+    }
 
     // Transfer -> linear light, in units of diffuse white.
     float3 linear_rgb;
@@ -4064,7 +4106,7 @@ fn blend_pixel(dest: &mut [u8], src: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::hdr::{HdrToneMapSignal, HdrTransfer};
+    use crate::render::hdr::{HdrShaderOutput, HdrToneMapSignal, HdrTransfer};
 
     /// Apply the constant buffer's level math exactly as the shader's first
     /// three lines do, so these tests pin the numbers the GPU actually uses.
@@ -4085,7 +4127,11 @@ mod tests {
 
     #[test]
     fn studio_10_bit_levels_map_video_black_and_white_to_0_and_1() {
-        let params = ToneMapParams::new(signal(HdrTransfer::Hlg, false), true);
+        let params = ToneMapParams::new(
+            signal(HdrTransfer::Hlg, false),
+            true,
+            HdrShaderOutput::SdrToneMap,
+        );
 
         // P010 puts the 10-bit code in the high bits of a 16-bit word, so a
         // UNORM fetch of code C returns C * 64 / 65535 — that is what the
@@ -4120,7 +4166,11 @@ mod tests {
     #[test]
     fn studio_8_bit_levels_map_video_black_and_white_to_0_and_1() {
         // NV12: the UNORM fetch already normalizes against 255, so no rescale.
-        let params = ToneMapParams::new(signal(HdrTransfer::Pq, false), false);
+        let params = ToneMapParams::new(
+            signal(HdrTransfer::Pq, false),
+            false,
+            HdrShaderOutput::SdrToneMap,
+        );
         assert_eq!(params.params[0], 1.0, "8-bit needs no sample rescale");
 
         let (black, _) = decode_levels(&params, 16.0 / 255.0, 128.0 / 255.0);
@@ -4137,7 +4187,11 @@ mod tests {
 
     #[test]
     fn full_range_levels_pass_luma_through_and_center_chroma() {
-        let params = ToneMapParams::new(signal(HdrTransfer::Hlg, true), true);
+        let params = ToneMapParams::new(
+            signal(HdrTransfer::Hlg, true),
+            true,
+            HdrShaderOutput::SdrToneMap,
+        );
         let fetch = |code_10bit: f32| code_10bit * 64.0 / 65535.0;
 
         // Full range: code 0 is black and 1023 is white, with no footroom.
@@ -4161,10 +4215,39 @@ mod tests {
     fn transfer_selector_distinguishes_pq_from_hlg() {
         // The shader branches on this float; swapping the two applies the
         // wrong EOTF, which is a gross error rather than a shade of grading.
-        let pq = ToneMapParams::new(signal(HdrTransfer::Pq, false), true);
-        let hlg = ToneMapParams::new(signal(HdrTransfer::Hlg, false), true);
+        let pq = ToneMapParams::new(
+            signal(HdrTransfer::Pq, false),
+            true,
+            HdrShaderOutput::SdrToneMap,
+        );
+        let hlg = ToneMapParams::new(
+            signal(HdrTransfer::Hlg, false),
+            true,
+            HdrShaderOutput::SdrToneMap,
+        );
         assert_eq!(pq.params[1], 0.0);
         assert_eq!(hlg.params[1], 1.0);
+    }
+
+    #[test]
+    fn output_selector_distinguishes_sdr_tone_map_from_pq() {
+        // The shader branches on params.w; 0 must remain the SDR tone-map
+        // encode (the pixel-verified default) and 1 the PQ output encode.
+        let sdr = ToneMapParams::new(
+            signal(HdrTransfer::Pq, false),
+            true,
+            HdrShaderOutput::SdrToneMap,
+        );
+        let pq = ToneMapParams::new(
+            signal(HdrTransfer::Pq, false),
+            true,
+            HdrShaderOutput::PqPassthrough,
+        );
+        assert_eq!(sdr.params[3], 0.0);
+        assert_eq!(pq.params[3], 1.0);
+        // The output mode must not perturb the shared front-end constants.
+        assert_eq!(sdr.range, pq.range);
+        assert_eq!(sdr.params[..3], pq.params[..3]);
     }
 
     #[test]
