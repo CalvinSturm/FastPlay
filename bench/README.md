@@ -100,9 +100,14 @@ and exit non-zero on failure.
 | Script | Verifies |
 |--------|----------|
 | `verify-colors.ps1` | SDR (BT.709) backbuffer matches an ffmpeg reference decode |
-| `verify-colors-pq.ps1` | The resolved HDR10 color spaces, via 10-bit backbuffer readback |
+| `verify-colors-pq.ps1` | PQ pixels on the 10-bit chain: `-Mode vp` (the video-processor blt oracle) or `-Mode shader-pq` (the production shader's PQ passthrough, bit-exact vs spec math); `-FullRange` covers full-range PQ input; `-WrongMatrix` is the negative control |
+| `verify-hlg-pq.ps1` | The shader's HLG→PQ output stage vs a double-precision CPU model (with a wrong-transfer negative control) |
+| `verify-overlay-hdr.ps1` | The overlay renderer's PQ-chain shader variant (sRGB→BT.2020→203-nit→PQ), opaque and alpha-blended, vs a CPU model |
 | `verify-subtitles-hdr.ps1` | Overlays composite correctly on top of HDR video |
-| `verify-tonemap.ps1` | The HDR→SDR tone-map shader's output matches a double-precision CPU model of its math (PQ clipped bars, PQ unclipped midtones, HLG) |
+| `verify-tonemap.ps1` | The HDR shader's SDR tone-map output matches a double-precision CPU model of its math (PQ clipped bars, PQ unclipped midtones, HLG); on an HDR-active display the same clips exercise the passthrough+screenshot composition instead |
+| `verify-hdr-passthrough.ps1` | End-to-end HDR passthrough on an HDR-active display: runs `verify-tonemap` under the composed model, asserts from `session.log` that `HdrPqOutput` was actually selected and the chain swapped, then verifies a mid-playback resize leaves the bars byte-stable |
+| `verify-hdr-caps.ps1` | Display HDR detection (`display_hdr_active` tracks the Windows HDR toggle; run with `-ExpectHdr on` / `off`) |
+| `verify-hdr-metadata.ps1` | HDR10 static metadata flows from real x265 SEI through conversion to `SetHDRMetaData`, with the MSDN worked-example values asserted in the log |
 
 `verify-subtitles-hdr.ps1` exists because HDR frames reach the backbuffer by a
 different route than SDR ones: SDR is blitted by the D3D11 video processor,
