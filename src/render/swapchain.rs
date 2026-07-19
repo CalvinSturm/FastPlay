@@ -48,7 +48,7 @@ pub(crate) fn renderer_constructor_for_path(
         VideoPresentationPath::ExistingSdr => {
             Ok(RendererConstructor::ExistingSdr(SwapChainPresenter::new))
         }
-        VideoPresentationPath::Hdr10Passthrough => Ok(RendererConstructor::Hdr10Skeleton),
+        VideoPresentationPath::HdrPqOutput => Ok(RendererConstructor::Hdr10Skeleton),
         VideoPresentationPath::HdrToSdrToneMapRequired => Ok(RendererConstructor::HdrToSdrToneMap(
             create_hdr_to_sdr_renderer,
         )),
@@ -99,7 +99,7 @@ impl SwapChainPresenter {
     }
 
     /// Presentation-path renderer fork. `ExistingSdr` delegates to the
-    /// unchanged [`Self::new`]. `Hdr10Passthrough` builds the validated
+    /// unchanged [`Self::new`]. `HdrPqOutput` builds the validated
     /// HDR10 swapchain skeleton, but its render path does not yet apply
     /// the HDR processor color spaces (the device's HDR processor
     /// configuration is unwired); tone mapping stays a typed error.
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn hdr10_passthrough_dispatches_to_the_hdr_skeleton_not_sdr() {
         assert!(matches!(
-            renderer_constructor_for_path(VideoPresentationPath::Hdr10Passthrough),
+            renderer_constructor_for_path(VideoPresentationPath::HdrPqOutput),
             Ok(RendererConstructor::Hdr10Skeleton)
         ));
     }

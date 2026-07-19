@@ -520,7 +520,7 @@ impl D3D11Device {
         self.video_context.cast::<ID3D11VideoContext1>().is_ok()
     }
 
-    /// HDR-only video processor configuration for the `Hdr10Passthrough`
+    /// HDR-only video processor configuration for the `HdrPqOutput`
     /// path. The verified SDR configuration in `render_video_surface` is a
     /// separate, untouched code path and never calls this.
     ///

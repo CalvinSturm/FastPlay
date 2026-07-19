@@ -774,7 +774,7 @@ impl DxgiSwapChain {
         })
     }
 
-    /// HDR10 swapchain skeleton for [`VideoPresentationPath::Hdr10Passthrough`].
+    /// HDR10 swapchain skeleton for [`VideoPresentationPath::HdrPqOutput`].
     ///
     /// The verified SDR [`create`](Self::create) above is untouched; this is
     /// a separate constructor selected only by the presentation-path fork.
@@ -805,7 +805,7 @@ impl DxgiSwapChain {
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: 0,
             Height: 0,
-            Format: swapchain_format_for_path(VideoPresentationPath::Hdr10Passthrough),
+            Format: swapchain_format_for_path(VideoPresentationPath::HdrPqOutput),
             Stereo: BOOL(0),
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
@@ -1259,21 +1259,17 @@ pub fn query_hdr_presentation_capabilities(
         }
     }
 
-    // HDR-VERIFY: ID3D11VideoProcessorEnumerator1::
-    // CheckVideoProcessorFormatConversion needs a live processor enumerator,
-    // which exists only per-content in the render path
-    // (see D3D11Device::check_hdr_format_conversion). Both conversion
-    // capabilities stay false until that probe is wired with verified
-    // color-space values — interface availability alone must not count as
-    // support.
-    capabilities.hdr10_format_conversion_supported = false;
-    capabilities.hlg_format_conversion_supported = false;
+    // Hardcoded false until the integration commit flips it to the real
+    // probe (D3D11Device::supports_hdr_shader_tone_map): the PQ-output
+    // render path must exist and be pixel-validated before the gate can
+    // select it.
+    capabilities.hdr_shader_sampling_supported = false;
 
     Ok(capabilities)
 }
 
 /// Apply HDR10 static metadata to an HDR swapchain. Called only on the
-/// `Hdr10Passthrough` path; the metadata itself comes from
+/// `HdrPqOutput` path; the metadata itself comes from
 /// [`build_dxgi_hdr10_metadata`](crate::render::hdr::build_dxgi_hdr10_metadata),
 /// which is a typed error until its unit conversion is verified.
 // Wired by the HDR passthrough commit.
@@ -1301,7 +1297,7 @@ pub fn apply_hdr10_metadata(
 }
 
 /// HDR-only presentation state, grouped so no `is_hdr` flags leak into the
-/// SDR structs. Constructed only on the `Hdr10Passthrough` path;
+/// SDR structs. Constructed only on the `HdrPqOutput` path;
 /// [`VideoPresentationPath`] remains the sole control value.
 // Constructed by the HDR passthrough commit.
 #[allow(dead_code)]
