@@ -78,10 +78,18 @@ pub(crate) enum ContentColorMode {
 pub(crate) enum VideoPresentationPath {
     /// The pixel-verified SDR pipeline, byte-for-byte the pre-HDR flow.
     ExistingSdr,
-    /// HDR10 content presented on an active HDR display without tone
-    /// mapping. Requires every capability bit checked in
+    /// HDR content (PQ or HLG) presented on an active HDR display through
+    /// a 10-bit PQ (R10G10B10A2, G2084/BT.2020) swapchain. PQ is written
+    /// through with no tone mapping; HLG is converted to PQ display light
+    /// in our own pixel shader. Requires every capability bit checked in
     /// [`select_video_presentation_path`].
-    Hdr10Passthrough,
+    ///
+    /// This is shader-based, not video-processor-based, for the same
+    /// hardware reason as the tone-map path below: NVIDIA's video
+    /// processor advertises no GHLG input conversion at all, so an HLG
+    /// path must do its own transfer math regardless — and sharing one
+    /// shader keeps geometry and pixel validation common to both.
+    HdrPqOutput,
     /// HDR content tone-mapped to SDR in our own pixel shader and presented
     /// through the existing SDR swapchain. The stream's colorimetry is
     /// resolved to a DXGI color space ([`tone_map_stream_color_space`]) and
@@ -94,8 +102,10 @@ pub(crate) enum VideoPresentationPath {
     /// gamma-2.2 sRGB the 8-bit SDR backbuffer scans out. Driver conversion
     /// tables are not a portable substitute for doing the transfer math.
     ///
-    /// Selected for HDR10 on an SDR display (and, until passthrough is
-    /// implemented, whenever passthrough is not available) and for HLG.
+    /// Selected for any HDR content when [`HdrPqOutput`]'s capability gate
+    /// is not met (SDR display, missing shader sampling support).
+    ///
+    /// [`HdrPqOutput`]: VideoPresentationPath::HdrPqOutput
     HdrToSdrToneMapRequired,
     /// Any HDR-signalled combination we cannot present correctly.
     UnsupportedHdr,
@@ -205,15 +215,22 @@ pub(crate) struct HdrPresentationCapabilities {
     /// `IDXGISwapChain3::CheckColorSpaceSupport` accepted the verified HDR10
     /// swapchain color space.
     pub(crate) swapchain_hdr10_color_space_supported: bool,
-    /// `ID3D11VideoContext1` is available on the device.
+    /// `ID3D11VideoContext1` is available on the device. Informational
+    /// (caps dump); no presentation path gates on it — HDR presentation is
+    /// shader-based, not video-processor-based.
     pub(crate) video_context1_available: bool,
-    /// `CheckVideoProcessorFormatConversion` accepted NV12 HDR10 input to
-    /// the HDR output format with the verified color spaces.
-    /// HDR-VERIFY: the open-time probe still needs wiring to a live
-    /// processor enumerator (passthrough commit); P010 input is unprobed.
-    pub(crate) hdr10_format_conversion_supported: bool,
-    /// Same, for HLG input. HDR-VERIFY: unresolved.
-    pub(crate) hlg_format_conversion_supported: bool,
+    /// The device can create the per-plane shader resource views the HDR
+    /// shader samples decoded NV12/P010 through
+    /// (`D3D11Device::supports_hdr_shader_tone_map`). Gates [`HdrPqOutput`]
+    /// alongside the display bits; the tone-map fallback re-checks the same
+    /// probe itself at open.
+    ///
+    /// Hardcoded false in `query_hdr_presentation_capabilities` until the
+    /// integration commit flips it, keeping [`HdrPqOutput`] unreachable
+    /// while its render path is built.
+    ///
+    /// [`HdrPqOutput`]: VideoPresentationPath::HdrPqOutput
+    pub(crate) hdr_shader_sampling_supported: bool,
     /// Raw descriptor preserved for future display policy; `None` when the
     /// output could not be queried.
     pub(crate) display_descriptor: Option<HdrDisplayDescriptor>,
@@ -367,29 +384,27 @@ pub(crate) fn select_video_presentation_path(
 ) -> VideoPresentationPath {
     match content.mode {
         ContentColorMode::Sdr => VideoPresentationPath::ExistingSdr,
-        ContentColorMode::Hdr10Pq => {
+        // Both HDR modes share one gate: the display must be in HDR mode,
+        // the swapchain must accept the verified HDR10 color space, and the
+        // device must support the plane SRVs the HDR shader samples through
+        // (PQ passes through the shader untouched; HLG is converted to PQ
+        // display light in the same shader).
+        ContentColorMode::Hdr10Pq | ContentColorMode::Hlg => {
             if capabilities.display_hdr_active
                 && capabilities.swapchain_hdr10_color_space_supported
-                && capabilities.video_context1_available
-                && capabilities.hdr10_format_conversion_supported
+                && capabilities.hdr_shader_sampling_supported
             {
-                VideoPresentationPath::Hdr10Passthrough
+                VideoPresentationPath::HdrPqOutput
             } else {
-                // SDR display, or an HDR display missing some required
-                // passthrough capability: only an explicit HDR-to-SDR
-                // conversion may present this. It must never fall through
-                // to the existing SDR path. (The tone-map path performs its
-                // own structural checks — ID3D11VideoContext1 at open,
-                // CheckVideoProcessorFormatConversion at the blt — and
-                // dead-ends as a typed error when they fail.)
+                // SDR display, or a device that cannot sample the decoded
+                // planes: only an explicit HDR-to-SDR conversion may
+                // present this. It must never fall through to the existing
+                // SDR path. (The tone-map path re-checks the shader
+                // sampling probe itself at open and dead-ends as a typed
+                // error when it fails.)
                 VideoPresentationPath::HdrToSdrToneMapRequired
             }
         }
-        // HLG is never auto-classified as HDR10 passthrough and never
-        // reaches the plain SDR path; it presents through the explicit
-        // HDR-to-SDR conversion (GHLG stream color space). A native HLG
-        // passthrough path is future work.
-        ContentColorMode::Hlg => VideoPresentationPath::HdrToSdrToneMapRequired,
         // HDR-signalled but ambiguous content dead-ends explicitly.
         ContentColorMode::Unknown => VideoPresentationPath::UnsupportedHdr,
     }
@@ -402,7 +417,7 @@ pub(crate) fn select_video_presentation_path(
 pub(crate) fn swapchain_format_for_path(path: VideoPresentationPath) -> DXGI_FORMAT {
     match path {
         VideoPresentationPath::ExistingSdr => DXGI_FORMAT_B8G8R8A8_UNORM,
-        VideoPresentationPath::Hdr10Passthrough => DXGI_FORMAT_R10G10B10A2_UNORM,
+        VideoPresentationPath::HdrPqOutput => DXGI_FORMAT_R10G10B10A2_UNORM,
         // Tone mapping renders SDR output; unsupported never creates one.
         VideoPresentationPath::HdrToSdrToneMapRequired => DXGI_FORMAT_B8G8R8A8_UNORM,
         VideoPresentationPath::UnsupportedHdr => DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -630,10 +645,28 @@ mod tests {
             display_hdr_active: true,
             swapchain_hdr10_color_space_supported: true,
             video_context1_available: true,
-            hdr10_format_conversion_supported: true,
-            hlg_format_conversion_supported: true,
+            hdr_shader_sampling_supported: true,
             display_descriptor: None,
         }
+    }
+
+    /// Every single-bit degradation of the PQ-output gate, plus all-false.
+    fn degraded_capabilities() -> [HdrPresentationCapabilities; 4] {
+        [
+            HdrPresentationCapabilities::default(),
+            HdrPresentationCapabilities {
+                display_hdr_active: false,
+                ..full_capabilities()
+            },
+            HdrPresentationCapabilities {
+                swapchain_hdr10_color_space_supported: false,
+                ..full_capabilities()
+            },
+            HdrPresentationCapabilities {
+                hdr_shader_sampling_supported: false,
+                ..full_capabilities()
+            },
+        ]
     }
 
     #[test]
@@ -650,67 +683,27 @@ mod tests {
     }
 
     #[test]
-    fn pq_with_full_capabilities_selects_passthrough() {
+    fn pq_with_full_capabilities_selects_pq_output() {
         assert_eq!(
             select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &full_capabilities()),
-            VideoPresentationPath::Hdr10Passthrough
+            VideoPresentationPath::HdrPqOutput
         );
     }
 
     #[test]
-    fn pq_on_sdr_display_requires_tone_mapping() {
-        let caps = HdrPresentationCapabilities {
-            display_hdr_active: false,
-            ..full_capabilities()
-        };
+    fn hlg_with_full_capabilities_selects_pq_output() {
         assert_eq!(
-            select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps),
-            VideoPresentationPath::HdrToSdrToneMapRequired
+            select_video_presentation_path(&info(ContentColorMode::Hlg), &full_capabilities()),
+            VideoPresentationPath::HdrPqOutput
         );
     }
 
     #[test]
-    fn pq_without_video_context1_does_not_select_passthrough() {
-        let caps = HdrPresentationCapabilities {
-            video_context1_available: false,
-            ..full_capabilities()
-        };
-        let path = select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps);
-        assert_ne!(path, VideoPresentationPath::Hdr10Passthrough);
-        assert_ne!(path, VideoPresentationPath::ExistingSdr);
-    }
-
-    #[test]
-    fn pq_without_format_conversion_does_not_select_passthrough() {
-        let caps = HdrPresentationCapabilities {
-            hdr10_format_conversion_supported: false,
-            ..full_capabilities()
-        };
-        let path = select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps);
-        assert_ne!(path, VideoPresentationPath::Hdr10Passthrough);
-        assert_ne!(path, VideoPresentationPath::ExistingSdr);
-    }
-
-    #[test]
-    fn pq_without_passthrough_capabilities_selects_tone_map_never_sdr() {
-        // Missing passthrough capability (SDR display, no context1, no
-        // format conversion) routes PQ to the explicit tone-map path —
-        // never the plain SDR path, never a dead end.
-        for caps in [
-            HdrPresentationCapabilities::default(),
-            HdrPresentationCapabilities {
-                display_hdr_active: false,
-                ..full_capabilities()
-            },
-            HdrPresentationCapabilities {
-                video_context1_available: false,
-                ..full_capabilities()
-            },
-            HdrPresentationCapabilities {
-                hdr10_format_conversion_supported: false,
-                ..full_capabilities()
-            },
-        ] {
+    fn pq_with_any_missing_capability_selects_tone_map_never_sdr() {
+        // Any missing gate bit (SDR display, swapchain rejecting the HDR10
+        // color space, no shader plane sampling) routes PQ to the explicit
+        // tone-map path — never the plain SDR path, never a dead end.
+        for caps in degraded_capabilities() {
             assert_eq!(
                 select_video_presentation_path(&info(ContentColorMode::Hdr10Pq), &caps),
                 VideoPresentationPath::HdrToSdrToneMapRequired
@@ -719,10 +712,28 @@ mod tests {
     }
 
     #[test]
-    fn hlg_selects_tone_map_never_passthrough_or_existing_sdr() {
-        for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
-            let path = select_video_presentation_path(&info(ContentColorMode::Hlg), &caps);
-            assert_eq!(path, VideoPresentationPath::HdrToSdrToneMapRequired);
+    fn hlg_with_any_missing_capability_selects_tone_map_never_sdr() {
+        for caps in degraded_capabilities() {
+            assert_eq!(
+                select_video_presentation_path(&info(ContentColorMode::Hlg), &caps),
+                VideoPresentationPath::HdrToSdrToneMapRequired
+            );
+        }
+    }
+
+    #[test]
+    fn video_context1_no_longer_gates_pq_output() {
+        // HDR presentation is shader-based; the video-processor interface
+        // bit is informational and must not withhold PQ output.
+        let caps = HdrPresentationCapabilities {
+            video_context1_available: false,
+            ..full_capabilities()
+        };
+        for mode in [ContentColorMode::Hdr10Pq, ContentColorMode::Hlg] {
+            assert_eq!(
+                select_video_presentation_path(&info(mode), &caps),
+                VideoPresentationPath::HdrPqOutput
+            );
         }
     }
 
@@ -861,10 +872,10 @@ mod tests {
     }
 
     #[test]
-    fn classified_hlg_routes_to_tone_map_never_sdr_or_passthrough() {
+    fn classified_hlg_routes_to_pq_output_or_tone_map_never_sdr() {
         // End to end: standard BT.2100 HLG classifies as Hlg and routes to
-        // the explicit HDR-to-SDR conversion under any capabilities — never
-        // HDR10 passthrough, never the ordinary SDR path.
+        // PQ output under full capabilities, or to the explicit HDR-to-SDR
+        // conversion otherwise — never the ordinary SDR path.
         let mode = classify_color_tags(
             AVColorPrimaries_AVCOL_PRI_BT2020,
             AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67,
@@ -873,7 +884,11 @@ mod tests {
         let mut content = info(mode);
         content.color_primaries = AVColorPrimaries_AVCOL_PRI_BT2020;
         content.color_transfer = AVColorTransferCharacteristic_AVCOL_TRC_ARIB_STD_B67;
-        for caps in [HdrPresentationCapabilities::default(), full_capabilities()] {
+        assert_eq!(
+            select_video_presentation_path(&content, &full_capabilities()),
+            VideoPresentationPath::HdrPqOutput
+        );
+        for caps in degraded_capabilities() {
             assert_eq!(
                 select_video_presentation_path(&content, &caps),
                 VideoPresentationPath::HdrToSdrToneMapRequired
@@ -952,8 +967,7 @@ mod tests {
     #[test]
     fn classified_standard_pq_still_selects_passthrough() {
         // End to end: the valid HDR10 signal still classifies as Hdr10Pq and
-        // still selects the passthrough/skeleton path under full
-        // capabilities.
+        // still selects the PQ-output path under full capabilities.
         let mode = classify_color_tags(
             AVColorPrimaries_AVCOL_PRI_BT2020,
             AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084,
@@ -964,7 +978,7 @@ mod tests {
         content.color_transfer = AVColorTransferCharacteristic_AVCOL_TRC_SMPTE2084;
         assert_eq!(
             select_video_presentation_path(&content, &full_capabilities()),
-            VideoPresentationPath::Hdr10Passthrough
+            VideoPresentationPath::HdrPqOutput
         );
     }
 
@@ -979,7 +993,7 @@ mod tests {
     #[test]
     fn hdr10_swapchain_format_is_r10g10b10a2() {
         assert_eq!(
-            swapchain_format_for_path(VideoPresentationPath::Hdr10Passthrough),
+            swapchain_format_for_path(VideoPresentationPath::HdrPqOutput),
             DXGI_FORMAT_R10G10B10A2_UNORM
         );
     }

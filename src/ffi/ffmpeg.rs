@@ -357,7 +357,7 @@ impl DecodeSession {
                 // returns ExistingSdr only for Sdr content); kept as an
                 // explicit no-op for match exhaustiveness.
                 VideoPresentationPath::ExistingSdr => {}
-                VideoPresentationPath::Hdr10Passthrough => {
+                VideoPresentationPath::HdrPqOutput => {
                     // Integration point for the passthrough commit: create
                     // the HDR renderer via SwapChainPresenter::new_for_path,
                     // then refine the classification from the first decoded
@@ -1275,7 +1275,7 @@ unsafe fn classify_stream_color(
 ///
 /// Integration point: runs ONLY on the HDR path, after the HDR swapchain
 /// exists, on a first frame that already flowed through the unchanged
-/// decode path (see the `Hdr10Passthrough` arm in `DecodeSession::open`).
+/// decode path (see the `HdrPqOutput` arm in `DecodeSession::open`).
 /// The verified SDR path never calls this and its first-frame handling is
 /// untouched.
 ///
