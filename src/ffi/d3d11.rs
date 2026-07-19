@@ -296,6 +296,11 @@ pub(crate) struct VideoProcessorCache {
 pub(crate) struct BgraFrameCapture {
     pub width: u32,
     pub height: u32,
+    /// The captured texture's format. Rows are packed 4 bytes/pixel for
+    /// both supported backbuffers, but the byte meaning differs: BGRA8 for
+    /// the SDR chain, packed 2:10:10:10 PQ dwords for the HDR10 chain —
+    /// consumers must branch on this rather than assume BGRA.
+    pub format: DXGI_FORMAT,
     pub pixels: Vec<u8>,
 }
 
@@ -487,6 +492,7 @@ impl D3D11Device {
         Ok(BgraFrameCapture {
             width: desc.Width,
             height: desc.Height,
+            format: desc.Format,
             pixels,
         })
     }

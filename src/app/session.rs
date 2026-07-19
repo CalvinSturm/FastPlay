@@ -630,6 +630,30 @@ impl PlaybackSession {
         &self,
         capture: BgraFrameCapture,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        // The HDR10 chain reads back packed 2:10:10:10 PQ dwords, not
+        // BGRA8; tone-map them to SDR on the CPU (the audited shader model
+        // in double precision) so the BMP shows what an SDR viewer would
+        // have seen. Any other non-BGRA format is a typed error rather
+        // than a garbage file.
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM,
+        };
+        let capture = if capture.format == DXGI_FORMAT_R10G10B10A2_UNORM {
+            BgraFrameCapture {
+                width: capture.width,
+                height: capture.height,
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                pixels: crate::render::hdr::pq10_capture_to_sdr_bgra(&capture.pixels),
+            }
+        } else if capture.format == DXGI_FORMAT_B8G8R8A8_UNORM {
+            capture
+        } else {
+            return Err(format!(
+                "screenshot capture in unsupported format {:?}",
+                capture.format
+            )
+            .into());
+        };
         let directory = screenshot_directory()?;
         fs::create_dir_all(&directory)?;
         let stamp = SystemTime::now()
