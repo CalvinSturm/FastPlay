@@ -17,7 +17,7 @@ use crate::{
         audio_controller::AudioController,
         clip_range::ClipRangeState,
         commands::SessionCommand,
-        decode_thread::DecodeThreadHandle,
+        decode_thread::{DecodeThreadHandle, SeekDelivery},
         drop_stats::{VideoDropBuckets, VideoDropCause},
         events::SessionEvent,
         overlay::OverlayManager,
@@ -457,7 +457,6 @@ impl PlaybackSession {
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match command {
-            SessionCommand::Tick => {}
             SessionCommand::TogglePause => self.toggle_pause(now)?,
             SessionCommand::ToggleSubtitles => self.toggle_subtitles()?,
             SessionCommand::SaveScreenshot => {
@@ -1284,37 +1283,55 @@ impl PlaybackSession {
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        if self.decode_thread.serves(self.decode_preference) {
-            // Reuse the open file: tell the running video thread to seek in
-            // place. Bumping seek_gen above already gates out its old in-flight
-            // frames. `serves` implies a live control; if it is somehow absent,
-            // skip rather than panic — the next operation will respawn a worker.
-            if let Some(control) = self.decode_thread.control() {
-                control.send_seek(absolute_target, seek_gen, op_id);
+        // Reuse the open file where possible: tell the running video thread to
+        // seek in place. Bumping seek_gen above already gates out its old
+        // in-flight frames. The Arc'd control channel outlives the thread, so
+        // the handle — not its mere existence — decides how the seek travels.
+        match self.decode_thread.seek_delivery(self.decode_preference) {
+            SeekDelivery::InPlace => {
+                if let Some(control) = self.decode_thread.control() {
+                    control.send_seek(absolute_target, seek_gen, op_id);
+                }
             }
-        } else {
-            // No thread, or the decode preference changed (HW↔SW): reopen.
-            self.decode_thread.teardown(false);
-            self.spawn_decode_thread(
-                source.clone(),
-                Some(absolute_target),
-                open_gen,
-                seek_gen,
-                op_id,
-            );
+            SeekDelivery::Respawn => {
+                // No live thread, or the decode preference changed (HW↔SW).
+                self.decode_thread.teardown(false);
+                self.spawn_decode_thread(
+                    source.clone(),
+                    Some(absolute_target),
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                );
+            }
+            // Audio-only file: the video worker reported NoVideoStream and
+            // retired. Respawning would reopen and re-demux the file on every
+            // scrub only to rediscover that there is still no video.
+            SeekDelivery::Retired => {}
         }
         // Audio seeks in place on its own persistent worker (no reopen), exactly
         // like the video worker above — so rapid scrubbing never churns the
         // audio demuxer. Stale pre-seek audio carries the old seek_gen and is
-        // dropped by the coordinator's generation check. Respawn only if no
-        // audio worker is alive (e.g. it exited after an open/decode error).
-        if self.audio_decode_thread.control().is_some() {
-            if let Some(control) = self.audio_decode_thread.control() {
-                control.send_seek(absolute_target, seek_gen, op_id);
+        // dropped by the coordinator's generation check. Audio has no hardware
+        // path, so its handle is always registered with `Auto`.
+        match self
+            .audio_decode_thread
+            .seek_delivery(VideoDecodePreference::Auto)
+        {
+            SeekDelivery::InPlace => {
+                if let Some(control) = self.audio_decode_thread.control() {
+                    control.send_seek(absolute_target, seek_gen, op_id);
+                }
             }
-        } else {
-            self.audio_decode_thread.teardown(false);
-            self.spawn_audio_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
+            // The worker exited on an open or decode error. Without this the
+            // channel would keep accepting seeks nobody reads and the file
+            // would stay silent to the end.
+            SeekDelivery::Respawn => {
+                self.audio_decode_thread.teardown(false);
+                self.spawn_audio_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
+            }
+            // The file simply has no audio track.
+            SeekDelivery::Retired => {}
         }
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
@@ -1453,6 +1470,7 @@ impl PlaybackSession {
         let worker_count = self
             .decode_thread
             .prepare_spawn(control.clone(), decode_preference);
+        let retired = self.decode_thread.retirement_flag();
 
         flog!(
             "[spawn_decode_thread] open={} seek={} op={:?} workers_now={} hdr_caps={:?}",
@@ -1484,134 +1502,144 @@ impl PlaybackSession {
             // decode should abort so the new target can be applied.
             let cancelled = || control.seq() != serving.get() || control.is_shutdown();
 
-            // Non-blocking send that retries when the bounded channel is full,
-            // aborting if a newer command arrives so a stale decode cannot block
-            // forever on a full channel.
-            let worker_send =
-                |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
-                    let mut event = event;
-                    let mut full_retries: u32 = 0;
-                    loop {
-                        match tx.try_send(event) {
-                            Ok(()) => return Ok(()),
-                            Err(TrySendError::Full(returned)) => {
-                                if cancelled() {
-                                    return Err(WORKER_CANCELLED.to_string());
-                                }
-                                // Poll at 1ms while the consumer is actively
-                                // draining — this is the brief, transient
-                                // backpressure of normal playback, where a freed
-                                // slot must be refilled promptly to avoid audio
-                                // starvation. Once the queue has stayed full well
-                                // past any frame interval, the UI is paused or
-                                // stalled and is not draining at all; back off to
-                                // a longer sleep so a paused player does not spin
-                                // the decode thread. Shutdown and superseded-seek
-                                // are still observed every iteration, so cancel
-                                // latency stays within one sleep interval.
-                                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
-                                full_retries = full_retries.saturating_add(1);
-                                thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                                event = returned;
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                return Err(WORKER_CANCELLED.to_string());
-                            }
-                        }
-                    }
-                };
+            // Retrying bounded send; see `send_to_ui`. Wrapped so the call
+            // sites below keep their two-argument shape.
+            let worker_send = |event: SessionEvent, tx: &SyncSender<SessionEvent>| {
+                send_to_ui(event, tx, &cancelled)
+            };
 
             // Cancellation signal for FFmpeg's interrupt callback: aborts a
             // blocking open/read/seek when the worker is asked to shut down, so
             // a worker wedged in FFmpeg I/O (dead network share, vanished drive)
             // still exits promptly and never hangs teardown. Owned + 'static so
             // it can live inside the format context for the session's lifetime.
-            let io_cancel: Box<dyn Fn() -> bool> = {
+            let io_cancel = || -> Box<dyn Fn() -> bool> {
                 let control = control.clone();
                 Box::new(move || control.is_shutdown())
             };
 
-            // Open the file and decoders once. Errors map to open/playback
-            // failure exactly as the per-operation worker did.
-            let open_result = unsafe {
-                DecodeSession::open(
-                    &source,
-                    &device,
-                    hdr_capabilities,
-                    audio_format,
-                    start_position,
-                    decode_preference,
-                    // Audio is decoded by the independent audio worker (see
-                    // `spawn_audio_thread`); this worker is video-only.
-                    false,
-                    io_cancel,
-                    &cancelled,
-                    &mut |mode, hw_fallback_count, rotation_quarter_turns| {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        worker_send(
-                            SessionEvent::DecodeModeSelected {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                                mode,
-                                hw_fallback_count,
-                                rotation_quarter_turns,
-                            },
-                            &sender,
-                        )
-                    },
-                    &mut |path| {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        worker_send(
-                            SessionEvent::PresentationPathSelected {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                                path,
-                            },
-                            &sender,
-                        )
-                    },
-                    &mut |duration| {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        worker_send(
-                            SessionEvent::MediaDurationKnown {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                                duration,
-                            },
-                            &sender,
-                        )
-                    },
-                )
-            };
-            let mut session = match open_result {
-                Ok(ffmpeg::VideoOpen::Ready(session)) => session,
-                Ok(ffmpeg::VideoOpen::Cancelled) => return,
-                Ok(ffmpeg::VideoOpen::NoVideoStream) => {
-                    // Audio-only file: no video will ever arrive. Tell the
-                    // coordinator so it plays from the audio worker alone, then
-                    // exit — there is no video to decode. (Suppressed if a newer
-                    // command already superseded this open.)
-                    if !control.is_shutdown() {
-                        let (_seek_gen, op_id) = gen_cell.get();
-                        let _ =
-                            worker_send(SessionEvent::NoVideoStream { open_gen, op_id }, &sender);
+            // Open the file and decoders, retrying if a seek supersedes the open
+            // while it is in flight. A seek bumps the command sequence, which is
+            // exactly what `cancelled` watches, so scrubbing before this worker
+            // has finished opening cancels the open. Exiting on that (as this
+            // once did) killed video for the rest of the file: the coordinator
+            // only re-sends seeks to the worker's control channel, which
+            // outlives the thread — `DecodeThreadHandle::serves` sees a live
+            // `control` and never learns the worker is gone. Serve the command
+            // instead and reopen at its target, exactly as the audio worker does
+            // (see `spawn_audio_thread`). Other errors still map to
+            // open/playback failure as before.
+            let mut start_at = start_position;
+            let mut session = loop {
+                let open_result = unsafe {
+                    DecodeSession::open(
+                        &source,
+                        &device,
+                        // Cloned per attempt: the retry below can reopen, and
+                        // the snapshot is taken once at spawn (decide-at-open
+                        // policy) so every attempt must see the same caps.
+                        hdr_capabilities.clone(),
+                        audio_format,
+                        start_at,
+                        decode_preference,
+                        // Audio is decoded by the independent audio worker (see
+                        // `spawn_audio_thread`); this worker is video-only.
+                        false,
+                        io_cancel(),
+                        &cancelled,
+                        &mut |mode, hw_fallback_count, rotation_quarter_turns| {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            worker_send(
+                                SessionEvent::DecodeModeSelected {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    mode,
+                                    hw_fallback_count,
+                                    rotation_quarter_turns,
+                                },
+                                &sender,
+                            )
+                        },
+                        &mut |path| {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            worker_send(
+                                SessionEvent::PresentationPathSelected {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    path,
+                                },
+                                &sender,
+                            )
+                        },
+                        &mut |duration| {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            worker_send(
+                                SessionEvent::MediaDurationKnown {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    duration,
+                                },
+                                &sender,
+                            )
+                        },
+                    )
+                };
+                match open_result {
+                    Ok(ffmpeg::VideoOpen::Ready(session)) => break session,
+                    Ok(ffmpeg::VideoOpen::Cancelled) => {
+                        if control.is_shutdown() {
+                            return;
+                        }
+                        // The command that cancelled the open is still pending;
+                        // take it and reopen there. `wait_next` returns it
+                        // immediately (it never blocks when one is queued).
+                        match control.wait_next() {
+                            (DecodeCommand::Shutdown, _) => return,
+                            (
+                                DecodeCommand::Seek {
+                                    target,
+                                    seek_gen,
+                                    op_id,
+                                },
+                                new_seq,
+                            ) => {
+                                serving.set(new_seq);
+                                gen_cell.set((seek_gen, op_id));
+                                start_at = Some(target);
+                            }
+                        }
                     }
-                    return;
-                }
-                Err(error) => {
-                    if !control.is_shutdown() {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        let event =
-                            if error.contains("device removed") || device.is_device_removed() {
+                    // Permanent: this file simply has no video. Tell the
+                    // coordinator so it plays from the audio worker alone, then
+                    // exit. (Suppressed if a newer command already superseded
+                    // this open.)
+                    Ok(ffmpeg::VideoOpen::NoVideoStream) => {
+                        // Retire before exiting so later seeks skip this handle
+                        // entirely instead of respawning a worker that would
+                        // reopen the file only to reach here again.
+                        retired.store(true, Ordering::Release);
+                        if !control.is_shutdown() {
+                            let (_seek_gen, op_id) = gen_cell.get();
+                            let _ = worker_send(
+                                SessionEvent::NoVideoStream { open_gen, op_id },
+                                &sender,
+                            );
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        if !control.is_shutdown() {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            let event = if is_device_lost(&error, &device) {
                                 SessionEvent::DeviceLost {
                                     open_gen,
                                     seek_gen,
                                     op_id,
                                 }
-                            } else if start_position.is_some() {
+                            } else if start_at.is_some() {
                                 SessionEvent::PlaybackFailed {
                                     open_gen,
                                     seek_gen,
@@ -1625,9 +1653,10 @@ impl PlaybackSession {
                                     error,
                                 }
                             };
-                        let _ = worker_send(event, &sender);
+                            let _ = worker_send(event, &sender);
+                        }
+                        return;
                     }
-                    return;
                 }
             };
 
@@ -1714,21 +1743,7 @@ impl PlaybackSession {
                     Err(ref error) if error == WORKER_CANCELLED => {}
                     Err(error) => {
                         let (seek_gen, op_id) = gen_cell.get();
-                        let event =
-                            if error.contains("device removed") || device.is_device_removed() {
-                                SessionEvent::DeviceLost {
-                                    open_gen,
-                                    seek_gen,
-                                    op_id,
-                                }
-                            } else {
-                                SessionEvent::PlaybackFailed {
-                                    open_gen,
-                                    seek_gen,
-                                    op_id,
-                                    error,
-                                }
-                            };
+                        let event = worker_failure_event(error, &device, open_gen, seek_gen, op_id);
                         let _ = worker_send(event, &sender);
                     }
                 }
@@ -1745,20 +1760,7 @@ impl PlaybackSession {
                         gen_cell.set((seek_gen, op_id));
                         if let Err(error) = unsafe { session.seek(target) } {
                             let event =
-                                if error.contains("device removed") || device.is_device_removed() {
-                                    SessionEvent::DeviceLost {
-                                        open_gen,
-                                        seek_gen,
-                                        op_id,
-                                    }
-                                } else {
-                                    SessionEvent::PlaybackFailed {
-                                        open_gen,
-                                        seek_gen,
-                                        op_id,
-                                        error,
-                                    }
-                                };
+                                worker_failure_event(error, &device, open_gen, seek_gen, op_id);
                             let _ = worker_send(event, &sender);
                         }
                     }
@@ -1815,6 +1817,7 @@ impl PlaybackSession {
         let worker_count = self
             .audio_decode_thread
             .prepare_spawn(control.clone(), VideoDecodePreference::Auto);
+        let retired = self.audio_decode_thread.retirement_flag();
 
         let handle = thread::spawn(move || {
             let _guard = WorkerExitGuard(worker_count);
@@ -1826,28 +1829,10 @@ impl PlaybackSession {
             let serving = Cell::new(0u64);
             // A newer command arrived (or shutdown): abort the in-flight decode.
             let cancelled = || control.seq() != serving.get() || control.is_shutdown();
-            let worker_send =
-                |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
-                    let mut event = event;
-                    let mut full_retries: u32 = 0;
-                    loop {
-                        match tx.try_send(event) {
-                            Ok(()) => return Ok(()),
-                            Err(TrySendError::Full(returned)) => {
-                                if cancelled() {
-                                    return Err(WORKER_CANCELLED.to_string());
-                                }
-                                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
-                                full_retries = full_retries.saturating_add(1);
-                                thread::sleep(Duration::from_millis(sleep_ms));
-                                event = returned;
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                return Err(WORKER_CANCELLED.to_string());
-                            }
-                        }
-                    }
-                };
+            // Same retrying bounded send as the video worker; see `send_to_ui`.
+            let worker_send = |event: SessionEvent, tx: &SyncSender<SessionEvent>| {
+                send_to_ui(event, tx, &cancelled)
+            };
 
             let io_cancel = || -> Box<dyn Fn() -> bool> {
                 let control = control.clone();
@@ -1874,8 +1859,13 @@ impl PlaybackSession {
                     )
                 } {
                     Ok(ffmpeg::AudioOpen::Ready(session)) => break session,
-                    // Permanent: this file simply has no audio.
-                    Ok(ffmpeg::AudioOpen::NoAudioStream) => return,
+                    // Permanent: this file simply has no audio. Retire the
+                    // handle so later seeks do not respawn a worker that would
+                    // reopen the file only to reach here again.
+                    Ok(ffmpeg::AudioOpen::NoAudioStream) => {
+                        retired.store(true, Ordering::Release);
+                        return;
+                    }
                     Ok(ffmpeg::AudioOpen::Cancelled) => {
                         if control.is_shutdown() {
                             return;
@@ -2075,7 +2065,7 @@ impl PlaybackSession {
         self.cached_buffered_frames.set(Some(buffered));
         if self.audio_stream_expected
             && self.state != PlaybackState::Paused
-            && self.audio_sink.as_ref().map_or(false, |s| s.is_started())
+            && self.audio_sink.as_ref().is_some_and(|s| s.is_started())
             && self.queued_audio_frames.is_empty()
             && buffered == 0
             && !self.can_finish_with_buffered(0)?
@@ -2743,6 +2733,82 @@ impl PlaybackSession {
         open_gen == self.generations.open()
             && seek_gen == self.generations.seek()
             && Some(op_id) == self.active_operation_id
+    }
+}
+
+/// Whether a worker error means the D3D11 device is gone, in which case the
+/// coordinator must rebuild it rather than fail playback. FFmpeg surfaces the
+/// condition in its message; the device is also asked directly, because a
+/// removal can be noticed between the failing call and this check.
+fn is_device_lost(error: &str, device: &crate::ffi::d3d11::D3D11Device) -> bool {
+    error.contains("device removed") || device.is_device_removed()
+}
+
+/// The event reporting a mid-stream worker error: a lost device is its own
+/// event (recoverable — the coordinator rebuilds and reopens), anything else
+/// fails playback. The open path does not use this because it has a third
+/// outcome (`OpenFailed`); it shares [`is_device_lost`] instead.
+fn worker_failure_event(
+    error: String,
+    device: &crate::ffi::d3d11::D3D11Device,
+    open_gen: OpenGeneration,
+    seek_gen: SeekGeneration,
+    op_id: OperationId,
+) -> SessionEvent {
+    if is_device_lost(&error, device) {
+        SessionEvent::DeviceLost {
+            open_gen,
+            seek_gen,
+            op_id,
+        }
+    } else {
+        SessionEvent::PlaybackFailed {
+            open_gen,
+            seek_gen,
+            op_id,
+            error,
+        }
+    }
+}
+
+/// Send a worker event to the UI thread over a bounded channel, retrying while
+/// it is full.
+///
+/// Polls at 1ms while the consumer is actively draining — that is the brief,
+/// transient backpressure of normal playback, where a freed slot must be
+/// refilled promptly to avoid audio starvation. Once the queue has stayed full
+/// well past any frame interval the UI is paused or stalled and is not draining
+/// at all, so it backs off to a longer sleep rather than spinning a decode
+/// thread for a paused player. `cancelled` is checked every iteration, so a
+/// shutdown or a superseded seek is observed within one sleep interval and a
+/// stale decode can never block forever on a full channel.
+///
+/// Shared by both worker bodies. Deliberately a free function rather than a
+/// trait or a generic worker type: there are exactly two callers and their
+/// surrounding error handling differs — only the video worker maps device loss.
+fn send_to_ui(
+    event: SessionEvent,
+    tx: &SyncSender<SessionEvent>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let mut event = event;
+    let mut full_retries: u32 = 0;
+    loop {
+        match tx.try_send(event) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(returned)) => {
+                if cancelled() {
+                    return Err(WORKER_CANCELLED.to_string());
+                }
+                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
+                full_retries = full_retries.saturating_add(1);
+                thread::sleep(Duration::from_millis(sleep_ms));
+                event = returned;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(WORKER_CANCELLED.to_string());
+            }
+        }
     }
 }
 

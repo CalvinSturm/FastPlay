@@ -20,7 +20,7 @@ Single Rust crate, Windows-only, organized into the modules described in
 - `app/` — coordinator (`session.rs`), state, events, commands, overlays, timeline UI.
 - `playback/` — clock, metrics, queues, generations, decode control.
 - `media/` — source, video, audio, seek, subtitle.
-- `render/` — presenter, swapchain, surface registry, timeline.
+- `render/` — presenter, swapchain, surface registry, timeline, HDR, overlay raster.
 - `audio/` — WASAPI sink.
 - `platform/` — Win32 window, input, file dialog.
 - `ffi/` — the four unsafe seams: `ffmpeg`, `d3d11`, `dxgi`, `wasapi`.
@@ -33,12 +33,15 @@ only coordinator entrypoint.
 
 ### Largest files (lines)
 
+Refreshed 2026-07-21 (see [`audits/codebase-review.md`](./audits/codebase-review.md) §4).
+
 | File | Lines | Role |
 |------|------:|------|
-| `src/ffi/d3d11.rs` | 3036 | D3D11 FFI seam (inherently large; unsafe is correctly boxed here) |
-| `src/app/session.rs` | 2413 | Coordinator; still large, but focused state/helpers have been extracted |
-| `src/ffi/dxgi.rs` | 1842 | DXGI FFI seam |
-| `src/ffi/ffmpeg.rs` | 1563 | FFmpeg FFI seam |
+| `src/ffi/d3d11.rs` | 4322 | D3D11 FFI seam (inherently large; unsafe is correctly boxed here). The pure geometry/blend layer moved out to `render/overlay_raster.rs` in Stage 3; the GDI text path correctly stays |
+| `src/app/session.rs` | 2892 | Coordinator; still large, but focused state/helpers have been extracted |
+| `src/ffi/dxgi.rs` | 2096 | DXGI FFI seam. The input keymap moved out to `platform/input.rs` in Stage 2 |
+| `src/ffi/ffmpeg.rs` | 2190 | FFmpeg FFI seam |
+| `src/render/hdr.rs` | 1516 | Pure HDR classification and path decision — 736 lines of code, 780 of tests (41 tests). Not debt; the model to follow |
 
 The `ffi/*` files are large because they are the designated unsafe seams; their
 size is acceptable and expected. `app/session.rs` remains the largest safe-Rust
@@ -100,13 +103,72 @@ historical context, not current guidance.
 - `cargo fmt --check` — **clean and now enforced in CI** (was previously
   disabled). The reformat was mechanical and limited to `src/ffi/dxgi.rs` and
   `src/ffi/ffmpeg.rs`.
-- `cargo clippy --all-targets -- -D warnings` — **clean**. There is **no
-  baseline allow-list**; no `#![allow(...)]` debt is being hidden. Nothing to
-  pay down here today.
-- `cargo test --all-targets` — **140 passing, 0 failing**.
+- `cargo clippy --all-targets -- -D warnings` — **clean**, but see R5 below: the
+  run is clean *against a crate-wide allow-list*, which is a weaker signal than
+  this section previously claimed.
+- `cargo test --all-targets` — **230 passing, 0 failing** (2026-07-21).
 
-CI runs all three on `windows-latest`. There is no known lint debt to document
-as deferred.
+CI runs all three on `windows-latest`.
+
+### R5 — Lint allow-list — **paid down** (2026-07-21)
+
+This section previously stated there was "no baseline allow-list" and no
+`#![allow(...)]` debt. That was wrong, and the codebase review corrected it:
+
+- ~~`src/main.rs` disables **12 clippy categories crate-wide**.~~ **DONE — now
+  one.** Each was measured individually (remove it, count what clippy then
+  reports, and where):
+  - `explicit_auto_deref` was hiding **nothing at all** — deleted.
+  - `upper_case_acronyms`, `useless_transmute` and `type_complexity` fire
+    *only* on the bindgen output, never on hand-written code. Scoped to
+    `ffi/ffmpeg.rs`, which is where that output is `include!`d.
+  - `manual_c_str_literals`, `field_reassign_with_default`, `cmp_null`,
+    `manual_dangling_ptr`, `unnecessary_cast` are Win32/COM idioms confined to
+    specific seams. Scoped to `ffi/d3d11.rs`, `ffi/dxgi.rs`, `ffi/runtime.rs`
+    and `platform/open_dialog.rs`.
+  - `manual_is_multiple_of` and `unnecessary_map_or` fired only in **safe
+    application code** — three sites in `app/viewport.rs`, `app/session.rs` and
+    `app/video_queue.rs`. Those were fixed rather than allowed.
+  - `too_many_arguments` stays crate-wide: it is genuinely spread across
+    `app/`, `render/` and `ffi/`, and bundling 8-12 parameter GPU/present calls
+    into structs purely to satisfy it would obscure more than it clarified.
+
+  Verified by injecting an `unnecessary_map_or` into `app/drop_stats.rs`: it now
+  fails `-D warnings`, where the blanket allow used to absorb it silently.
+- ~~**Seven modules** disable `dead_code` file-wide.~~ **DONE.** All seven
+  blanket allows are gone. Removing them surfaced exactly five items, which is
+  the point — a module-wide allow cannot distinguish reserved API from rot:
+  - deleted as genuinely dead: `SessionCommand::Tick` (constructed nowhere, only
+    a no-op match arm);
+  - kept with a per-item allow and a stated reason: `SessionEvent::AudioEndpointChanged`
+    (see R7), `media_ext::is_subtitle`, `PlayQueue::{is_empty, items, cursor}`,
+    `RecentFiles::{is_empty, clear}`.
+  - `playback/generations.rs` and `playback/queues.rs` had nothing to hide at
+    all; their allows were pure noise.
+
+  Two module comments were also stale, claiming the play queue was "not yet
+  wired into the open flow" long after `main.rs` started driving it.
+
+Net effect: **12 crate-wide allows became 1**, plus 11 module-scoped ones and
+three real fixes. A new violation of any of those categories outside the seam
+that needs it now fails CI. See
+[`audits/codebase-review.md`](./audits/codebase-review.md) §10 Stage 5.
+
+### R7 — Audio endpoint-change detection was never implemented — **open**
+
+Surfaced by R5's pay-down. `ARCHITECTURE.md` §7 specifies a
+`SessionEvent::AudioEndpointChanged` and §6 assigns "audio endpoint recovery
+detection" to the workers. The event type exists and `PlaybackSession` has a
+live handler for it, but **nothing constructs it**: no `IMMNotificationClient`
+is registered anywhere in the crate.
+
+Endpoint changes are therefore only noticed *reactively* — when a WASAPI write
+fails, `submit_due_audio` calls `recover_audio_endpoint` directly. In practice
+recovery does happen, one failed write later. The charter's proactive path does
+not exist. The event is kept (with a `dead_code` allow explaining exactly this)
+because the charter is locked; closing the gap means either implementing the
+notification client or revising `ARCHITECTURE.md`, and that is a scope decision,
+not cleanup.
 
 ---
 
@@ -122,7 +184,48 @@ The original v0.3.0 priorities are complete:
 3. ✅ Backfill unit tests for the extracted helpers.
 
 Next maintenance work should be driven by observed defects, difficult review
-areas, or benchmark regressions rather than a line-count target.
+areas, or benchmark regressions rather than a line-count target. The 2026-07-21
+[codebase review](./audits/codebase-review.md) §10 sequences the current
+candidates, in value order:
+
+1. Extract the input keymap out of `window_proc` into `platform/input.rs` as a
+   pure function. It is the single largest untested surface in the program and
+   it has already shipped one user-visible bug (a held Ctrl+S toggled subtitles,
+   because a guarded match arm fell through to an unguarded one).
+2. Extract the pure geometry/blend layer of the overlay rasterizer out of
+   `ffi/d3d11.rs` into `render/`, with unit tests. The GDI text path stays in
+   the seam.
+3. De-duplicate the worker plumbing (`worker_send`, the device-lost event
+   mapping) — but only as private helpers, not a worker trait; there are two
+   consumers and they differ.
+4. R5 above (lint allow-list).
+5. Extend the worker-liveness discipline to the audio handle (see R6).
+
+### R6 — Worker liveness — **paid down** (2026-07-21)
+
+A `DecodeControl` is an `Arc` that deliberately outlives its worker thread, so
+holding one is *not* evidence that a worker is alive. This has now produced two
+defects: audio (fixed in `b603f6f`) and video (fixed 2026-07-21 — a seek arriving
+during a decode-worker reopen cancelled the open, the worker exited, and the
+coordinator kept sending seeks to a channel nobody was reading, so video never
+returned for that file).
+
+Both handles now go through `DecodeThreadHandle::seek_delivery`, which returns a
+three-way `SeekDelivery` rather than a boolean. The third state is load-bearing:
+a first attempt gated only on liveness (`worker_count() > 0`) fixed the wedge but
+introduced a performance regression, because "no worker is running" has two
+causes that need opposite responses.
+
+- `InPlace` — a live worker with the right preference; send it a seek command.
+- `Respawn` — the worker died on an error or cancelled open and the file still
+  has a stream of that kind. Not respawning is the original bug.
+- `Retired` — the worker exited because the file has no stream of its kind at
+  all (`NoVideoStream` / `NoAudioStream`). Respawning here reopens and
+  re-demuxes the file on *every* seek to rediscover the same absence. Measured
+  on an audio-only `.m4a` with 8 seeks: 9 video-worker spawns before, 1 after.
+
+The workers set the retirement flag immediately before their permanent-exit
+returns; `prepare_spawn` clears it, so the verdict never outlives its open.
 
 ---
 

@@ -1,3 +1,11 @@
+// Win32 idioms confined to this seam: descriptor structs built field-by-field
+// from `Default::default()`, raw null checks on pointers handed in by the window
+// procedure, and the dangling-pointer construction Win32 expects for empty
+// buffer arguments.
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::cmp_null)]
+#![allow(clippy::manual_dangling_ptr)]
+
 use std::{
     cell::{Cell, RefCell},
     error::Error,
@@ -1704,230 +1712,31 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN => {
             if let Some(state) = window_state(hwnd) {
-                let ctrl_held =
-                    (GetKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL.0 as i32)
-                        as u16
-                        & 0x8000)
-                        != 0;
-
-                match wparam.0 as u32 {
-                    // Ctrl+H → toggle borderless fullscreen
-                    0x48 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ToggleBorderlessFullscreen);
-                    }
-                    // Ctrl+S → save screenshot
-                    0x53 if ctrl_held && (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::SaveScreenshot);
-                    }
-                    // Ctrl+F / Ctrl+B → step one frame forward/backward
-                    0x46 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::StepFrameForward);
-                    }
-                    0x42 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::StepFrameBackward);
-                    }
-                    0x52 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::RotateClockwise);
-                    }
-                    // I → set in-point, Shift+I → clear in-point
-                    0x49 if ctrl_held => {
-                        // Ctrl+I — reserved / no-op (was clear in-point, now Shift+I)
-                    }
-                    0x49 => {
-                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-                        if shift_held {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::ClearInPoint);
-                        } else {
-                            state.input_events.borrow_mut().push(InputEvent::SetInPoint);
-                        }
-                    }
-                    // Ctrl+Shift+O → recent files, Ctrl+O → open file dialog,
-                    // Shift+O → clear out-point, O → set out-point
-                    0x4F if ctrl_held => {
-                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-                        if shift_held {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::ToggleRecentOverlay);
-                        } else {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::OpenFileDialog);
-                        }
-                    }
-                    0x4F => {
-                        let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-                        if shift_held {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::ClearOutPoint);
-                        } else {
-                            state
-                                .input_events
-                                .borrow_mut()
-                                .push(InputEvent::SetOutPoint);
-                        }
-                    }
-                    0x52 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ToggleLoopRange);
-                    }
-                    0x45 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::RotateCounterClockwise);
-                    }
-                    // Ctrl+W → fit window to video (no black padding)
-                    0x57 if ctrl_held => {
-                        state.input_events.borrow_mut().push(InputEvent::FitWindow);
-                    }
-                    // Ctrl+Q → half the video's native resolution
-                    0x51 if ctrl_held => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::HalfSizeWindow);
-                    }
-                    // Ctrl+0 → reset view
-                    0x30 if ctrl_held => {
-                        state.input_events.borrow_mut().push(InputEvent::ResetView);
-                    }
-                    // H (no Ctrl) → show help overlay while held
-                    0x48 if !ctrl_held
-                        // Only emit on first press (bit 30 of lparam = 0).
-                        && (lparam.0 as u32 >> 30) & 1 == 0 =>
-                    {
-                        state.input_events.borrow_mut().push(InputEvent::ShowHelp);
-                    }
-                    0x53 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ToggleSubtitles);
-                    }
-                    // ` → toggle decode info in title bar
-                    0xC0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ToggleDecodeInfo);
-                    }
-                    // ESC → exit borderless fullscreen
-                    0x1B => {
-                        state.input_events.borrow_mut().push(InputEvent::EscapeKey);
-                    }
-                    // Backspace → cancel scrub
-                    0x08 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::BackspaceKey);
-                    }
-                    // [ → slower, ] → faster, \ → reset to 1x
-                    0xDB => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::StepPlaybackRate(-1));
-                    }
-                    0xDD => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::StepPlaybackRate(1));
-                    }
-                    0xDC => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::ResetPlaybackRate);
-                    }
-                    key if key == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT.0 as u32 => {
-                        // Bit 30 of lparam: previous key state (1 = was down).
-                        // Accelerate seek on held key repeats.
-                        let held = (lparam.0 as u32 >> 30) & 1 != 0;
-                        let step = if held { 15 } else { 5 };
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::SeekRelativeSeconds(-step));
-                    }
-                    key if key
-                        == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT.0 as u32 =>
-                    {
-                        let held = (lparam.0 as u32 >> 30) & 1 != 0;
-                        let step = if held { 15 } else { 5 };
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::SeekRelativeSeconds(step));
-                    }
-                    // Up / Down → move selection (repeat allowed for held keys).
-                    0x26 => {
-                        state.input_events.borrow_mut().push(InputEvent::NavigateUp);
-                    }
-                    0x28 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::NavigateDown);
-                    }
-                    // Enter → confirm selection (first press only).
-                    0x0D if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state.input_events.borrow_mut().push(InputEvent::Confirm);
-                    }
-                    // Delete → remove selected (first press only).
-                    0x2E if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::RemoveSelected);
-                    }
-                    // PageUp / PageDown → previous / next play-queue item
-                    // (first press only; holding must not blast through files).
-                    0x21 if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state
-                            .input_events
-                            .borrow_mut()
-                            .push(InputEvent::QueuePrevious);
-                    }
-                    0x22 if (lparam.0 as u32 >> 30) & 1 == 0 => {
-                        state.input_events.borrow_mut().push(InputEvent::QueueNext);
-                    }
-                    _ => {}
+                // Decode the platform key state, then hand off: which shortcut a
+                // key means is pure policy and lives in `platform::input`, not in
+                // this unsafe seam.
+                let ctrl_held = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+                let shift_held = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                // Bit 30 of lparam is the previous key state: set while the key
+                // is auto-repeating, clear on the initial press.
+                let is_repeat = (lparam.0 as u32 >> 30) & 1 != 0;
+                if let Some(event) = crate::platform::input::command_for_key(
+                    wparam.0 as u32,
+                    ctrl_held,
+                    shift_held,
+                    is_repeat,
+                ) {
+                    state.input_events.borrow_mut().push(event);
                 }
             }
             LRESULT(0)
         }
         WM_KEYUP => {
             if let Some(state) = window_state(hwnd) {
-                // H released → hide the help overlay.
-                if wparam.0 as u32 == 0x48 {
-                    state.input_events.borrow_mut().push(InputEvent::HideHelp);
+                if let Some(event) =
+                    crate::platform::input::command_for_key_release(wparam.0 as u32)
+                {
+                    state.input_events.borrow_mut().push(event);
                 }
             }
             LRESULT(0)

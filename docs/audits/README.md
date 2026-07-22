@@ -11,6 +11,11 @@ Current guidance lives in:
 
 Archived notes:
 
+- [`codebase-review.md`](./codebase-review.md)
+  - 2026-07-21 whole-crate review: file/function inventory, correctness and
+    concurrency audit, testing gaps, and a staged refactoring plan. Found and
+    fixed one High-severity worker-lifecycle defect; concluded the codebase does
+    not need restructuring.
 - [`2026-06-16-comprehensive-audit.md`](./2026-06-16-comprehensive-audit.md)
   - audit of the v0.1.x codebase
 - [`phase-3-ux-compat-hardening.md`](./phase-3-ux-compat-hardening.md)

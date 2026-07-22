@@ -168,7 +168,7 @@ impl ViewportState {
     /// Orient content dimensions for the current rotation: odd quarter-turns
     /// swap width and height. Used for fit/half-size window sizing.
     pub fn orient_dimensions(&self, width: u32, height: u32) -> (u32, u32) {
-        if self.rotation_quarter_turns % 2 != 0 {
+        if !self.rotation_quarter_turns.is_multiple_of(2) {
             (height, width)
         } else {
             (width, height)

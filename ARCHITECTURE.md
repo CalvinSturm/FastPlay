@@ -132,7 +132,9 @@ fastplay/
       drop_stats.rs
       events.rs
       input_dispatch.rs
+      media_ext.rs
       overlay.rs
+      play_queue.rs
       recent.rs
       session.rs
       settings.rs
@@ -143,6 +145,7 @@ fastplay/
 
     playback/
       mod.rs
+      audio_diag.rs
       clock.rs
       decode_control.rs
       generations.rs
@@ -159,6 +162,8 @@ fastplay/
 
     render/
       mod.rs
+      hdr.rs
+      hdr_validate.rs
       presenter.rs
       surface_registry.rs
       swapchain.rs

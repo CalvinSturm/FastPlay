@@ -1,3 +1,10 @@
+// Win32/COM idioms confined to this seam: `D3D11_*_DESC` structs are built
+// field-by-field from `Default::default()` (the struct-literal form the lint
+// wants is unreadable for 10-field descriptors), and the HLSL shader sources are
+// NUL-terminated byte strings handed straight to D3DCompile.
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::manual_c_str_literals)]
+
 use std::{
     error::Error,
     ffi::c_void,
@@ -2357,6 +2364,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 "software upload requires non-zero dimensions",
             )));
         }
+        // `CreateTexture2D` reads `pSysMem` according to the descriptor and the
+        // pitch, not according to the slice length, so a short buffer is an
+        // out-of-bounds read inside the driver rather than a Rust panic. The
+        // caller (`SoftwareVideoConverter::convert`) sizes it correctly, but
+        // this is a `pub(crate)` entry point handed a raw pointer — check the
+        // invariant here rather than trusting every future caller.
+        //
+        if let Err(problem) = check_nv12_buffer(width, height, data.len(), stride) {
+            return Err(Box::new(D3D11Error(problem)));
+        }
         // Guard: bail out if the device was removed (GPU TDR) before issuing
         // any GPU commands.  The worker thread calls this from background
         // threads and would otherwise crash inside d3d11.dll.
@@ -2588,6 +2605,42 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
 /// its own view, the luma plane at full resolution and the chroma plane at
 /// half in both axes. Normalized texture coordinates address both, so the
 /// chroma view's bilinear filter *is* the chroma upsampler.
+use crate::render::overlay_raster::fill_rect;
+
+/// Validate that `len` bytes at `stride` really do hold a `width` x `height`
+/// NV12 frame.
+///
+/// `CreateTexture2D` reads `pSysMem` according to the texture descriptor and the
+/// pitch, never the slice length, so a short buffer is an out-of-bounds read
+/// inside the driver rather than a Rust panic. Pure and separate from the
+/// device call so the arithmetic is testable.
+///
+/// NV12 is planar 4:2:0: a full-resolution Y plane of `stride * height`, then an
+/// interleaved UV plane at half vertical resolution.
+fn check_nv12_buffer(
+    width: u32,
+    height: u32,
+    len: usize,
+    stride: usize,
+) -> Result<(), &'static str> {
+    if stride < width as usize {
+        return Err("NV12 upload stride is narrower than the frame width");
+    }
+    let y_plane = stride
+        .checked_mul(height as usize)
+        .ok_or("NV12 upload size overflowed")?;
+    let uv_plane = stride
+        .checked_mul(height as usize / 2)
+        .ok_or("NV12 upload size overflowed")?;
+    let required = y_plane
+        .checked_add(uv_plane)
+        .ok_or("NV12 upload size overflowed")?;
+    if len < required {
+        return Err("NV12 upload buffer is smaller than stride x height x 3/2");
+    }
+    Ok(())
+}
+
 fn plane_srv_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT), Box<dyn Error>> {
     if format == DXGI_FORMAT_P010 {
         Ok((DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM))
@@ -3188,130 +3241,17 @@ fn render_subtitle_bitmap(
 fn render_timeline_bitmap(
     model: &crate::render::timeline::TimelineOverlayModel,
 ) -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
-    if model.viewport_width == 0 || model.viewport_height == 0 || model.duration_secs == 0 {
+    // Shapes are pure geometry and live in `render::overlay_raster`; only the
+    // text labels below need GDI, which is why they stay in this seam. The
+    // compositing order is unchanged: shapes first, then text on top.
+    let Some(shapes) = crate::render::overlay_raster::render_timeline_shapes(model) else {
         return Ok(None);
-    }
-
-    let width = model.viewport_width;
-    let height = crate::render::timeline::TIMELINE_HEIGHT_PX;
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    let layout = crate::render::timeline::layout(model.viewport_width, model.viewport_height);
-    let track_top = (layout.track_top - layout.top).max(0) as u32;
-    let track_bottom = (layout.track_bottom - layout.top).max(track_top as i32 + 1) as u32;
-    let track_left = layout.track_left.max(0) as u32;
-    let track_right = layout.track_right.max(layout.track_left + 1) as u32;
-    let track_cy = track_top + (track_bottom - track_top) / 2;
-    let track_half_h = ((track_bottom - track_top) as f32) / 2.0;
-
-    // Gradient background: transparent at top, semi-opaque at bottom.
-    for y in 0..height {
-        let t = y as f32 / height.max(1) as f32;
-        let alpha = (t * t * 180.0) as u8;
-        for x in 0..width {
-            let offset = ((y * width + x) * 4) as usize;
-            pixels[offset] = 0;
-            pixels[offset + 1] = 0;
-            pixels[offset + 2] = 0;
-            pixels[offset + 3] = alpha;
-        }
-    }
-
-    // Unplayed track — rounded pill shape, dim.
-    fill_rounded_rect(
-        &mut pixels,
+    };
+    let crate::render::overlay_raster::RasterizedShapes {
         width,
         height,
-        track_left,
-        track_top,
-        track_right,
-        track_bottom,
-        track_half_h,
-        [255, 255, 255, 60],
-    );
-
-    // In/out range fill — drawn before the played track so the bright played portion
-    // sits on top of it; only shown when both markers are set.
-    if let (Some(ix), Some(ox)) = (model.in_point_marker_x, model.out_point_marker_x) {
-        let range_left = ix.max(0) as u32;
-        let range_right = ox.max(0) as u32;
-        if range_right > range_left {
-            fill_rounded_rect(
-                &mut pixels,
-                width,
-                height,
-                range_left,
-                track_top,
-                range_right,
-                track_bottom,
-                track_half_h,
-                [60, 160, 255, 130],
-            );
-        }
-    }
-
-    // Played track — bright pill starting at the in-point (if set) so the region
-    // before I reads as dim/excluded rather than as played content.
-    let played_left = model
-        .in_point_marker_x
-        .map_or(track_left, |ix| (ix.max(0) as u32).max(track_left));
-    let played_right = (track_left + model.played_px).min(track_right);
-    if played_right > played_left {
-        fill_rounded_rect(
-            &mut pixels,
-            width,
-            height,
-            played_left,
-            track_top,
-            played_right,
-            track_bottom,
-            track_half_h,
-            [255, 255, 255, 230],
-        );
-    }
-
-    // In/out marker ticks — 2px-wide white vertical bars slightly taller than the track.
-    let marker_top = track_top.saturating_sub(3);
-    let marker_bottom = (track_bottom + 3).min(height);
-    if let Some(x) = model.in_point_marker_x {
-        let mx = x.clamp(0, width as i32 - 2) as u32;
-        fill_rect(
-            &mut pixels,
-            width,
-            height,
-            mx,
-            marker_top,
-            mx + 2,
-            marker_bottom,
-            [255, 255, 255, 220],
-        );
-    }
-    if let Some(x) = model.out_point_marker_x {
-        let mx = (x - 1).clamp(0, width as i32 - 2) as u32;
-        fill_rect(
-            &mut pixels,
-            width,
-            height,
-            mx,
-            marker_top,
-            mx + 2,
-            marker_bottom,
-            [255, 255, 255, 220],
-        );
-    }
-
-    // Handle — anti-aliased white circle.
-    let handle_cx = model
-        .handle_center_x
-        .clamp(layout.track_left, layout.track_right) as u32;
-    fill_circle_aa(
-        &mut pixels,
-        width,
-        height,
-        handle_cx as f32,
-        track_cy as f32,
-        6.0,
-        [255, 255, 255, 255],
-    );
+        mut pixels,
+    } = shapes;
 
     let left_label = match model.preview_position_secs {
         Some(preview_secs) if preview_secs != model.current_position_secs => format!(
@@ -4132,169 +4072,40 @@ fn draw_timeline_label(
     Ok(())
 }
 
-fn fill_rect(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    left: u32,
-    top: u32,
-    right: u32,
-    bottom: u32,
-    color: [u8; 4],
-) {
-    let left = left.min(width);
-    let right = right.min(width);
-    let top = top.min(height);
-    let bottom = bottom.min(height);
-
-    for y in top..bottom {
-        for x in left..right {
-            let offset = ((y * width + x) * 4) as usize;
-            pixels[offset..offset + 4].copy_from_slice(&color);
-        }
-    }
-}
-
-fn fill_circle_aa(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    color: [u8; 4],
-) {
-    let r_outer = radius + 0.5;
-    let min_x = (cx - r_outer).floor().max(0.0) as u32;
-    let max_x = ((cx + r_outer).ceil() as u32).min(width.saturating_sub(1));
-    let min_y = (cy - r_outer).floor().max(0.0) as u32;
-    let max_y = ((cy + r_outer).ceil() as u32).min(height.saturating_sub(1));
-
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            let dx = x as f32 + 0.5 - cx;
-            let dy = y as f32 + 0.5 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            if dist > r_outer {
-                continue;
-            }
-            // Smooth edge: 1px anti-alias fringe.
-            let coverage = (radius - dist + 0.5).clamp(0.0, 1.0);
-            let alpha = (color[3] as f32 * coverage) as u8;
-            let offset = ((y * width + x) * 4) as usize;
-            blend_pixel(
-                &mut pixels[offset..offset + 4],
-                [color[0], color[1], color[2], alpha],
-            );
-        }
-    }
-}
-
-fn fill_rounded_rect(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    left: u32,
-    top: u32,
-    right: u32,
-    bottom: u32,
-    radius: f32,
-    color: [u8; 4],
-) {
-    let left = left.min(width);
-    let right = right.min(width);
-    let top = top.min(height);
-    let bottom = bottom.min(height);
-    let rect_h = bottom.saturating_sub(top) as f32;
-    let rect_w = right.saturating_sub(left) as f32;
-    let r = radius.min(rect_h / 2.0).min(rect_w / 2.0);
-
-    let min_x = left.saturating_sub(1);
-    let max_x = (right + 1).min(width);
-    let min_y = top.saturating_sub(1);
-    let max_y = (bottom + 1).min(height);
-
-    for y in min_y..max_y {
-        for x in min_x..max_x {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-
-            let inner_x = px >= left as f32 + r && px <= right as f32 - r;
-            let inner_y = py >= top as f32 + r && py <= bottom as f32 - r;
-
-            let coverage = if inner_x && inner_y {
-                // Fully inside.
-                1.0
-            } else if inner_x {
-                // Top or bottom edge.
-                let cy = if py < top as f32 + r {
-                    top as f32 + r
-                } else {
-                    bottom as f32 - r
-                };
-                let dist = (py - cy).abs();
-                (r - dist + 0.5).clamp(0.0, 1.0)
-            } else if inner_y {
-                // Left or right edge.
-                let cx = if px < left as f32 + r {
-                    left as f32 + r
-                } else {
-                    right as f32 - r
-                };
-                let dist = (px - cx).abs();
-                (r - dist + 0.5).clamp(0.0, 1.0)
-            } else {
-                // Corner — distance from corner circle center.
-                let cx = if px < left as f32 + r {
-                    left as f32 + r
-                } else {
-                    right as f32 - r
-                };
-                let cy = if py < top as f32 + r {
-                    top as f32 + r
-                } else {
-                    bottom as f32 - r
-                };
-                let dist = ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt();
-                (r - dist + 0.5).clamp(0.0, 1.0)
-            };
-
-            if coverage <= 0.0 {
-                continue;
-            }
-
-            let alpha = (color[3] as f32 * coverage) as u8;
-            let offset = ((y * width + x) * 4) as usize;
-            blend_pixel(
-                &mut pixels[offset..offset + 4],
-                [color[0], color[1], color[2], alpha],
-            );
-        }
-    }
-}
-
-fn blend_pixel(dest: &mut [u8], src: [u8; 4]) {
-    let sa = src[3] as u32;
-    if sa == 0 {
-        return;
-    }
-    if sa == 255 || dest[3] == 0 {
-        dest.copy_from_slice(&src);
-        return;
-    }
-    let da = dest[3] as u32;
-    let out_a = sa + da - (sa * da / 255);
-    if out_a == 0 {
-        return;
-    }
-    for i in 0..3 {
-        dest[i] = ((src[i] as u32 * sa + dest[i] as u32 * da * (255 - sa) / 255) / out_a) as u8;
-    }
-    dest[3] = out_a as u8;
-}
-
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn nv12_buffer_check_accepts_an_exactly_sized_frame() {
+        // 4:2:0 => stride * height * 3/2.
+        assert_eq!(check_nv12_buffer(64, 64, 64 * 64 * 3 / 2, 64), Ok(()));
+    }
+
+    #[test]
+    fn nv12_buffer_check_accepts_padded_stride_and_oversized_buffers() {
+        assert_eq!(check_nv12_buffer(60, 64, 64 * 64 * 3 / 2, 64), Ok(()));
+        assert_eq!(check_nv12_buffer(64, 64, 1 << 20, 64), Ok(()));
+    }
+
+    #[test]
+    fn nv12_buffer_check_rejects_a_short_buffer() {
+        // One byte short of the UV plane: CreateTexture2D would read past the end.
+        let full = 64 * 64 * 3 / 2;
+        assert!(check_nv12_buffer(64, 64, full - 1, 64).is_err());
+        assert!(check_nv12_buffer(64, 64, 0, 64).is_err());
+        // A Y plane alone is not enough.
+        assert!(check_nv12_buffer(64, 64, 64 * 64, 64).is_err());
+    }
+
+    #[test]
+    fn nv12_buffer_check_rejects_a_stride_narrower_than_the_frame() {
+        assert!(check_nv12_buffer(64, 64, 1 << 20, 32).is_err());
+    }
+
+    #[test]
+    fn nv12_buffer_check_reports_overflow_instead_of_wrapping() {
+        assert!(check_nv12_buffer(4, u32::MAX, usize::MAX, usize::MAX).is_err());
+    }
     use super::*;
     use crate::render::hdr::{HdrShaderOutput, HdrToneMapSignal, HdrTransfer};
 

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 /// Latency-oriented queue defaults from the architecture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueDefaults {
