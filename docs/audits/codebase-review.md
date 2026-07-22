@@ -201,7 +201,7 @@ Labels: **CD** confirmed defect · **HR** high-confidence risk · **MI** maintai
 | L6 | Low | MI | Redundant double-check on the audio control channel | `app/session.rs:1311-1314` |
 | L7 | Low | OI | `recent.rs` persists via non-atomic truncate-then-write | `app/recent.rs:125` |
 | L8 | Low | MI | Stale doc listings: `TECH_DEBT.md` file table, `ARCHITECTURE.md §5` repo shape | both |
-| L9 | Low | MI | `SessionEvent::AudioEndpointChanged` is charter-specified but never constructed; endpoint recovery is reactive-only | `app/events.rs:86`, `ARCHITECTURE.md:268` |
+| ~~L9~~ | Low | MI | ~~charter-specified `AudioEndpointChanged` never constructed; recovery reactive-only~~ — **DONE**: `IMMNotificationClient` added, polled at tick; charter amended | `ffi/wasapi.rs`, `ARCHITECTURE.md` §19 |
 
 ---
 

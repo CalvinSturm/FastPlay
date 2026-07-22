@@ -82,17 +82,4 @@ pub enum SessionEvent {
         seek_gen: SeekGeneration,
         op_id: OperationId,
     },
-    /// Specified by `ARCHITECTURE.md` §7 and assigned to workers by §6 ("audio
-    /// endpoint recovery detection"), but nothing constructs it yet: no
-    /// `IMMNotificationClient` is registered anywhere, so endpoint changes are
-    /// only noticed *reactively*, when a WASAPI write fails in
-    /// `submit_due_audio` and calls `recover_audio_endpoint` directly. Kept
-    /// because the charter is locked and the handler arm is live; delete only
-    /// alongside a charter revision.
-    #[allow(dead_code)]
-    AudioEndpointChanged {
-        open_gen: OpenGeneration,
-        seek_gen: SeekGeneration,
-        op_id: OperationId,
-    },
 }

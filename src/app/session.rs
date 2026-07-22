@@ -30,6 +30,7 @@ use crate::{
         d3d11::BgraFrameCapture,
         dxgi::{ModalTickTarget, NativeWindowInner, ResizeRequest},
         ffmpeg::{self, AudioDecodeSession, DecodeSession, StreamStatus},
+        wasapi::DefaultRenderEndpointWatch,
     },
     media::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
@@ -161,6 +162,14 @@ pub struct PlaybackSession {
     /// Opt-in audio-pipeline diagnostics (env `FASTPLAY_AUDIO_DIAG`). No-op when
     /// disabled; never on the always-on path.
     audio_diag: AudioDiag,
+    /// Registration for "Windows switched the default render endpoint".
+    ///
+    /// `None` when the registration failed, in which case the player degrades to
+    /// the reactive path alone — which still covers device *removal*, just not a
+    /// default *change* (see [`DefaultRenderEndpointWatch`]). Polled in `tick`
+    /// on the UI thread, exactly like the window's resize request; the COM
+    /// callback itself only sets a flag.
+    audio_endpoint_watch: Option<DefaultRenderEndpointWatch>,
 }
 
 /// A one-shot, edge-triggered "playback just ended" latch.
@@ -255,6 +264,16 @@ impl PlaybackSession {
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
             audio_diag: AudioDiag::from_env(),
+            audio_endpoint_watch: match DefaultRenderEndpointWatch::install() {
+                Ok(watch) => Some(watch),
+                Err(error) => {
+                    // Non-fatal: without it, a default-endpoint *change* goes
+                    // unnoticed until something else fails, but removal
+                    // recovery and normal playback are unaffected.
+                    flog!("[audio_endpoint] watch unavailable (non-fatal): {error}");
+                    None
+                }
+            },
         })
     }
 
@@ -792,6 +811,18 @@ impl PlaybackSession {
                 self.handle_resize(size, now)?;
             }
 
+            // Windows switched the default render endpoint (headphones plugged
+            // in, output changed in the volume flyout, Bluetooth connected).
+            // Checked before submitting audio so nothing more is written to the
+            // endpoint the user just switched away from.
+            if self
+                .audio_endpoint_watch
+                .as_ref()
+                .is_some_and(|watch| watch.take_changed())
+            {
+                self.switch_to_new_default_endpoint(now)?;
+            }
+
             if self.audio_diag.enabled() {
                 let t = Instant::now();
                 self.submit_due_audio(now)?;
@@ -1207,16 +1238,6 @@ impl PlaybackSession {
                     self.decode_thread.worker_count()
                 );
                 self.recover_device(now, "worker reported device-lost".to_string())?;
-            }
-            SessionEvent::AudioEndpointChanged {
-                open_gen,
-                seek_gen,
-                op_id,
-            } => {
-                if !self.is_current_frame(open_gen, seek_gen, op_id) {
-                    return Ok(());
-                }
-                self.recover_audio_endpoint(now, "audio endpoint changed event".to_string())?;
             }
         }
 
@@ -2568,6 +2589,33 @@ impl PlaybackSession {
             .unwrap_or(normalized_position)
     }
 
+    /// Move playback to the new default render endpoint.
+    ///
+    /// Reuses [`Self::recover_audio_endpoint`], which rebuilds the sink *and*
+    /// respawns the decode workers. Both are needed: the workers resample to the
+    /// sink's mix format, captured when they spawn, and the new device may run
+    /// at a different rate or channel count than the old one. Rebuilding the
+    /// sink alone would leave the audio worker resampling to the wrong format.
+    fn switch_to_new_default_endpoint(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match endpoint_switch_for(self.state) {
+            EndpointSwitch::Ignore => Ok(()),
+            EndpointSwitch::Restart { stay_paused } => {
+                flog!("[audio_endpoint] default render endpoint changed; restarting on it");
+                // `recover_audio_endpoint` restarts in `Seeking`, which would
+                // resume a paused player. Requesting a pause-after-seek makes
+                // the first frame land paused, exactly as a scrub-while-paused
+                // does.
+                if stay_paused {
+                    self.pause_after_seek = true;
+                }
+                self.recover_audio_endpoint(now, "default render endpoint changed".to_string())
+            }
+        }
+    }
+
     fn recover_audio_endpoint(
         &mut self,
         now: Instant,
@@ -2812,6 +2860,37 @@ fn send_to_ui(
     }
 }
 
+/// What a default-endpoint switch should do from a given playback state.
+///
+/// Pure so the policy is testable without a device: the switch itself is COM
+/// plumbing, but *when* to act on it is a decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndpointSwitch {
+    /// Nothing is being rendered, so there is no stream to move. The next open
+    /// builds its sink from the (new) default through the normal path.
+    Ignore,
+    /// Restart on the new endpoint. `stay_paused` keeps a paused or finished
+    /// player from resuming just because the user changed output device.
+    Restart { stay_paused: bool },
+}
+
+fn endpoint_switch_for(state: PlaybackState) -> EndpointSwitch {
+    match state {
+        // Idle has no source; Error is already torn down and shows the idle
+        // overlay. Both build a fresh sink whenever a file is next opened.
+        PlaybackState::Idle | PlaybackState::Error => EndpointSwitch::Ignore,
+        // Paused and Ended must not start playing because output changed.
+        PlaybackState::Paused | PlaybackState::Ended => {
+            EndpointSwitch::Restart { stay_paused: true }
+        }
+        PlaybackState::Opening
+        | PlaybackState::Seeking
+        | PlaybackState::Priming
+        | PlaybackState::Playing
+        | PlaybackState::Draining => EndpointSwitch::Restart { stay_paused: false },
+    }
+}
+
 fn screenshot_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(profile) = std::env::var_os("USERPROFILE") {
         return Ok(PathBuf::from(profile).join("Pictures").join("FastPlay"));
@@ -2881,8 +2960,55 @@ fn media_time_origin(first_pts: Duration, start_position: Duration) -> Duration 
 
 #[cfg(test)]
 mod tests {
-    use super::{media_time_origin, EndedSignal};
+    use super::{endpoint_switch_for, media_time_origin, EndedSignal, EndpointSwitch};
+    use crate::app::state::PlaybackState;
     use std::time::Duration;
+
+    #[test]
+    fn endpoint_switch_ignores_states_with_nothing_playing() {
+        // Idle has no source and Error is already torn down; both open their
+        // next file through the normal path, which builds a sink from whatever
+        // the default is by then.
+        assert_eq!(
+            endpoint_switch_for(PlaybackState::Idle),
+            EndpointSwitch::Ignore
+        );
+        assert_eq!(
+            endpoint_switch_for(PlaybackState::Error),
+            EndpointSwitch::Ignore
+        );
+    }
+
+    #[test]
+    fn endpoint_switch_restarts_active_playback_without_pausing_it() {
+        for state in [
+            PlaybackState::Opening,
+            PlaybackState::Seeking,
+            PlaybackState::Priming,
+            PlaybackState::Playing,
+            PlaybackState::Draining,
+        ] {
+            assert_eq!(
+                endpoint_switch_for(state),
+                EndpointSwitch::Restart { stay_paused: false },
+                "{state:?} is active playback and must keep playing"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_switch_does_not_resume_a_paused_or_finished_player() {
+        // Changing output device must never start playback the user stopped.
+        // The restart still happens (the sink and workers must move to the new
+        // endpoint), but it lands paused.
+        for state in [PlaybackState::Paused, PlaybackState::Ended] {
+            assert_eq!(
+                endpoint_switch_for(state),
+                EndpointSwitch::Restart { stay_paused: true },
+                "{state:?} must not start playing because output changed"
+            );
+        }
+    }
 
     #[test]
     fn ended_signal_fires_once_on_latch() {
