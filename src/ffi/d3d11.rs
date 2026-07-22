@@ -2357,6 +2357,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
                 "software upload requires non-zero dimensions",
             )));
         }
+        // `CreateTexture2D` reads `pSysMem` according to the descriptor and the
+        // pitch, not according to the slice length, so a short buffer is an
+        // out-of-bounds read inside the driver rather than a Rust panic. The
+        // caller (`SoftwareVideoConverter::convert`) sizes it correctly, but
+        // this is a `pub(crate)` entry point handed a raw pointer — check the
+        // invariant here rather than trusting every future caller.
+        //
+        if let Err(problem) = check_nv12_buffer(width, height, data.len(), stride) {
+            return Err(Box::new(D3D11Error(problem)));
+        }
         // Guard: bail out if the device was removed (GPU TDR) before issuing
         // any GPU commands.  The worker thread calls this from background
         // threads and would otherwise crash inside d3d11.dll.
@@ -2589,6 +2599,40 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
 /// half in both axes. Normalized texture coordinates address both, so the
 /// chroma view's bilinear filter *is* the chroma upsampler.
 use crate::render::overlay_raster::fill_rect;
+
+/// Validate that `len` bytes at `stride` really do hold a `width` x `height`
+/// NV12 frame.
+///
+/// `CreateTexture2D` reads `pSysMem` according to the texture descriptor and the
+/// pitch, never the slice length, so a short buffer is an out-of-bounds read
+/// inside the driver rather than a Rust panic. Pure and separate from the
+/// device call so the arithmetic is testable.
+///
+/// NV12 is planar 4:2:0: a full-resolution Y plane of `stride * height`, then an
+/// interleaved UV plane at half vertical resolution.
+fn check_nv12_buffer(
+    width: u32,
+    height: u32,
+    len: usize,
+    stride: usize,
+) -> Result<(), &'static str> {
+    if stride < width as usize {
+        return Err("NV12 upload stride is narrower than the frame width");
+    }
+    let y_plane = stride
+        .checked_mul(height as usize)
+        .ok_or("NV12 upload size overflowed")?;
+    let uv_plane = stride
+        .checked_mul(height as usize / 2)
+        .ok_or("NV12 upload size overflowed")?;
+    let required = y_plane
+        .checked_add(uv_plane)
+        .ok_or("NV12 upload size overflowed")?;
+    if len < required {
+        return Err("NV12 upload buffer is smaller than stride x height x 3/2");
+    }
+    Ok(())
+}
 
 fn plane_srv_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT), Box<dyn Error>> {
     if format == DXGI_FORMAT_P010 {
@@ -4023,6 +4067,38 @@ fn draw_timeline_label(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn nv12_buffer_check_accepts_an_exactly_sized_frame() {
+        // 4:2:0 => stride * height * 3/2.
+        assert_eq!(check_nv12_buffer(64, 64, 64 * 64 * 3 / 2, 64), Ok(()));
+    }
+
+    #[test]
+    fn nv12_buffer_check_accepts_padded_stride_and_oversized_buffers() {
+        assert_eq!(check_nv12_buffer(60, 64, 64 * 64 * 3 / 2, 64), Ok(()));
+        assert_eq!(check_nv12_buffer(64, 64, 1 << 20, 64), Ok(()));
+    }
+
+    #[test]
+    fn nv12_buffer_check_rejects_a_short_buffer() {
+        // One byte short of the UV plane: CreateTexture2D would read past the end.
+        let full = 64 * 64 * 3 / 2;
+        assert!(check_nv12_buffer(64, 64, full - 1, 64).is_err());
+        assert!(check_nv12_buffer(64, 64, 0, 64).is_err());
+        // A Y plane alone is not enough.
+        assert!(check_nv12_buffer(64, 64, 64 * 64, 64).is_err());
+    }
+
+    #[test]
+    fn nv12_buffer_check_rejects_a_stride_narrower_than_the_frame() {
+        assert!(check_nv12_buffer(64, 64, 1 << 20, 32).is_err());
+    }
+
+    #[test]
+    fn nv12_buffer_check_reports_overflow_instead_of_wrapping() {
+        assert!(check_nv12_buffer(4, u32::MAX, usize::MAX, usize::MAX).is_err());
+    }
     use super::*;
     use crate::render::hdr::{HdrShaderOutput, HdrToneMapSignal, HdrTransfer};
 

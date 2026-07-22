@@ -100,6 +100,13 @@ impl RecentFiles {
     }
 
     /// Persist the history, best-effort (errors are ignored, like volume).
+    ///
+    /// Writes a sibling temporary file and renames it over the real one. A plain
+    /// `fs::write` truncates first, so a crash or power loss between the
+    /// truncate and the write leaves an empty or half-written history — and this
+    /// is called on the way out of the process, where a hard exit is the norm
+    /// rather than the exception. `fs::rename` replaces an existing file
+    /// atomically on Windows for same-volume paths, which these always are.
     pub fn save(&self) {
         let Some(path) = storage_path() else {
             return;
@@ -117,7 +124,20 @@ impl RecentFiles {
                 e.path.to_string_lossy()
             ));
         }
-        let _ = fs::write(&path, out);
+
+        let temp = path.with_extension("tsv.tmp");
+        if fs::write(&temp, &out).is_err() {
+            // Could not stage the replacement; leave the existing history alone
+            // rather than destroying it.
+            let _ = fs::remove_file(&temp);
+            return;
+        }
+        if fs::rename(&temp, &path).is_err() {
+            // Rename failed (e.g. the target is locked). Fall back to a direct
+            // write so the history still updates, and clean up the staging file.
+            let _ = fs::write(&path, &out);
+            let _ = fs::remove_file(&temp);
+        }
     }
 
     pub fn entries(&self) -> &[RecentEntry] {
