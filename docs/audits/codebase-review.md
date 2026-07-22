@@ -513,7 +513,16 @@ Each stage is one small, reviewable PR. Full validation (`fmt` / `clippy -D warn
   proven-in-production loop.
 - **Depends on:** nothing.
 
-### Stage 2 — Extract the input keymap · **Small** · *highest value-per-line in the plan*
+### Stage 2 — Extract the input keymap · **DONE 2026-07-21** · Small · *highest value-per-line in the plan*
+
+> Implemented as specified. `platform/input.rs` gained `command_for_key(vk, ctrl,
+> shift, is_repeat) -> Option<InputEvent>` and `command_for_key_release(vk)`,
+> both pure; `window_proc`'s `WM_KEYDOWN`/`WM_KEYUP` arms shrank from 218 lines
+> to 19 and now only decode modifier state and dispatch. `ffi/dxgi.rs` went
+> 2,295 → 2,096 lines with its `unsafe` block/fn count unchanged at 64, so no
+> unsafe responsibility moved. 48 characterization rows plus 5 property tests
+> (207 tests total, up from 201). Verified by mutation: reintroducing the
+> Ctrl+S fall-through fails three of them. No shortcut behavior changed.
 
 
 - **Problem:** M2, M5, and the class of bug M1 belongs to.
