@@ -154,21 +154,44 @@ three real fixes. A new violation of any of those categories outside the seam
 that needs it now fails CI. See
 [`audits/codebase-review.md`](./audits/codebase-review.md) §10 Stage 5.
 
-### R7 — Audio endpoint-change detection was never implemented — **open**
+### R7 — Audio endpoint-change detection — **resolved** (2026-07-22)
 
-Surfaced by R5's pay-down. `ARCHITECTURE.md` §7 specifies a
-`SessionEvent::AudioEndpointChanged` and §6 assigns "audio endpoint recovery
-detection" to the workers. The event type exists and `PlaybackSession` has a
-live handler for it, but **nothing constructs it**: no `IMMNotificationClient`
-is registered anywhere in the crate.
+Surfaced by R5's pay-down: the charter specified a
+`SessionEvent::AudioEndpointChanged` that **nothing constructed**. Investigating
+it showed the gap was real but the specified shape was wrong, so both were
+fixed.
 
-Endpoint changes are therefore only noticed *reactively* — when a WASAPI write
-fails, `submit_due_audio` calls `recover_audio_endpoint` directly. In practice
-recovery does happen, one failed write later. The charter's proactive path does
-not exist. The event is kept (with a `dead_code` allow explaining exactly this)
-because the charter is locked; closing the gap means either implementing the
-notification client or revising `ARCHITECTURE.md`, and that is a scope decision,
-not cleanup.
+There are two cases, and only one of them produces an error to react to:
+
+- **The device in use goes away** (unplugged, disabled). WASAPI fails with
+  `AUDCLNT_E_DEVICE_INVALIDATED`, `submit_due_audio` sees it and calls
+  `recover_audio_endpoint`. This already worked, within one tick.
+- **The default moves to another device** (headphones plugged in, output changed
+  in the volume flyout, Bluetooth connected). An `IAudioClient` is bound to one
+  `IMMDevice` for life, so every call keeps succeeding and audio keeps playing
+  out of the *old* endpoint. No error, ever. No reactive scheme can see this,
+  and FastPlay kept rendering to the old device indefinitely.
+
+Case 2 is now handled by an `IMMNotificationClient` registered at session
+construction. It is **not** a `SessionEvent`: that enum carries worker output and
+is generation-stamped, and an endpoint change is neither — stamping it would have
+made a change arriving mid-seek get rejected as stale and lost. It is polled at
+`tick` instead, the same shape as a window resize request. `ARCHITECTURE.md` §7,
+§6 and §19 were amended to describe this.
+
+### R8 — File-dialog COM initialization ownership — **open**
+
+`platform/open_dialog.rs` defensively calls `CoInitializeEx` before constructing
+the native file dialog, while window creation separately calls `OleInitialize`
+for OLE drag-and-drop. The dialog call is not paired locally with
+`CoUninitialize`, and the UI thread's overall COM initialization balance and
+ownership have not been audited as one lifecycle.
+
+This is deliberately separate from the endpoint-notification lifetime fix in
+`ffi/wasapi.rs`. A focused follow-up should inventory the UI thread's
+`OleInitialize` / `CoInitializeEx` calls, define the single ownership strategy,
+and balance every successful initialization without changing file-dialog or
+drag-and-drop behavior.
 
 ---
 
