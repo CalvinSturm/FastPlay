@@ -2576,11 +2576,17 @@ impl PlaybackSession {
     }
 
     fn desired_restart_position(&self, now: Instant) -> Duration {
-        self.absolute_media_position(
-            self.pending_seek_target
-                .map(SeekTarget::position)
-                .unwrap_or_else(|| self.snapshot(now).position),
-        )
+        self.absolute_media_position(self.normalized_restart_position(now))
+    }
+
+    fn normalized_restart_position(&self, now: Instant) -> Duration {
+        let position = self
+            .pending_seek_target
+            .map(SeekTarget::position)
+            .unwrap_or_else(|| self.snapshot(now).position);
+        self.media_duration
+            .map(|duration| position.min(duration))
+            .unwrap_or(position)
     }
 
     fn absolute_media_position(&self, normalized_position: Duration) -> Duration {
@@ -2624,7 +2630,8 @@ impl PlaybackSession {
         let Some(source) = self.current_source.clone() else {
             return Ok(());
         };
-        let restart_target = self.desired_restart_position(now);
+        let restart_position = self.normalized_restart_position(now);
+        let restart_target = self.absolute_media_position(restart_position);
         let open_gen = self.generations.open();
         let seek_gen = self.generations.bump_seek();
         let op_id = self.operation_clock.next();
@@ -2640,7 +2647,17 @@ impl PlaybackSession {
             true,
             false,
         )?;
-        self.overlay.subtitle_clock_base = Some(restart_target);
+        // This is a seek-shaped restart even though it uses `begin_operation`
+        // to rebuild the sink and resampler. Keep the normalized target visible
+        // until a current-generation frame lands; paused/ended recovery then
+        // freezes at this exact position instead of falling through to a live
+        // clock, while active playback clears it through the ordinary settled
+        // seek path.
+        self.pending_seek_target = Some(SeekTarget::new(restart_position));
+        self.seek_discard_before_pts = Some(restart_target);
+        self.metrics.note_seek_pending();
+        self.seek_frame_presented_since_request = false;
+        self.overlay.subtitle_clock_base = Some(restart_position);
         Ok(())
     }
 
