@@ -273,6 +273,10 @@ a quarter of the largest file in the repo is not FFI at all, and it has **zero d
   through `WM_GETMINMAXINFO`. They are recorded as latent, not as bugs, and are deliberately
   **not** being fixed defensively — adding clamps would mask a real invariant violation if the
   minimum-size guarantee ever broke. The right fix, if the layer moves, is a debug assertion.
+  **Resolved that way in Stage 3:** `render::overlay_raster::MIN_TIMELINE_WIDTH_PX` (32px) now
+  carries a `debug_assert!` explaining why the enforced 640px minimum makes it unreachable, so
+  a future change that breaks the guarantee fails loudly in debug rather than rendering a
+  degenerate overlay.
 
 **What should stay together:** the GDI text path and the D3D11 texture upload.
 
@@ -561,7 +565,7 @@ Each stage is one small, reviewable PR. Full validation (`fmt` / `clippy -D warn
   the characterization table must be written *first* and must be exhaustive.
 - **Depends on:** Stage 1 (avoids conflicting edits in `window_proc`).
 
-### Stage 3 — Extract the pure overlay rasterizer · **Medium**
+### Stage 3 — Extract the pure overlay rasterizer · **DONE 2026-07-21** · Medium
 
 - **Problem:** M3, M5, L2.
 - **Files/symbols:** new `render/overlay_raster.rs` taking `fill_rect`, `fill_circle_aa`,
@@ -575,9 +579,15 @@ Each stage is one small, reviewable PR. Full validation (`fmt` / `clippy -D warn
   `fill_rounded_rect` corner coverage monotonicity; `render_timeline_bitmap` played-width and
   marker positions across representative viewports. Add a `debug_assert!` for the L2 minimum
   width rather than a silent clamp.
-- **Behavioural impact:** none. Byte-identical bitmaps are the acceptance criterion.
-- **Regression risk:** Medium — overlay rendering is user-visible. Verify with
-  `bench/verify-overlay-hdr.ps1` and `bench/verify-subtitles-hdr.ps1`.
+- **Behavioural impact:** none, and this was *proved* rather than argued. A throwaway
+  equivalence harness lifted the pre-refactor shape code verbatim out of `be68f9d` and
+  compared it against the extracted version across **1,500 model permutations** (5 widths ×
+  5 played spans × 5 handle positions × 6 marker configurations × 2 preview/loop states):
+  all byte-identical, including the degenerate and out-of-range cases. The harness was then
+  deleted rather than committed — it is a frozen duplicate of code that now has one home.
+- **Regression risk:** realized as none. 210 → 230 tests. `ffi/d3d11.rs` 4,594 → 4,322 lines
+  with its `unsafe` block/fn count unchanged at 40; `render/overlay_raster.rs` contains no
+  `unsafe` and no Win32.
 - **Depends on:** Stage 1.
 
 ### Stage 4 — De-duplicate the worker plumbing · **Small**

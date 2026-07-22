@@ -20,7 +20,7 @@ Single Rust crate, Windows-only, organized into the modules described in
 - `app/` — coordinator (`session.rs`), state, events, commands, overlays, timeline UI.
 - `playback/` — clock, metrics, queues, generations, decode control.
 - `media/` — source, video, audio, seek, subtitle.
-- `render/` — presenter, swapchain, surface registry, timeline.
+- `render/` — presenter, swapchain, surface registry, timeline, HDR, overlay raster.
 - `audio/` — WASAPI sink.
 - `platform/` — Win32 window, input, file dialog.
 - `ffi/` — the four unsafe seams: `ffmpeg`, `d3d11`, `dxgi`, `wasapi`.
@@ -37,9 +37,9 @@ Refreshed 2026-07-21 (see [`audits/codebase-review.md`](./audits/codebase-review
 
 | File | Lines | Role |
 |------|------:|------|
-| `src/ffi/d3d11.rs` | 4594 | D3D11 FFI seam (inherently large; unsafe is correctly boxed here). ~1240 of those lines are a *pure* CPU overlay rasterizer that does not belong in the seam |
+| `src/ffi/d3d11.rs` | 4322 | D3D11 FFI seam (inherently large; unsafe is correctly boxed here). The pure geometry/blend layer moved out to `render/overlay_raster.rs` in Stage 3; the GDI text path correctly stays |
 | `src/app/session.rs` | 2892 | Coordinator; still large, but focused state/helpers have been extracted |
-| `src/ffi/dxgi.rs` | 2295 | DXGI FFI seam. `window_proc` alone is 626 lines and carries the whole input keymap |
+| `src/ffi/dxgi.rs` | 2096 | DXGI FFI seam. The input keymap moved out to `platform/input.rs` in Stage 2 |
 | `src/ffi/ffmpeg.rs` | 2190 | FFmpeg FFI seam |
 | `src/render/hdr.rs` | 1516 | Pure HDR classification and path decision — 736 lines of code, 780 of tests (41 tests). Not debt; the model to follow |
 
@@ -106,7 +106,7 @@ historical context, not current guidance.
 - `cargo clippy --all-targets -- -D warnings` — **clean**, but see R5 below: the
   run is clean *against a crate-wide allow-list*, which is a weaker signal than
   this section previously claimed.
-- `cargo test --all-targets` — **201 passing, 0 failing** (2026-07-21).
+- `cargo test --all-targets` — **230 passing, 0 failing** (2026-07-21).
 
 CI runs all three on `windows-latest`.
 
