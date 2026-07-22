@@ -179,6 +179,20 @@ made a change arriving mid-seek get rejected as stale and lost. It is polled at
 `tick` instead, the same shape as a window resize request. `ARCHITECTURE.md` §7,
 §6 and §19 were amended to describe this.
 
+### R8 — File-dialog COM initialization ownership — **open**
+
+`platform/open_dialog.rs` defensively calls `CoInitializeEx` before constructing
+the native file dialog, while window creation separately calls `OleInitialize`
+for OLE drag-and-drop. The dialog call is not paired locally with
+`CoUninitialize`, and the UI thread's overall COM initialization balance and
+ownership have not been audited as one lifecycle.
+
+This is deliberately separate from the endpoint-notification lifetime fix in
+`ffi/wasapi.rs`. A focused follow-up should inventory the UI thread's
+`OleInitialize` / `CoInitializeEx` calls, define the single ownership strategy,
+and balance every successful initialization without changing file-dialog or
+drag-and-drop behavior.
+
 ---
 
 ## 4. Recommended next refactors (summary)
