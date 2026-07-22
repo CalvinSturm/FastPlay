@@ -115,7 +115,7 @@ CI runs all three on `windows-latest`.
 This section previously stated there was "no baseline allow-list" and no
 `#![allow(...)]` debt. That was wrong, and the codebase review corrected it:
 
-- `src/main.rs:6-17` disables **13 clippy categories crate-wide**. Several are
+- `src/main.rs:6-17` disables **12 clippy categories crate-wide**. Several are
   legitimate for a Win32/FFI codebase (`too_many_arguments`,
   `upper_case_acronyms`, `useless_transmute`, `manual_c_str_literals`); the rest
   (`type_complexity`, `unnecessary_cast`, `explicit_auto_deref`,
@@ -163,7 +163,7 @@ candidates, in value order:
 4. R5 above (lint allow-list).
 5. Extend the worker-liveness discipline to the audio handle (see R6).
 
-### R6 — Worker liveness — **partially paid down** (2026-07-21)
+### R6 — Worker liveness — **paid down** (2026-07-21)
 
 A `DecodeControl` is an `Arc` that deliberately outlives its worker thread, so
 holding one is *not* evidence that a worker is alive. This has now produced two
@@ -172,12 +172,22 @@ during a decode-worker reopen cancelled the open, the worker exited, and the
 coordinator kept sending seeks to a channel nobody was reading, so video never
 returned for that file).
 
-The video path is now protected twice: `spawn_decode_thread` retries a cancelled
-open instead of exiting, and `DecodeThreadHandle::serves` requires a live worker
-count. The **audio** handle still checks only `control().is_some()`
-(`session.rs`, `execute_seek`), so a transient audio *open error* — as opposed to
-a cancellation, which is retried — still silences audio for the rest of the file.
-Low severity, but it is the same hazard and should get the same gate.
+Both handles now go through `DecodeThreadHandle::seek_delivery`, which returns a
+three-way `SeekDelivery` rather than a boolean. The third state is load-bearing:
+a first attempt gated only on liveness (`worker_count() > 0`) fixed the wedge but
+introduced a performance regression, because "no worker is running" has two
+causes that need opposite responses.
+
+- `InPlace` — a live worker with the right preference; send it a seek command.
+- `Respawn` — the worker died on an error or cancelled open and the file still
+  has a stream of that kind. Not respawning is the original bug.
+- `Retired` — the worker exited because the file has no stream of its kind at
+  all (`NoVideoStream` / `NoAudioStream`). Respawning here reopens and
+  re-demuxes the file on *every* seek to rediscover the same absence. Measured
+  on an audio-only `.m4a` with 8 seeks: 9 video-worker spawns before, 1 after.
+
+The workers set the retirement flag immediately before their permanent-exit
+returns; `prepare_spawn` clears it, so the verdict never outlives its open.
 
 ---
 

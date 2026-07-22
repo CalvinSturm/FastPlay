@@ -12,13 +12,39 @@
 //! closure, calls [`DecodeThreadHandle::prepare_spawn`] to register it, then
 //! [`DecodeThreadHandle::set_join`] with the spawned handle.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::media::video::VideoDecodePreference;
 use crate::playback::decode_control::DecodeControl;
+
+/// How a seek should reach the worker behind a [`DecodeThreadHandle`].
+///
+/// Three-way rather than a boolean because "no worker is running" has two very
+/// different causes, and treating them alike costs either correctness or
+/// performance:
+///
+/// - the worker died on an error or a cancelled open, and the file still has a
+///   stream for it — it must be respawned, or that stream is dead for the rest
+///   of the file (the bug fixed for audio in `b603f6f` and for video alongside
+///   this type); versus
+/// - the worker exited because the file has nothing for it to decode at all —
+///   an audio-only file has no video worker to run. Respawning there re-opens
+///   and re-demuxes the file on *every* seek just to rediscover the same
+///   absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeekDelivery {
+    /// A live worker is serving the current preference: send it an in-place
+    /// seek command rather than reopening the file.
+    InPlace,
+    /// No usable worker: tear down whatever is registered and spawn a fresh one.
+    Respawn,
+    /// The worker retired because this file has no stream of its kind. Do
+    /// nothing — there is nothing to seek and nothing worth respawning.
+    Retired,
+}
 
 /// Upper bound on how long a blocking teardown waits for the decode worker to
 /// release its resources after cancellation. The FFmpeg interrupt callback
@@ -38,6 +64,13 @@ pub struct DecodeThreadHandle {
     /// this preference reuses the thread; a change (HW↔SW) respawns it.
     preference: Option<VideoDecodePreference>,
     active_worker_count: Arc<AtomicU32>,
+    /// Set by a worker that is exiting because the file has no stream of its
+    /// kind (`NoVideoStream` / `NoAudioStream`) — a permanent condition for this
+    /// open, as opposed to the transient exits that warrant a respawn. Cleared
+    /// by [`prepare_spawn`], so every new worker starts un-retired.
+    ///
+    /// [`prepare_spawn`]: Self::prepare_spawn
+    retired: Arc<AtomicBool>,
     /// Join handle for the current persistent decode thread. Kept so a
     /// blocking teardown (`wait = true`) can *join* the worker — guaranteeing
     /// its entire D3D11 teardown (decoder resources plus the captured device
@@ -60,6 +93,7 @@ impl DecodeThreadHandle {
             control: None,
             preference: None,
             active_worker_count: Arc::new(AtomicU32::new(0)),
+            retired: Arc::new(AtomicBool::new(false)),
             join: None,
         }
     }
@@ -77,8 +111,17 @@ impl DecodeThreadHandle {
     ) -> Arc<AtomicU32> {
         self.control = Some(control);
         self.preference = Some(preference);
+        // A fresh worker is not retired, whatever the last one concluded: this
+        // may be a different file.
+        self.retired.store(false, Ordering::Release);
         self.active_worker_count.fetch_add(1, Ordering::Release);
         self.active_worker_count.clone()
+    }
+
+    /// The flag a worker sets just before exiting because the file has no
+    /// stream of its kind. See [`SeekDelivery::Retired`].
+    pub fn retirement_flag(&self) -> Arc<AtomicBool> {
+        self.retired.clone()
     }
 
     /// Store the join handle for the worker just spawned.
@@ -100,24 +143,40 @@ impl DecodeThreadHandle {
         self.active_worker_count.load(Ordering::Acquire)
     }
 
-    /// Whether a persistent decode thread is running that can serve a seek of
-    /// `current_preference` as an in-place command (rather than a reopen).
-    /// False after a preference change (HW↔SW) until respawned.
+    /// How a seek should reach this handle's worker, given the decode
+    /// preference the session now wants. See [`SeekDelivery`].
     ///
-    /// The `worker_count` term is a liveness check: `control` is an `Arc` that
-    /// outlives the thread holding the other end, so on its own it cannot tell a
-    /// running worker from one that has exited. A seek delivered to an exited
-    /// worker's channel is never served, and nothing ever notices — the caller
-    /// must respawn instead. The worker bodies also retry a cancelled open
-    /// rather than exiting (see `PlaybackSession::spawn_decode_thread`); this is
-    /// the second line of defence for the paths that do exit, such as a decoder
-    /// open error. It cannot produce a false negative: `prepare_spawn` bumps the
+    /// The liveness term matters because `control` is an `Arc` that outlives the
+    /// thread holding the other end, so possession of a control channel is not
+    /// evidence that anyone is reading it. A seek delivered to an exited
+    /// worker's channel is never served and nothing notices. The worker bodies
+    /// also retry a cancelled open rather than exiting (see
+    /// `PlaybackSession::spawn_decode_thread`); this is the second line of
+    /// defence for the paths that legitimately do exit.
+    ///
+    /// Liveness cannot produce a false negative: `prepare_spawn` increments the
     /// count before the thread is spawned, and only the worker's exit guard
     /// decrements it.
-    pub fn serves(&self, current_preference: VideoDecodePreference) -> bool {
-        self.control.is_some()
-            && self.preference == Some(current_preference)
-            && self.worker_count() > 0
+    ///
+    /// Pass [`VideoDecodePreference::Auto`] for the audio handle — audio has no
+    /// hardware path, so it is always registered with `Auto` and the preference
+    /// term is a tautology there.
+    pub fn seek_delivery(&self, current_preference: VideoDecodePreference) -> SeekDelivery {
+        // Never spawned, or torn down: nothing to reuse.
+        if self.control.is_none() {
+            return SeekDelivery::Respawn;
+        }
+        // Preference changed (HW↔SW): the running worker cannot serve it.
+        if self.preference != Some(current_preference) {
+            return SeekDelivery::Respawn;
+        }
+        if self.worker_count() > 0 {
+            return SeekDelivery::InPlace;
+        }
+        if self.retired.load(Ordering::Acquire) {
+            return SeekDelivery::Retired;
+        }
+        SeekDelivery::Respawn
     }
 
     /// Signal the persistent decode thread to stop. When `wait` is set, block
@@ -169,77 +228,150 @@ impl DecodeThreadHandle {
 mod tests {
     use super::*;
 
+    fn spawned(preference: VideoDecodePreference) -> (DecodeThreadHandle, Arc<AtomicU32>) {
+        let mut handle = DecodeThreadHandle::new();
+        let count = handle.prepare_spawn(Arc::new(DecodeControl::new()), preference);
+        (handle, count)
+    }
+
+    /// Simulate a worker's exit guard (`WorkerGuard::drop`) running.
+    fn worker_exits(count: &Arc<AtomicU32>) {
+        count.fetch_sub(1, Ordering::Release);
+    }
+
     #[test]
     fn new_is_idle() {
         let h = DecodeThreadHandle::new();
         assert_eq!(h.worker_count(), 0);
         assert!(h.control().is_none());
-        assert!(!h.serves(VideoDecodePreference::Auto));
-        assert!(!h.serves(VideoDecodePreference::ForceSoftware));
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::Respawn
+        );
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::ForceSoftware),
+            SeekDelivery::Respawn
+        );
     }
 
     #[test]
     fn prepare_spawn_registers_and_counts() {
-        let mut h = DecodeThreadHandle::new();
-        let control = Arc::new(DecodeControl::new());
-        let count = h.prepare_spawn(control, VideoDecodePreference::Auto);
+        let (h, count) = spawned(VideoDecodePreference::Auto);
         assert_eq!(h.worker_count(), 1);
         assert_eq!(count.load(Ordering::Acquire), 1);
         assert!(h.control().is_some());
-        assert!(h.serves(VideoDecodePreference::Auto));
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::InPlace
+        );
     }
 
     #[test]
-    fn serves_false_after_preference_change() {
-        let mut h = DecodeThreadHandle::new();
-        h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
+    fn preference_change_forces_a_respawn() {
+        let (h, _count) = spawned(VideoDecodePreference::Auto);
         // A seek that switches HW<->SW must not reuse the running thread.
-        assert!(!h.serves(VideoDecodePreference::ForceSoftware));
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::ForceSoftware),
+            SeekDelivery::Respawn
+        );
     }
 
     #[test]
-    fn does_not_serve_once_the_worker_has_exited() {
+    fn dead_worker_is_respawned_not_sent_an_in_place_seek() {
         // Regression: `control` is an Arc that outlives the worker thread, so a
         // handle whose worker exited (cancelled open, decoder open error) used
-        // to still report `serves() == true`. The coordinator then delivered the
-        // seek to a channel nobody was reading and video never came back. The
+        // to still look reusable. The coordinator then delivered the seek to a
+        // channel nobody was reading and the stream never came back. The
         // live-worker count is what distinguishes the two.
-        let mut h = DecodeThreadHandle::new();
-        let count = h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
-        assert!(h.serves(VideoDecodePreference::Auto));
-
-        // Simulate the worker's exit guard running (WorkerGuard::drop).
-        count.fetch_sub(1, Ordering::Release);
+        let (h, count) = spawned(VideoDecodePreference::Auto);
+        worker_exits(&count);
 
         assert_eq!(h.worker_count(), 0);
         assert!(
             h.control().is_some(),
             "the control channel deliberately outlives the thread"
         );
-        assert!(
-            !h.serves(VideoDecodePreference::Auto),
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::Respawn,
             "a dead worker must not be sent an in-place seek"
         );
     }
 
     #[test]
-    fn serves_again_after_a_respawn_replaces_the_dead_worker() {
-        let mut h = DecodeThreadHandle::new();
-        let count = h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
-        count.fetch_sub(1, Ordering::Release);
-        assert!(!h.serves(VideoDecodePreference::Auto));
+    fn retired_worker_is_left_alone_rather_than_respawned() {
+        // An audio-only file retires the video worker (NoVideoStream), and a
+        // video-only file retires the audio worker (NoAudioStream). Respawning
+        // there would reopen and re-demux the file on every single seek only to
+        // rediscover the same absence, so the handle must report Retired rather
+        // than Respawn.
+        let (h, count) = spawned(VideoDecodePreference::Auto);
+        h.retirement_flag().store(true, Ordering::Release);
+        worker_exits(&count);
+
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::Retired
+        );
+    }
+
+    #[test]
+    fn a_live_worker_outranks_the_retirement_flag() {
+        // Retirement is only consulted once the worker is actually gone; a live
+        // worker always takes the in-place seek.
+        let (h, _count) = spawned(VideoDecodePreference::Auto);
+        h.retirement_flag().store(true, Ordering::Release);
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::InPlace
+        );
+    }
+
+    #[test]
+    fn respawning_clears_retirement_from_the_previous_file() {
+        // The flag describes one open, not the handle forever: opening a file
+        // that does have the stream must not inherit the last file's verdict.
+        let (mut h, count) = spawned(VideoDecodePreference::Auto);
+        h.retirement_flag().store(true, Ordering::Release);
+        worker_exits(&count);
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::Retired
+        );
 
         h.teardown(false);
         h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
-        assert!(h.serves(VideoDecodePreference::Auto));
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::InPlace
+        );
+    }
+
+    #[test]
+    fn serves_again_after_a_respawn_replaces_the_dead_worker() {
+        let (mut h, count) = spawned(VideoDecodePreference::Auto);
+        worker_exits(&count);
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::Respawn
+        );
+
+        h.teardown(false);
+        h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::InPlace
+        );
     }
 
     #[test]
     fn teardown_without_wait_clears_control_and_preference() {
-        let mut h = DecodeThreadHandle::new();
-        h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
+        let (mut h, _count) = spawned(VideoDecodePreference::Auto);
         h.teardown(false);
         assert!(h.control().is_none());
-        assert!(!h.serves(VideoDecodePreference::Auto));
+        assert_eq!(
+            h.seek_delivery(VideoDecodePreference::Auto),
+            SeekDelivery::Respawn
+        );
     }
 }

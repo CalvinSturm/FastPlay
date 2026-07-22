@@ -17,7 +17,7 @@ use crate::{
         audio_controller::AudioController,
         clip_range::ClipRangeState,
         commands::SessionCommand,
-        decode_thread::DecodeThreadHandle,
+        decode_thread::{DecodeThreadHandle, SeekDelivery},
         drop_stats::{VideoDropBuckets, VideoDropCause},
         events::SessionEvent,
         overlay::OverlayManager,
@@ -1284,37 +1284,55 @@ impl PlaybackSession {
         self.state = PlaybackState::Seeking;
         self.active_operation_id = Some(op_id);
         self.last_error = None;
-        if self.decode_thread.serves(self.decode_preference) {
-            // Reuse the open file: tell the running video thread to seek in
-            // place. Bumping seek_gen above already gates out its old in-flight
-            // frames. `serves` implies a live control; if it is somehow absent,
-            // skip rather than panic — the next operation will respawn a worker.
-            if let Some(control) = self.decode_thread.control() {
-                control.send_seek(absolute_target, seek_gen, op_id);
+        // Reuse the open file where possible: tell the running video thread to
+        // seek in place. Bumping seek_gen above already gates out its old
+        // in-flight frames. The Arc'd control channel outlives the thread, so
+        // the handle — not its mere existence — decides how the seek travels.
+        match self.decode_thread.seek_delivery(self.decode_preference) {
+            SeekDelivery::InPlace => {
+                if let Some(control) = self.decode_thread.control() {
+                    control.send_seek(absolute_target, seek_gen, op_id);
+                }
             }
-        } else {
-            // No thread, or the decode preference changed (HW↔SW): reopen.
-            self.decode_thread.teardown(false);
-            self.spawn_decode_thread(
-                source.clone(),
-                Some(absolute_target),
-                open_gen,
-                seek_gen,
-                op_id,
-            );
+            SeekDelivery::Respawn => {
+                // No live thread, or the decode preference changed (HW↔SW).
+                self.decode_thread.teardown(false);
+                self.spawn_decode_thread(
+                    source.clone(),
+                    Some(absolute_target),
+                    open_gen,
+                    seek_gen,
+                    op_id,
+                );
+            }
+            // Audio-only file: the video worker reported NoVideoStream and
+            // retired. Respawning would reopen and re-demux the file on every
+            // scrub only to rediscover that there is still no video.
+            SeekDelivery::Retired => {}
         }
         // Audio seeks in place on its own persistent worker (no reopen), exactly
         // like the video worker above — so rapid scrubbing never churns the
         // audio demuxer. Stale pre-seek audio carries the old seek_gen and is
-        // dropped by the coordinator's generation check. Respawn only if no
-        // audio worker is alive (e.g. it exited after an open/decode error).
-        if self.audio_decode_thread.control().is_some() {
-            if let Some(control) = self.audio_decode_thread.control() {
-                control.send_seek(absolute_target, seek_gen, op_id);
+        // dropped by the coordinator's generation check. Audio has no hardware
+        // path, so its handle is always registered with `Auto`.
+        match self
+            .audio_decode_thread
+            .seek_delivery(VideoDecodePreference::Auto)
+        {
+            SeekDelivery::InPlace => {
+                if let Some(control) = self.audio_decode_thread.control() {
+                    control.send_seek(absolute_target, seek_gen, op_id);
+                }
             }
-        } else {
-            self.audio_decode_thread.teardown(false);
-            self.spawn_audio_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
+            // The worker exited on an open or decode error. Without this the
+            // channel would keep accepting seeks nobody reads and the file
+            // would stay silent to the end.
+            SeekDelivery::Respawn => {
+                self.audio_decode_thread.teardown(false);
+                self.spawn_audio_thread(source, Some(absolute_target), open_gen, seek_gen, op_id);
+            }
+            // The file simply has no audio track.
+            SeekDelivery::Retired => {}
         }
         self.pending_seek_target = Some(target);
         self.seek_discard_before_pts = Some(absolute_target);
@@ -1453,6 +1471,7 @@ impl PlaybackSession {
         let worker_count = self
             .decode_thread
             .prepare_spawn(control.clone(), decode_preference);
+        let retired = self.decode_thread.retirement_flag();
 
         flog!(
             "[spawn_decode_thread] open={} seek={} op={:?} workers_now={} hdr_caps={:?}",
@@ -1630,6 +1649,10 @@ impl PlaybackSession {
                     // exit. (Suppressed if a newer command already superseded
                     // this open.)
                     Ok(ffmpeg::VideoOpen::NoVideoStream) => {
+                        // Retire before exiting so later seeks skip this handle
+                        // entirely instead of respawning a worker that would
+                        // reopen the file only to reach here again.
+                        retired.store(true, Ordering::Release);
                         if !control.is_shutdown() {
                             let (_seek_gen, op_id) = gen_cell.get();
                             let _ = worker_send(
@@ -1854,6 +1877,7 @@ impl PlaybackSession {
         let worker_count = self
             .audio_decode_thread
             .prepare_spawn(control.clone(), VideoDecodePreference::Auto);
+        let retired = self.audio_decode_thread.retirement_flag();
 
         let handle = thread::spawn(move || {
             let _guard = WorkerExitGuard(worker_count);
@@ -1913,8 +1937,13 @@ impl PlaybackSession {
                     )
                 } {
                     Ok(ffmpeg::AudioOpen::Ready(session)) => break session,
-                    // Permanent: this file simply has no audio.
-                    Ok(ffmpeg::AudioOpen::NoAudioStream) => return,
+                    // Permanent: this file simply has no audio. Retire the
+                    // handle so later seeks do not respawn a worker that would
+                    // reopen the file only to reach here again.
+                    Ok(ffmpeg::AudioOpen::NoAudioStream) => {
+                        retired.store(true, Ordering::Release);
+                        return;
+                    }
                     Ok(ffmpeg::AudioOpen::Cancelled) => {
                         if control.is_shutdown() {
                             return;

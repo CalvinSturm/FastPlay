@@ -35,7 +35,7 @@ The real findings are narrower and more useful than "these files are too big":
   testable policy — lives inside `window_proc` in the unsafe FFI seam, which is precisely why
   the keyboard defect existed and was never caught by the 199-test suite.
 - **Documentation drift** in `docs/TECH_DEBT.md`, which asserts a clean lint baseline that the
-  code contradicts (13 crate-wide clippy allows, 7 module-wide `dead_code` allows).
+  code contradicts (12 crate-wide clippy allows, 7 module-wide `dead_code` allows).
 
 **Verdict: the codebase is safe to continue developing on, and was safe before this review.**
 It is well-factored, densely commented with genuine rationale (not noise), consistently
@@ -128,7 +128,7 @@ No type checker or static analyser beyond `rustc`/`clippy` applies; there is no 
 linter or formatter config to run. `bench/run-bench.ps1` exists but is deliberately not wired
 into CI (`ROADMAP.md §2`) and needs a generated local corpus; it was not run.
 
-**Note on the lint baseline:** `clippy` is clean, but `src/main.rs:6-17` disables 13 lint
+**Note on the lint baseline:** `clippy` is clean, but `src/main.rs:6-17` disables 12 lint
 categories crate-wide before clippy ever runs, and 7 modules disable `dead_code` wholesale.
 A clean clippy run here is a weaker signal than `docs/TECH_DEBT.md §3` claims. See §5-M4.
 
@@ -187,7 +187,7 @@ Labels: **CD** confirmed defect · **HR** high-confidence risk · **MI** maintai
 | M1 | Medium | CD | Holding Ctrl+S toggles subtitles on every key repeat | `ffi/dxgi.rs:1826` |
 | M2 | Medium | MI | The entire input keymap lives inside `window_proc` in the unsafe FFI seam | `ffi/dxgi.rs:1652-2278` |
 | M3 | Medium | MI | ~1,240 lines of CPU 2D rasterizer live inside the D3D11 FFI seam | `ffi/d3d11.rs:3058-4294` |
-| M4 | Medium | MI | `TECH_DEBT.md` asserts "no baseline allow-list"; there are 13 crate allows + 7 module `dead_code` allows | `docs/TECH_DEBT.md §3`, `main.rs:6-17` |
+| M4 | Medium | MI | `TECH_DEBT.md` asserts "no baseline allow-list"; there are 12 crate allows + 7 module `dead_code` allows | `docs/TECH_DEBT.md §3`, `main.rs:6-17` |
 | M5 | Medium | TG | Neither `window_proc` nor the rasterizer has a single direct test; both are untestable in place | `ffi/dxgi.rs`, `ffi/d3d11.rs` |
 | L1 | Low | HR | `AVFrame` not unreferenced on two of four error paths in `receive_video_frames` | `ffi/ffmpeg.rs:1528`, `:1543` |
 | L2 | Low | HR | Two latent `clamp` panics in timeline rendering, unreachable at the enforced minimum window size | `ffi/d3d11.rs:3276`, `:3289`, `:3305`; `render/timeline.rs:61` |
@@ -582,12 +582,25 @@ Each stage is one small, reviewable PR. Full validation (`fmt` / `clippy -D warn
 - **Regression risk:** Very low — deletions are compiler-verified.
 - **Depends on:** nothing; can run in parallel.
 
-### Stage 6 — Extend worker-liveness discipline to audio · **Small**
+### Stage 6 — Extend worker-liveness discipline to audio · **DONE 2026-07-21** · Small
 
-- **Problem:** L3.
-- Give `audio_decode_thread` the same liveness gate the video handle now has, and replace the
-  `control().is_some()` check at `session.rs:1311` with it (also removing L6's redundant
-  double-check). Consider whether a transient audio open error should retry once.
+- **Problem:** L3, L6, and a regression Stage 1 introduced (below).
+- Both handles now share `DecodeThreadHandle::seek_delivery`, returning a three-way
+  `SeekDelivery { InPlace, Respawn, Retired }` instead of the boolean `serves`. L6's redundant
+  double-check is gone with it.
+- **The third state is not tidiness.** Stage 1 gated `serves` on `worker_count() > 0`, which
+  fixed the wedge but broke audio-only files: the video worker exits after reporting
+  `NoVideoStream`, so every subsequent seek tore down and respawned a worker that reopened and
+  re-demuxed the file just to rediscover there is no video. Measured on an audio-only `.m4a`
+  driven with 8 `PostMessageW` right-arrow seeks — **9 `[spawn_decode_thread]` before the fix,
+  1 after**, with `[execute_seek]` at 8 in both runs. The workers now set a retirement flag
+  before their permanent-exit returns; `prepare_spawn` clears it so the verdict never outlives
+  its open.
+- **Not done:** a retry on a transient audio *open error*. The liveness gate already means the
+  next seek respawns audio, and an open error is usually permanent for that file, so an
+  automatic retry risks spinning on a genuinely broken stream for no gain.
+- **Tests:** 9 in `decode_thread.rs` (210 total, up from 207), covering each `SeekDelivery`
+  state, live-worker precedence over retirement, and retirement clearing on respawn.
 - **Depends on:** Stage 1.
 
 ---
@@ -667,7 +680,7 @@ it does not affect the tracked tree.)
 **Documentation drift to reconcile** (L8, M4):
 
 - `docs/TECH_DEBT.md §3` claims "There is **no baseline allow-list**; no `#![allow(...)]` debt
-  is being hidden." `src/main.rs:6-17` disables 13 clippy categories crate-wide, and 7 modules
+  is being hidden." `src/main.rs:6-17` disables 12 clippy categories crate-wide, and 7 modules
   disable `dead_code` file-wide. Several of the crate allows are legitimate for a Win32/FFI
   codebase (`too_many_arguments`, `upper_case_acronyms`, `useless_transmute`); the claim of
   having none is what needs correcting.
