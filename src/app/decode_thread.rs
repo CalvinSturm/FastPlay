@@ -103,8 +103,21 @@ impl DecodeThreadHandle {
     /// Whether a persistent decode thread is running that can serve a seek of
     /// `current_preference` as an in-place command (rather than a reopen).
     /// False after a preference change (HW↔SW) until respawned.
+    ///
+    /// The `worker_count` term is a liveness check: `control` is an `Arc` that
+    /// outlives the thread holding the other end, so on its own it cannot tell a
+    /// running worker from one that has exited. A seek delivered to an exited
+    /// worker's channel is never served, and nothing ever notices — the caller
+    /// must respawn instead. The worker bodies also retry a cancelled open
+    /// rather than exiting (see `PlaybackSession::spawn_decode_thread`); this is
+    /// the second line of defence for the paths that do exit, such as a decoder
+    /// open error. It cannot produce a false negative: `prepare_spawn` bumps the
+    /// count before the thread is spawned, and only the worker's exit guard
+    /// decrements it.
     pub fn serves(&self, current_preference: VideoDecodePreference) -> bool {
-        self.control.is_some() && self.preference == Some(current_preference)
+        self.control.is_some()
+            && self.preference == Some(current_preference)
+            && self.worker_count() > 0
     }
 
     /// Signal the persistent decode thread to stop. When `wait` is set, block
@@ -182,6 +195,43 @@ mod tests {
         h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
         // A seek that switches HW<->SW must not reuse the running thread.
         assert!(!h.serves(VideoDecodePreference::ForceSoftware));
+    }
+
+    #[test]
+    fn does_not_serve_once_the_worker_has_exited() {
+        // Regression: `control` is an Arc that outlives the worker thread, so a
+        // handle whose worker exited (cancelled open, decoder open error) used
+        // to still report `serves() == true`. The coordinator then delivered the
+        // seek to a channel nobody was reading and video never came back. The
+        // live-worker count is what distinguishes the two.
+        let mut h = DecodeThreadHandle::new();
+        let count = h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
+        assert!(h.serves(VideoDecodePreference::Auto));
+
+        // Simulate the worker's exit guard running (WorkerGuard::drop).
+        count.fetch_sub(1, Ordering::Release);
+
+        assert_eq!(h.worker_count(), 0);
+        assert!(
+            h.control().is_some(),
+            "the control channel deliberately outlives the thread"
+        );
+        assert!(
+            !h.serves(VideoDecodePreference::Auto),
+            "a dead worker must not be sent an in-place seek"
+        );
+    }
+
+    #[test]
+    fn serves_again_after_a_respawn_replaces_the_dead_worker() {
+        let mut h = DecodeThreadHandle::new();
+        let count = h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
+        count.fetch_sub(1, Ordering::Release);
+        assert!(!h.serves(VideoDecodePreference::Auto));
+
+        h.teardown(false);
+        h.prepare_spawn(Arc::new(DecodeControl::new()), VideoDecodePreference::Auto);
+        assert!(h.serves(VideoDecodePreference::Auto));
     }
 
     #[test]

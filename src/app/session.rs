@@ -1526,108 +1526,147 @@ impl PlaybackSession {
             // a worker wedged in FFmpeg I/O (dead network share, vanished drive)
             // still exits promptly and never hangs teardown. Owned + 'static so
             // it can live inside the format context for the session's lifetime.
-            let io_cancel: Box<dyn Fn() -> bool> = {
+            let io_cancel = || -> Box<dyn Fn() -> bool> {
                 let control = control.clone();
                 Box::new(move || control.is_shutdown())
             };
 
-            // Open the file and decoders once. Errors map to open/playback
-            // failure exactly as the per-operation worker did.
-            let open_result = unsafe {
-                DecodeSession::open(
-                    &source,
-                    &device,
-                    hdr_capabilities,
-                    audio_format,
-                    start_position,
-                    decode_preference,
-                    // Audio is decoded by the independent audio worker (see
-                    // `spawn_audio_thread`); this worker is video-only.
-                    false,
-                    io_cancel,
-                    &cancelled,
-                    &mut |mode, hw_fallback_count, rotation_quarter_turns| {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        worker_send(
-                            SessionEvent::DecodeModeSelected {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                                mode,
-                                hw_fallback_count,
-                                rotation_quarter_turns,
-                            },
-                            &sender,
-                        )
-                    },
-                    &mut |path| {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        worker_send(
-                            SessionEvent::PresentationPathSelected {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                                path,
-                            },
-                            &sender,
-                        )
-                    },
-                    &mut |duration| {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        worker_send(
-                            SessionEvent::MediaDurationKnown {
-                                open_gen,
-                                seek_gen,
-                                op_id,
-                                duration,
-                            },
-                            &sender,
-                        )
-                    },
-                )
-            };
-            let mut session = match open_result {
-                Ok(ffmpeg::VideoOpen::Ready(session)) => session,
-                Ok(ffmpeg::VideoOpen::Cancelled) => return,
-                Ok(ffmpeg::VideoOpen::NoVideoStream) => {
-                    // Audio-only file: no video will ever arrive. Tell the
+            // Open the file and decoders, retrying if a seek supersedes the open
+            // while it is in flight. A seek bumps the command sequence, which is
+            // exactly what `cancelled` watches, so scrubbing before this worker
+            // has finished opening cancels the open. Exiting on that (as this
+            // once did) killed video for the rest of the file: the coordinator
+            // only re-sends seeks to the worker's control channel, which
+            // outlives the thread — `DecodeThreadHandle::serves` sees a live
+            // `control` and never learns the worker is gone. Serve the command
+            // instead and reopen at its target, exactly as the audio worker does
+            // (see `spawn_audio_thread`). Other errors still map to
+            // open/playback failure as before.
+            let mut start_at = start_position;
+            let mut session = loop {
+                let open_result = unsafe {
+                    DecodeSession::open(
+                        &source,
+                        &device,
+                        // Cloned per attempt: the retry below can reopen, and
+                        // the snapshot is taken once at spawn (decide-at-open
+                        // policy) so every attempt must see the same caps.
+                        hdr_capabilities.clone(),
+                        audio_format,
+                        start_at,
+                        decode_preference,
+                        // Audio is decoded by the independent audio worker (see
+                        // `spawn_audio_thread`); this worker is video-only.
+                        false,
+                        io_cancel(),
+                        &cancelled,
+                        &mut |mode, hw_fallback_count, rotation_quarter_turns| {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            worker_send(
+                                SessionEvent::DecodeModeSelected {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    mode,
+                                    hw_fallback_count,
+                                    rotation_quarter_turns,
+                                },
+                                &sender,
+                            )
+                        },
+                        &mut |path| {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            worker_send(
+                                SessionEvent::PresentationPathSelected {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    path,
+                                },
+                                &sender,
+                            )
+                        },
+                        &mut |duration| {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            worker_send(
+                                SessionEvent::MediaDurationKnown {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    duration,
+                                },
+                                &sender,
+                            )
+                        },
+                    )
+                };
+                match open_result {
+                    Ok(ffmpeg::VideoOpen::Ready(session)) => break session,
+                    Ok(ffmpeg::VideoOpen::Cancelled) => {
+                        if control.is_shutdown() {
+                            return;
+                        }
+                        // The command that cancelled the open is still pending;
+                        // take it and reopen there. `wait_next` returns it
+                        // immediately (it never blocks when one is queued).
+                        match control.wait_next() {
+                            (DecodeCommand::Shutdown, _) => return,
+                            (
+                                DecodeCommand::Seek {
+                                    target,
+                                    seek_gen,
+                                    op_id,
+                                },
+                                new_seq,
+                            ) => {
+                                serving.set(new_seq);
+                                gen_cell.set((seek_gen, op_id));
+                                start_at = Some(target);
+                            }
+                        }
+                    }
+                    // Permanent: this file simply has no video. Tell the
                     // coordinator so it plays from the audio worker alone, then
-                    // exit — there is no video to decode. (Suppressed if a newer
-                    // command already superseded this open.)
-                    if !control.is_shutdown() {
-                        let (_seek_gen, op_id) = gen_cell.get();
-                        let _ =
-                            worker_send(SessionEvent::NoVideoStream { open_gen, op_id }, &sender);
+                    // exit. (Suppressed if a newer command already superseded
+                    // this open.)
+                    Ok(ffmpeg::VideoOpen::NoVideoStream) => {
+                        if !control.is_shutdown() {
+                            let (_seek_gen, op_id) = gen_cell.get();
+                            let _ = worker_send(
+                                SessionEvent::NoVideoStream { open_gen, op_id },
+                                &sender,
+                            );
+                        }
+                        return;
                     }
-                    return;
-                }
-                Err(error) => {
-                    if !control.is_shutdown() {
-                        let (seek_gen, op_id) = gen_cell.get();
-                        let event =
-                            if error.contains("device removed") || device.is_device_removed() {
-                                SessionEvent::DeviceLost {
-                                    open_gen,
-                                    seek_gen,
-                                    op_id,
-                                }
-                            } else if start_position.is_some() {
-                                SessionEvent::PlaybackFailed {
-                                    open_gen,
-                                    seek_gen,
-                                    op_id,
-                                    error,
-                                }
-                            } else {
-                                SessionEvent::OpenFailed {
-                                    open_gen,
-                                    op_id,
-                                    error,
-                                }
-                            };
-                        let _ = worker_send(event, &sender);
+                    Err(error) => {
+                        if !control.is_shutdown() {
+                            let (seek_gen, op_id) = gen_cell.get();
+                            let event =
+                                if error.contains("device removed") || device.is_device_removed() {
+                                    SessionEvent::DeviceLost {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                    }
+                                } else if start_at.is_some() {
+                                    SessionEvent::PlaybackFailed {
+                                        open_gen,
+                                        seek_gen,
+                                        op_id,
+                                        error,
+                                    }
+                                } else {
+                                    SessionEvent::OpenFailed {
+                                        open_gen,
+                                        op_id,
+                                        error,
+                                    }
+                                };
+                            let _ = worker_send(event, &sender);
+                        }
+                        return;
                     }
-                    return;
                 }
             };
 
