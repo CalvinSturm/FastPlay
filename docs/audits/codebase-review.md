@@ -590,15 +590,21 @@ Each stage is one small, reviewable PR. Full validation (`fmt` / `clippy -D warn
   `unsafe` and no Win32.
 - **Depends on:** Stage 1.
 
-### Stage 4 — De-duplicate the worker plumbing · **Small**
+### Stage 4 — De-duplicate the worker plumbing · **DONE 2026-07-21** · Small
 
 - **Problem:** L4 — `worker_send` (~35 lines) duplicated verbatim across both worker bodies;
   the `device removed → DeviceLost else PlaybackFailed` mapping written three times
   (`session.rs:1608`, `:1718`, `:1748`); the SAR guard six times in `ffmpeg.rs`.
-- **Boundary:** private free functions in `app/session.rs` and `ffi/ffmpeg.rs`. Do **not**
-  introduce a trait or a generic worker abstraction — there are exactly two consumers, and the
-  audio worker's send path differs subtly (no device-lost mapping).
-- **Regression risk:** Low, but only after Stage 1 stops the two worker bodies diverging.
+- **Boundary:** private free functions, as prescribed — no trait, no generic worker type.
+  - `send_to_ui(event, tx, cancelled)` in `session.rs`; both worker bodies keep a two-argument
+    `worker_send` closure over it, so the ~20 call sites are untouched.
+  - `worker_failure_event(...)` for the two identical device-lost mappings, and
+    `is_device_lost(error, device)` for the predicate, which the open path shares — it keeps
+    its own shape because it has a third outcome (`OpenFailed`).
+  - `frame_sample_aspect_ratio(frame)` in `ffmpeg.rs`, replacing three copies of the
+    "zero or negative means unknown, fall back to square" guard.
+- **Result:** each of the three now has exactly one definition (was 2 / 3 / 3 copies).
+- **Regression risk:** realized as none — 230 tests unchanged and passing.
 - **Depends on:** Stages 1-3.
 
 ### Stage 5 — Retire the blanket `allow(dead_code)` · **DONE 2026-07-21** · Small

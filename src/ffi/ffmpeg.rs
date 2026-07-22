@@ -1427,6 +1427,22 @@ unsafe fn frame_surface_color(frame: *const AVFrame) -> SurfaceColor {
     SurfaceColor { bt709, full_range }
 }
 
+/// The frame's sample aspect ratio, falling back to square pixels (1:1) when
+/// the stream does not declare a usable one. A zero or negative numerator or
+/// denominator means "unknown" in FFmpeg, and propagating it would divide the
+/// display-size math by zero.
+///
+/// # Safety
+/// `frame` must be a valid, currently-referenced `AVFrame`.
+unsafe fn frame_sample_aspect_ratio(frame: *const AVFrame) -> (u32, u32) {
+    let sar = (*frame).sample_aspect_ratio;
+    if sar.num > 0 && sar.den > 0 {
+        (sar.num as u32, sar.den as u32)
+    } else {
+        (1, 1)
+    }
+}
+
 unsafe fn receive_video_frames<F>(
     video: &mut VideoDecoder,
     frame: *mut AVFrame,
@@ -1502,17 +1518,7 @@ where
                     ));
                 }
 
-                let sar = (*frame).sample_aspect_ratio;
-                let sar_num = if sar.num > 0 && sar.den > 0 {
-                    sar.num as u32
-                } else {
-                    1
-                };
-                let sar_den = if sar.num > 0 && sar.den > 0 {
-                    sar.den as u32
-                } else {
-                    1
-                };
+                let (sar_num, sar_den) = frame_sample_aspect_ratio(frame);
 
                 // Unref before propagating: an error here would otherwise leave
                 // the frame holding its D3D11VA decoder-pool surface while the
@@ -1556,17 +1562,7 @@ where
                         return Err(error);
                     }
                 };
-                let sar = (*frame).sample_aspect_ratio;
-                let sar_num = if sar.num > 0 && sar.den > 0 {
-                    sar.num as u32
-                } else {
-                    1
-                };
-                let sar_den = if sar.num > 0 && sar.den > 0 {
-                    sar.den as u32
-                } else {
-                    1
-                };
+                let (sar_num, sar_den) = frame_sample_aspect_ratio(frame);
                 PendingVideoFrame::D3D11 {
                     open_gen,
                     seek_gen,
@@ -1650,17 +1646,7 @@ impl SoftwareVideoConverter {
         );
         ffmpeg_check(scaled, "sws_scale(video)")?;
 
-        let sar = (*frame).sample_aspect_ratio;
-        let sar_num = if sar.num > 0 && sar.den > 0 {
-            sar.num as u32
-        } else {
-            1
-        };
-        let sar_den = if sar.num > 0 && sar.den > 0 {
-            sar.den as u32
-        } else {
-            1
-        };
+        let (sar_num, sar_den) = frame_sample_aspect_ratio(frame);
 
         device
             .upload_nv12_surface_contiguous(
