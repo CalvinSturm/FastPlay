@@ -1,10 +1,11 @@
 use std::{
     error::Error,
-    fmt,
+    fmt, mem,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    thread::{self, ThreadId},
 };
 
 use windows::Win32::{
@@ -63,10 +64,12 @@ impl Drop for ComApartment {
 const SHARED_BUFFER_DURATION_HNS: i64 = 200 * 10_000;
 
 pub struct WasapiAudioSink {
-    _com: ComApartment,
-    audio_client: IAudioClient3,
     render_client: IAudioRenderClient,
+    audio_client: IAudioClient3,
     buffer_frames: u32,
+    // Rust drops fields in declaration order. Keep the apartment guard last so
+    // both COM interfaces release before the matching CoUninitialize.
+    _com: ComApartment,
 }
 
 impl WasapiAudioSink {
@@ -117,10 +120,10 @@ impl WasapiAudioSink {
 
         Ok((
             Self {
-                _com: com,
-                audio_client,
                 render_client,
+                audio_client,
                 buffer_frames,
+                _com: com,
             },
             actual_format,
         ))
@@ -365,15 +368,16 @@ impl IMMNotificationClient_Impl for DefaultRenderEndpointNotifier_Impl {
 
 /// A live registration for default-render-endpoint changes.
 ///
-/// Holds the enumerator and the registered client so both outlive the
-/// notification. Deliberately never unregisters: the process exits via
-/// `process::exit` without tearing down COM (see `PlaybackSession::shutdown`),
-/// and unregistering during a callback is exactly the re-entrancy COM forbids.
+/// The MMDevice registration does not retain the callback for us. Destruction
+/// therefore unregisters first on the thread that installed the watch, then
+/// releases the callback and enumerator, and only then uninitializes COM. The
+/// COM-owned fields are `Option`s so `Drop` controls that order explicitly.
 pub struct DefaultRenderEndpointWatch {
     changed: Arc<AtomicBool>,
-    _com: ComApartment,
-    _enumerator: IMMDeviceEnumerator,
-    _client: IMMNotificationClient,
+    owner_thread: ThreadId,
+    client: Option<IMMNotificationClient>,
+    enumerator: Option<IMMDeviceEnumerator>,
+    com: Option<ComApartment>,
 }
 
 impl DefaultRenderEndpointWatch {
@@ -391,9 +395,10 @@ impl DefaultRenderEndpointWatch {
         unsafe { enumerator.RegisterEndpointNotificationCallback(&client)? };
         Ok(Self {
             changed,
-            _com: com,
-            _enumerator: enumerator,
-            _client: client,
+            owner_thread: thread::current().id(),
+            client: Some(client),
+            enumerator: Some(enumerator),
+            com: Some(com),
         })
     }
 
@@ -401,6 +406,60 @@ impl DefaultRenderEndpointWatch {
     /// was pending. Edge-triggered: true at most once per switch.
     pub fn take_changed(&self) -> bool {
         self.changed.swap(false, Ordering::AcqRel)
+    }
+}
+
+impl Drop for DefaultRenderEndpointWatch {
+    fn drop(&mut self) {
+        if thread::current().id() != self.owner_thread {
+            crate::flog!(
+                "[audio_endpoint] watch dropped off its owning thread; retaining COM registration"
+            );
+            self.retain_registration();
+            return;
+        }
+
+        let (Some(enumerator), Some(client)) = (self.enumerator.as_ref(), self.client.as_ref())
+        else {
+            return;
+        };
+
+        // SAFETY:
+        // - this is the same enumerator/client pair passed to Register...
+        // - Drop runs on the UI thread that installed the apartment and watch
+        // - this is not an IMMNotificationClient callback, so unregistering does
+        //   not re-enter the enumerator from inside a notification
+        if let Err(error) = unsafe { enumerator.UnregisterEndpointNotificationCallback(client) } {
+            crate::flog!(
+                "[audio_endpoint] failed to unregister endpoint callback; retaining COM registration: {error}"
+            );
+            self.retain_registration();
+            return;
+        }
+
+        // The registration is gone, so the callback may release its final
+        // reference. Release both interfaces before balancing CoInitializeEx.
+        drop(self.client.take());
+        drop(self.enumerator.take());
+        drop(self.com.take());
+    }
+}
+
+impl DefaultRenderEndpointWatch {
+    /// Preserve a potentially live MMDevice registration. Leaking is the only
+    /// safe fallback: RegisterEndpointNotificationCallback does not AddRef the
+    /// callback, so releasing any of these objects after failed unregistration
+    /// could leave Windows with a dangling callback pointer.
+    fn retain_registration(&mut self) {
+        if let Some(client) = self.client.take() {
+            mem::forget(client);
+        }
+        if let Some(enumerator) = self.enumerator.take() {
+            mem::forget(enumerator);
+        }
+        if let Some(com) = self.com.take() {
+            mem::forget(com);
+        }
     }
 }
 
