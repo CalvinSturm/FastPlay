@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::num::NonZeroU64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

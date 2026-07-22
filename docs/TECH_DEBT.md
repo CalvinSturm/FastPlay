@@ -110,7 +110,7 @@ historical context, not current guidance.
 
 CI runs all three on `windows-latest`.
 
-### R5 — Lint allow-list — **open** (corrected 2026-07-21)
+### R5 — Lint allow-list — **partially paid down** (2026-07-21)
 
 This section previously stated there was "no baseline allow-list" and no
 `#![allow(...)]` debt. That was wrong, and the codebase review corrected it:
@@ -121,16 +121,40 @@ This section previously stated there was "no baseline allow-list" and no
   (`type_complexity`, `unnecessary_cast`, `explicit_auto_deref`,
   `unnecessary_map_or`, `field_reassign_with_default`) are stylistic debt the
   file's own comment admits to.
-- **Seven modules** disable `dead_code` file-wide: `app/commands.rs`,
-  `app/events.rs`, `app/media_ext.rs`, `app/play_queue.rs`, `app/recent.rs`,
-  `playback/generations.rs`, `playback/queues.rs`. A blanket module allow
-  suppresses detection of *genuinely* unused code, not just the reserved-API
-  items it was added for.
+- ~~**Seven modules** disable `dead_code` file-wide.~~ **DONE.** All seven
+  blanket allows are gone. Removing them surfaced exactly five items, which is
+  the point — a module-wide allow cannot distinguish reserved API from rot:
+  - deleted as genuinely dead: `SessionCommand::Tick` (constructed nowhere, only
+    a no-op match arm);
+  - kept with a per-item allow and a stated reason: `SessionEvent::AudioEndpointChanged`
+    (see R7), `media_ext::is_subtitle`, `PlayQueue::{is_empty, items, cursor}`,
+    `RecentFiles::{is_empty, clear}`.
+  - `playback/generations.rs` and `playback/queues.rs` had nothing to hide at
+    all; their allows were pure noise.
 
-Pay-down: replace each module-wide `dead_code` allow with per-item allows
-carrying a one-line justification, then delete whatever the compiler proves
-unused. Compiler-verified, so the risk is very low. See
+  Two module comments were also stale, claiming the play queue was "not yet
+  wired into the open flow" long after `main.rs` started driving it.
+
+Still open: the crate-wide clippy allows in `main.rs`. Several are legitimate
+for a Win32/FFI codebase and the rest need case-by-case judgement, so they are
+deliberately not swept in the same pass. See
 [`audits/codebase-review.md`](./audits/codebase-review.md) §10 Stage 5.
+
+### R7 — Audio endpoint-change detection was never implemented — **open**
+
+Surfaced by R5's pay-down. `ARCHITECTURE.md` §7 specifies a
+`SessionEvent::AudioEndpointChanged` and §6 assigns "audio endpoint recovery
+detection" to the workers. The event type exists and `PlaybackSession` has a
+live handler for it, but **nothing constructs it**: no `IMMNotificationClient`
+is registered anywhere in the crate.
+
+Endpoint changes are therefore only noticed *reactively* — when a WASAPI write
+fails, `submit_due_audio` calls `recover_audio_endpoint` directly. In practice
+recovery does happen, one failed write later. The charter's proactive path does
+not exist. The event is kept (with a `dead_code` allow explaining exactly this)
+because the charter is locked; closing the gap means either implementing the
+notification client or revising `ARCHITECTURE.md`, and that is a scope decision,
+not cleanup.
 
 ---
 
