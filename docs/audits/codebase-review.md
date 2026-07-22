@@ -42,7 +42,7 @@ It is well-factored, densely commented with genuine rationale (not noise), consi
 error-typed, and disciplined about ownership and threading. It does not need restructuring.
 It needed three small fixes and one honest correction to its own debt register.
 
-**Finding counts:** Critical **0** · High **1** · Medium **5** · Low **8**.
+**Finding counts:** Critical **0** · High **1** · Medium **5** · Low **9** (L9 was found later, while implementing Stage 5).
 
 ---
 
@@ -197,6 +197,7 @@ Labels: **CD** confirmed defect · **HR** high-confidence risk · **MI** maintai
 | L6 | Low | MI | Redundant double-check on the audio control channel | `app/session.rs:1311-1314` |
 | L7 | Low | OI | `recent.rs` persists via non-atomic truncate-then-write | `app/recent.rs:125` |
 | L8 | Low | MI | Stale doc listings: `TECH_DEBT.md` file table, `ARCHITECTURE.md §5` repo shape | both |
+| L9 | Low | MI | `SessionEvent::AudioEndpointChanged` is charter-specified but never constructed; endpoint recovery is reactive-only | `app/events.rs:86`, `ARCHITECTURE.md:268` |
 
 ---
 
@@ -441,6 +442,25 @@ audio rather than frozen video, and because a genuinely unopenable audio stream 
 permanent rather than transient. Not fixed in this pass; the correct fix is to give the audio
 handle the same liveness check `serves()` now has, which needs its own small design pass.
 
+### L9 — **Maintainability, Low.** Charter-specified endpoint detection was never implemented
+
+*Found during Stage 5, not the original sweep.*
+
+`ARCHITECTURE.md:268` lists `AudioEndpointChanged { open_gen, seek_gen, op_id }` in the locked
+event model, and §6 assigns "audio endpoint recovery detection" to the workers.
+`app/events.rs:86` defines it and `PlaybackSession::handle_event` has a live arm for it — but
+**nothing anywhere constructs it.** There is no `IMMNotificationClient`, no
+`RegisterEndpointNotificationCallback`, nothing that would observe a device change.
+
+Endpoint changes are only noticed *reactively*: a WASAPI write fails, and `submit_due_audio`
+calls `recover_audio_endpoint` directly (`session.rs:2133`). Recovery does work — one failed
+write later — so this is a latency and fidelity gap against the charter, not a broken feature.
+
+The variant is deliberately **kept**, with a `dead_code` allow that records exactly this. It is
+charter-specified and `AGENTS.md` forbids revising the charter, so deleting it unilaterally
+would be the wrong call. Closing the gap properly means either implementing the notification
+client or amending `ARCHITECTURE.md` — a scope decision, not cleanup.
+
 ---
 
 ## 8. Testing gaps
@@ -571,15 +591,29 @@ Each stage is one small, reviewable PR. Full validation (`fmt` / `clippy -D warn
 - **Regression risk:** Low, but only after Stage 1 stops the two worker bodies diverging.
 - **Depends on:** Stages 1-3.
 
-### Stage 5 — Retire the blanket `allow(dead_code)` · **Small**
+### Stage 5 — Retire the blanket `allow(dead_code)` · **DONE 2026-07-21** · Small
 
 - **Problem:** M4. Seven modules disable `dead_code` file-wide: `app/commands.rs`,
   `app/events.rs`, `app/media_ext.rs`, `app/play_queue.rs`, `app/recent.rs`,
   `playback/generations.rs`, `playback/queues.rs`.
-- **Approach:** remove each `#![allow(dead_code)]`, replace with per-item `#[allow(dead_code)]`
-  carrying a one-line justification (several are legitimately reserved API, e.g. `recent.rs`'s
-  `clear`/`is_empty`), and delete whatever the compiler then proves unused.
-- **Regression risk:** Very low — deletions are compiler-verified.
+- **Done.** All seven blanket allows removed. The compiler then flagged exactly five items,
+  which is the argument for the change — a module-wide allow cannot tell reserved API from rot:
+  - **Deleted:** `SessionCommand::Tick`, constructed nowhere and backed only by a no-op match
+    arm.
+  - **Kept, with a per-item allow stating why:** `SessionEvent::AudioEndpointChanged` (see the
+    new finding L9 below), `media_ext::is_subtitle`, `PlayQueue::{is_empty, items, cursor}`,
+    `RecentFiles::{is_empty, clear}`. `PlayQueue::is_empty` in particular *cannot* be deleted:
+    `clippy::len_without_is_empty` requires it alongside `len`, which the auto-advance planner
+    uses.
+  - `playback/generations.rs` and `playback/queues.rs` were hiding nothing at all — their
+    allows were pure noise.
+  - Two stale module comments corrected: `media_ext.rs` and `play_queue.rs` both still claimed
+    the play queue was "not yet wired into the open flow", long after `main.rs` began driving
+    it.
+- **Not swept:** the 12 crate-wide clippy allows in `main.rs`. Several are legitimate for a
+  Win32/FFI codebase and the rest need case-by-case judgement; bundling them into a
+  mechanical pass would have hidden that judgement.
+- **Regression risk:** realized as none — 210 tests still pass, `clippy -D warnings` clean.
 - **Depends on:** nothing; can run in parallel.
 
 ### Stage 6 — Extend worker-liveness discipline to audio · **DONE 2026-07-21** · Small

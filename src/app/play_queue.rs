@@ -1,9 +1,3 @@
-// The queue is the backend for an upcoming queue/folder playback flow; nothing
-// in the shipping binary constructs or drives it yet, so its public API reads as
-// dead code in a binary crate. Mirror `recent.rs` and allow it module-wide until
-// the open flow is wired to it.
-#![allow(dead_code)]
-
 //! A lightweight, in-memory queue for sequential file playback.
 //!
 //! `PlayQueue` is the backend for the queue/folder playback flow. It is a pure
@@ -82,6 +76,11 @@ impl PlayQueue {
         Self::from_paths(media_files_in_folder(dir))
     }
 
+    /// Required by `clippy::len_without_is_empty` as the companion to [`len`],
+    /// which the auto-advance planner uses; nothing calls this one directly.
+    ///
+    /// [`len`]: Self::len
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -90,12 +89,21 @@ impl PlayQueue {
         self.items.len()
     }
 
-    /// The queue entries in playback order.
+    /// The queue entries in playback order. Test-only today: the event loop
+    /// navigates through [`next_path`]/[`previous_path`] rather than reading the
+    /// list, and the tests assert enumeration and filtering order through this.
+    ///
+    /// [`next_path`]: Self::next_path
+    /// [`previous_path`]: Self::previous_path
+    #[allow(dead_code)]
     pub fn items(&self) -> &[PathBuf] {
         &self.items
     }
 
-    /// Index of the item currently playing.
+    /// Index of the item currently playing. Test-only: it exists so the cursor
+    /// discipline (look up a candidate, open it, commit the move only if the
+    /// open was initiated) can be asserted without driving a real open.
+    #[allow(dead_code)]
     pub fn cursor(&self) -> usize {
         self.cursor
     }

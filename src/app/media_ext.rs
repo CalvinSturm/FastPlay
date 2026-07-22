@@ -1,9 +1,3 @@
-// Some classification helpers and the extension tables are consumed only by the
-// (not-yet-wired) play queue and by tests, so they read as dead code in a binary
-// crate until the queue is wired into the open flow. Mirror `recent.rs` and allow
-// it module-wide rather than peppering per-item attributes.
-#![allow(dead_code)]
-
 //! Shared knowledge of which file extensions FastPlay treats as playable media.
 //!
 //! This is the single source of truth for the supported-extension list. The
@@ -36,6 +30,12 @@ pub fn is_supported_media(path: &Path) -> bool {
 }
 
 /// Whether `path`'s extension is a subtitle sidecar (case-insensitive).
+///
+/// Not called from non-test code: the sidecar loader (`SubtitleTrack::load_sidecar`)
+/// derives its own path rather than classifying one. Kept as the tested
+/// counterpart to [`is_supported_media`] — together they are what documents and
+/// enforces "a subtitle is browsable but never a queue entry".
+#[allow(dead_code)]
 pub fn is_subtitle(path: &Path) -> bool {
     extension_matches(path, SUBTITLE_EXTENSIONS)
 }

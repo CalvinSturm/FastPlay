@@ -1,8 +1,3 @@
-// `clear`/`is_empty` are part of the reusable recent-files API (e.g. the
-// "later" Ctrl+Shift+R clear-history binding) and exercised by tests, so they
-// are not yet called from non-test code.
-#![allow(dead_code)]
-
 //! Recent-files history and resume-position persistence.
 //!
 //! This is the shared backend for two product features: the Recent overlay and
@@ -129,6 +124,11 @@ impl RecentFiles {
         &self.entries
     }
 
+    /// Not called from non-test code; kept as the natural companion to
+    /// [`entries`] for callers that only need emptiness.
+    ///
+    /// [`entries`]: Self::entries
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -185,6 +185,8 @@ impl RecentFiles {
         }
     }
 
+    /// Reserved for a clear-history binding; exercised by tests only.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.entries.clear();
     }

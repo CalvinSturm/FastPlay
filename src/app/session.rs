@@ -457,7 +457,6 @@ impl PlaybackSession {
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match command {
-            SessionCommand::Tick => {}
             SessionCommand::TogglePause => self.toggle_pause(now)?,
             SessionCommand::ToggleSubtitles => self.toggle_subtitles()?,
             SessionCommand::SaveScreenshot => {
