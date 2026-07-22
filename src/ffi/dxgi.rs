@@ -1823,7 +1823,11 @@ unsafe extern "system" fn window_proc(
                     {
                         state.input_events.borrow_mut().push(InputEvent::ShowHelp);
                     }
-                    0x53 => {
+                    // S (no Ctrl) → toggle subtitles. The `!ctrl_held` guard is
+                    // required: the Ctrl+S arm above only matches the *first*
+                    // press, so without it every auto-repeat of a held Ctrl+S
+                    // fell through to here and toggled subtitles.
+                    0x53 if !ctrl_held => {
                         state
                             .input_events
                             .borrow_mut()

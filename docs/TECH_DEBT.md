@@ -33,12 +33,15 @@ only coordinator entrypoint.
 
 ### Largest files (lines)
 
+Refreshed 2026-07-21 (see [`audits/codebase-review.md`](./audits/codebase-review.md) §4).
+
 | File | Lines | Role |
 |------|------:|------|
-| `src/ffi/d3d11.rs` | 3036 | D3D11 FFI seam (inherently large; unsafe is correctly boxed here) |
-| `src/app/session.rs` | 2413 | Coordinator; still large, but focused state/helpers have been extracted |
-| `src/ffi/dxgi.rs` | 1842 | DXGI FFI seam |
-| `src/ffi/ffmpeg.rs` | 1563 | FFmpeg FFI seam |
+| `src/ffi/d3d11.rs` | 4594 | D3D11 FFI seam (inherently large; unsafe is correctly boxed here). ~1240 of those lines are a *pure* CPU overlay rasterizer that does not belong in the seam |
+| `src/app/session.rs` | 2892 | Coordinator; still large, but focused state/helpers have been extracted |
+| `src/ffi/dxgi.rs` | 2295 | DXGI FFI seam. `window_proc` alone is 626 lines and carries the whole input keymap |
+| `src/ffi/ffmpeg.rs` | 2190 | FFmpeg FFI seam |
+| `src/render/hdr.rs` | 1516 | Pure HDR classification and path decision — 736 lines of code, 780 of tests (41 tests). Not debt; the model to follow |
 
 The `ffi/*` files are large because they are the designated unsafe seams; their
 size is acceptable and expected. `app/session.rs` remains the largest safe-Rust
@@ -100,13 +103,34 @@ historical context, not current guidance.
 - `cargo fmt --check` — **clean and now enforced in CI** (was previously
   disabled). The reformat was mechanical and limited to `src/ffi/dxgi.rs` and
   `src/ffi/ffmpeg.rs`.
-- `cargo clippy --all-targets -- -D warnings` — **clean**. There is **no
-  baseline allow-list**; no `#![allow(...)]` debt is being hidden. Nothing to
-  pay down here today.
-- `cargo test --all-targets` — **140 passing, 0 failing**.
+- `cargo clippy --all-targets -- -D warnings` — **clean**, but see R5 below: the
+  run is clean *against a crate-wide allow-list*, which is a weaker signal than
+  this section previously claimed.
+- `cargo test --all-targets` — **201 passing, 0 failing** (2026-07-21).
 
-CI runs all three on `windows-latest`. There is no known lint debt to document
-as deferred.
+CI runs all three on `windows-latest`.
+
+### R5 — Lint allow-list — **open** (corrected 2026-07-21)
+
+This section previously stated there was "no baseline allow-list" and no
+`#![allow(...)]` debt. That was wrong, and the codebase review corrected it:
+
+- `src/main.rs:6-17` disables **13 clippy categories crate-wide**. Several are
+  legitimate for a Win32/FFI codebase (`too_many_arguments`,
+  `upper_case_acronyms`, `useless_transmute`, `manual_c_str_literals`); the rest
+  (`type_complexity`, `unnecessary_cast`, `explicit_auto_deref`,
+  `unnecessary_map_or`, `field_reassign_with_default`) are stylistic debt the
+  file's own comment admits to.
+- **Seven modules** disable `dead_code` file-wide: `app/commands.rs`,
+  `app/events.rs`, `app/media_ext.rs`, `app/play_queue.rs`, `app/recent.rs`,
+  `playback/generations.rs`, `playback/queues.rs`. A blanket module allow
+  suppresses detection of *genuinely* unused code, not just the reserved-API
+  items it was added for.
+
+Pay-down: replace each module-wide `dead_code` allow with per-item allows
+carrying a one-line justification, then delete whatever the compiler proves
+unused. Compiler-verified, so the risk is very low. See
+[`audits/codebase-review.md`](./audits/codebase-review.md) §10 Stage 5.
 
 ---
 
@@ -122,7 +146,38 @@ The original v0.3.0 priorities are complete:
 3. ✅ Backfill unit tests for the extracted helpers.
 
 Next maintenance work should be driven by observed defects, difficult review
-areas, or benchmark regressions rather than a line-count target.
+areas, or benchmark regressions rather than a line-count target. The 2026-07-21
+[codebase review](./audits/codebase-review.md) §10 sequences the current
+candidates, in value order:
+
+1. Extract the input keymap out of `window_proc` into `platform/input.rs` as a
+   pure function. It is the single largest untested surface in the program and
+   it has already shipped one user-visible bug (a held Ctrl+S toggled subtitles,
+   because a guarded match arm fell through to an unguarded one).
+2. Extract the pure geometry/blend layer of the overlay rasterizer out of
+   `ffi/d3d11.rs` into `render/`, with unit tests. The GDI text path stays in
+   the seam.
+3. De-duplicate the worker plumbing (`worker_send`, the device-lost event
+   mapping) — but only as private helpers, not a worker trait; there are two
+   consumers and they differ.
+4. R5 above (lint allow-list).
+5. Extend the worker-liveness discipline to the audio handle (see R6).
+
+### R6 — Worker liveness — **partially paid down** (2026-07-21)
+
+A `DecodeControl` is an `Arc` that deliberately outlives its worker thread, so
+holding one is *not* evidence that a worker is alive. This has now produced two
+defects: audio (fixed in `b603f6f`) and video (fixed 2026-07-21 — a seek arriving
+during a decode-worker reopen cancelled the open, the worker exited, and the
+coordinator kept sending seeks to a channel nobody was reading, so video never
+returned for that file).
+
+The video path is now protected twice: `spawn_decode_thread` retries a cancelled
+open instead of exiting, and `DecodeThreadHandle::serves` requires a live worker
+count. The **audio** handle still checks only `control().is_some()`
+(`session.rs`, `execute_seek`), so a transient audio *open error* — as opposed to
+a cancellation, which is retried — still silences audio for the rest of the file.
+Low severity, but it is the same hazard and should get the same gate.
 
 ---
 
