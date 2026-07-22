@@ -2065,7 +2065,7 @@ impl PlaybackSession {
         self.cached_buffered_frames.set(Some(buffered));
         if self.audio_stream_expected
             && self.state != PlaybackState::Paused
-            && self.audio_sink.as_ref().map_or(false, |s| s.is_started())
+            && self.audio_sink.as_ref().is_some_and(|s| s.is_started())
             && self.queued_audio_frames.is_empty()
             && buffered == 0
             && !self.can_finish_with_buffered(0)?

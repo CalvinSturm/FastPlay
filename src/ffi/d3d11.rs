@@ -1,3 +1,10 @@
+// Win32/COM idioms confined to this seam: `D3D11_*_DESC` structs are built
+// field-by-field from `Default::default()` (the struct-literal form the lint
+// wants is unreadable for 10-field descriptors), and the HLSL shader sources are
+// NUL-terminated byte strings handed straight to D3DCompile.
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::manual_c_str_literals)]
+
 use std::{
     error::Error,
     ffi::c_void,

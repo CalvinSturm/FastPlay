@@ -110,17 +110,31 @@ historical context, not current guidance.
 
 CI runs all three on `windows-latest`.
 
-### R5 — Lint allow-list — **partially paid down** (2026-07-21)
+### R5 — Lint allow-list — **paid down** (2026-07-21)
 
 This section previously stated there was "no baseline allow-list" and no
 `#![allow(...)]` debt. That was wrong, and the codebase review corrected it:
 
-- `src/main.rs:6-17` disables **12 clippy categories crate-wide**. Several are
-  legitimate for a Win32/FFI codebase (`too_many_arguments`,
-  `upper_case_acronyms`, `useless_transmute`, `manual_c_str_literals`); the rest
-  (`type_complexity`, `unnecessary_cast`, `explicit_auto_deref`,
-  `unnecessary_map_or`, `field_reassign_with_default`) are stylistic debt the
-  file's own comment admits to.
+- ~~`src/main.rs` disables **12 clippy categories crate-wide**.~~ **DONE — now
+  one.** Each was measured individually (remove it, count what clippy then
+  reports, and where):
+  - `explicit_auto_deref` was hiding **nothing at all** — deleted.
+  - `upper_case_acronyms`, `useless_transmute` and `type_complexity` fire
+    *only* on the bindgen output, never on hand-written code. Scoped to
+    `ffi/ffmpeg.rs`, which is where that output is `include!`d.
+  - `manual_c_str_literals`, `field_reassign_with_default`, `cmp_null`,
+    `manual_dangling_ptr`, `unnecessary_cast` are Win32/COM idioms confined to
+    specific seams. Scoped to `ffi/d3d11.rs`, `ffi/dxgi.rs`, `ffi/runtime.rs`
+    and `platform/open_dialog.rs`.
+  - `manual_is_multiple_of` and `unnecessary_map_or` fired only in **safe
+    application code** — three sites in `app/viewport.rs`, `app/session.rs` and
+    `app/video_queue.rs`. Those were fixed rather than allowed.
+  - `too_many_arguments` stays crate-wide: it is genuinely spread across
+    `app/`, `render/` and `ffi/`, and bundling 8-12 parameter GPU/present calls
+    into structs purely to satisfy it would obscure more than it clarified.
+
+  Verified by injecting an `unnecessary_map_or` into `app/drop_stats.rs`: it now
+  fails `-D warnings`, where the blanket allow used to absorb it silently.
 - ~~**Seven modules** disable `dead_code` file-wide.~~ **DONE.** All seven
   blanket allows are gone. Removing them surfaced exactly five items, which is
   the point — a module-wide allow cannot distinguish reserved API from rot:
@@ -135,9 +149,9 @@ This section previously stated there was "no baseline allow-list" and no
   Two module comments were also stale, claiming the play queue was "not yet
   wired into the open flow" long after `main.rs` started driving it.
 
-Still open: the crate-wide clippy allows in `main.rs`. Several are legitimate
-for a Win32/FFI codebase and the rest need case-by-case judgement, so they are
-deliberately not swept in the same pass. See
+Net effect: **12 crate-wide allows became 1**, plus 11 module-scoped ones and
+three real fixes. A new violation of any of those categories outside the seam
+that needs it now fails CI. See
 [`audits/codebase-review.md`](./audits/codebase-review.md) §10 Stage 5.
 
 ### R7 — Audio endpoint-change detection was never implemented — **open**

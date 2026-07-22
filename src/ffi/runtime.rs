@@ -1,3 +1,7 @@
+// Width-normalizing casts around the Win32 ABI, where being explicit about the
+// integer width is the point.
+#![allow(clippy::unnecessary_cast)]
+
 use windows::Win32::{
     Media::{timeBeginPeriod, timeEndPeriod},
     System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS},
