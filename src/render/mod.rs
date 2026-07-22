@@ -1,5 +1,6 @@
 pub mod hdr;
 pub mod hdr_validate;
+pub mod overlay_raster;
 pub mod presenter;
 pub mod surface_registry;
 pub mod swapchain;
