@@ -1502,42 +1502,11 @@ impl PlaybackSession {
             // decode should abort so the new target can be applied.
             let cancelled = || control.seq() != serving.get() || control.is_shutdown();
 
-            // Non-blocking send that retries when the bounded channel is full,
-            // aborting if a newer command arrives so a stale decode cannot block
-            // forever on a full channel.
-            let worker_send =
-                |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
-                    let mut event = event;
-                    let mut full_retries: u32 = 0;
-                    loop {
-                        match tx.try_send(event) {
-                            Ok(()) => return Ok(()),
-                            Err(TrySendError::Full(returned)) => {
-                                if cancelled() {
-                                    return Err(WORKER_CANCELLED.to_string());
-                                }
-                                // Poll at 1ms while the consumer is actively
-                                // draining — this is the brief, transient
-                                // backpressure of normal playback, where a freed
-                                // slot must be refilled promptly to avoid audio
-                                // starvation. Once the queue has stayed full well
-                                // past any frame interval, the UI is paused or
-                                // stalled and is not draining at all; back off to
-                                // a longer sleep so a paused player does not spin
-                                // the decode thread. Shutdown and superseded-seek
-                                // are still observed every iteration, so cancel
-                                // latency stays within one sleep interval.
-                                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
-                                full_retries = full_retries.saturating_add(1);
-                                thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                                event = returned;
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                return Err(WORKER_CANCELLED.to_string());
-                            }
-                        }
-                    }
-                };
+            // Retrying bounded send; see `send_to_ui`. Wrapped so the call
+            // sites below keep their two-argument shape.
+            let worker_send = |event: SessionEvent, tx: &SyncSender<SessionEvent>| {
+                send_to_ui(event, tx, &cancelled)
+            };
 
             // Cancellation signal for FFmpeg's interrupt callback: aborts a
             // blocking open/read/seek when the worker is asked to shut down, so
@@ -1664,27 +1633,26 @@ impl PlaybackSession {
                     Err(error) => {
                         if !control.is_shutdown() {
                             let (seek_gen, op_id) = gen_cell.get();
-                            let event =
-                                if error.contains("device removed") || device.is_device_removed() {
-                                    SessionEvent::DeviceLost {
-                                        open_gen,
-                                        seek_gen,
-                                        op_id,
-                                    }
-                                } else if start_at.is_some() {
-                                    SessionEvent::PlaybackFailed {
-                                        open_gen,
-                                        seek_gen,
-                                        op_id,
-                                        error,
-                                    }
-                                } else {
-                                    SessionEvent::OpenFailed {
-                                        open_gen,
-                                        op_id,
-                                        error,
-                                    }
-                                };
+                            let event = if is_device_lost(&error, &device) {
+                                SessionEvent::DeviceLost {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                }
+                            } else if start_at.is_some() {
+                                SessionEvent::PlaybackFailed {
+                                    open_gen,
+                                    seek_gen,
+                                    op_id,
+                                    error,
+                                }
+                            } else {
+                                SessionEvent::OpenFailed {
+                                    open_gen,
+                                    op_id,
+                                    error,
+                                }
+                            };
                             let _ = worker_send(event, &sender);
                         }
                         return;
@@ -1775,21 +1743,7 @@ impl PlaybackSession {
                     Err(ref error) if error == WORKER_CANCELLED => {}
                     Err(error) => {
                         let (seek_gen, op_id) = gen_cell.get();
-                        let event =
-                            if error.contains("device removed") || device.is_device_removed() {
-                                SessionEvent::DeviceLost {
-                                    open_gen,
-                                    seek_gen,
-                                    op_id,
-                                }
-                            } else {
-                                SessionEvent::PlaybackFailed {
-                                    open_gen,
-                                    seek_gen,
-                                    op_id,
-                                    error,
-                                }
-                            };
+                        let event = worker_failure_event(error, &device, open_gen, seek_gen, op_id);
                         let _ = worker_send(event, &sender);
                     }
                 }
@@ -1806,20 +1760,7 @@ impl PlaybackSession {
                         gen_cell.set((seek_gen, op_id));
                         if let Err(error) = unsafe { session.seek(target) } {
                             let event =
-                                if error.contains("device removed") || device.is_device_removed() {
-                                    SessionEvent::DeviceLost {
-                                        open_gen,
-                                        seek_gen,
-                                        op_id,
-                                    }
-                                } else {
-                                    SessionEvent::PlaybackFailed {
-                                        open_gen,
-                                        seek_gen,
-                                        op_id,
-                                        error,
-                                    }
-                                };
+                                worker_failure_event(error, &device, open_gen, seek_gen, op_id);
                             let _ = worker_send(event, &sender);
                         }
                     }
@@ -1888,28 +1829,10 @@ impl PlaybackSession {
             let serving = Cell::new(0u64);
             // A newer command arrived (or shutdown): abort the in-flight decode.
             let cancelled = || control.seq() != serving.get() || control.is_shutdown();
-            let worker_send =
-                |event: SessionEvent, tx: &SyncSender<SessionEvent>| -> Result<(), String> {
-                    let mut event = event;
-                    let mut full_retries: u32 = 0;
-                    loop {
-                        match tx.try_send(event) {
-                            Ok(()) => return Ok(()),
-                            Err(TrySendError::Full(returned)) => {
-                                if cancelled() {
-                                    return Err(WORKER_CANCELLED.to_string());
-                                }
-                                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
-                                full_retries = full_retries.saturating_add(1);
-                                thread::sleep(Duration::from_millis(sleep_ms));
-                                event = returned;
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                return Err(WORKER_CANCELLED.to_string());
-                            }
-                        }
-                    }
-                };
+            // Same retrying bounded send as the video worker; see `send_to_ui`.
+            let worker_send = |event: SessionEvent, tx: &SyncSender<SessionEvent>| {
+                send_to_ui(event, tx, &cancelled)
+            };
 
             let io_cancel = || -> Box<dyn Fn() -> bool> {
                 let control = control.clone();
@@ -2810,6 +2733,82 @@ impl PlaybackSession {
         open_gen == self.generations.open()
             && seek_gen == self.generations.seek()
             && Some(op_id) == self.active_operation_id
+    }
+}
+
+/// Whether a worker error means the D3D11 device is gone, in which case the
+/// coordinator must rebuild it rather than fail playback. FFmpeg surfaces the
+/// condition in its message; the device is also asked directly, because a
+/// removal can be noticed between the failing call and this check.
+fn is_device_lost(error: &str, device: &crate::ffi::d3d11::D3D11Device) -> bool {
+    error.contains("device removed") || device.is_device_removed()
+}
+
+/// The event reporting a mid-stream worker error: a lost device is its own
+/// event (recoverable — the coordinator rebuilds and reopens), anything else
+/// fails playback. The open path does not use this because it has a third
+/// outcome (`OpenFailed`); it shares [`is_device_lost`] instead.
+fn worker_failure_event(
+    error: String,
+    device: &crate::ffi::d3d11::D3D11Device,
+    open_gen: OpenGeneration,
+    seek_gen: SeekGeneration,
+    op_id: OperationId,
+) -> SessionEvent {
+    if is_device_lost(&error, device) {
+        SessionEvent::DeviceLost {
+            open_gen,
+            seek_gen,
+            op_id,
+        }
+    } else {
+        SessionEvent::PlaybackFailed {
+            open_gen,
+            seek_gen,
+            op_id,
+            error,
+        }
+    }
+}
+
+/// Send a worker event to the UI thread over a bounded channel, retrying while
+/// it is full.
+///
+/// Polls at 1ms while the consumer is actively draining — that is the brief,
+/// transient backpressure of normal playback, where a freed slot must be
+/// refilled promptly to avoid audio starvation. Once the queue has stayed full
+/// well past any frame interval the UI is paused or stalled and is not draining
+/// at all, so it backs off to a longer sleep rather than spinning a decode
+/// thread for a paused player. `cancelled` is checked every iteration, so a
+/// shutdown or a superseded seek is observed within one sleep interval and a
+/// stale decode can never block forever on a full channel.
+///
+/// Shared by both worker bodies. Deliberately a free function rather than a
+/// trait or a generic worker type: there are exactly two callers and their
+/// surrounding error handling differs — only the video worker maps device loss.
+fn send_to_ui(
+    event: SessionEvent,
+    tx: &SyncSender<SessionEvent>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let mut event = event;
+    let mut full_retries: u32 = 0;
+    loop {
+        match tx.try_send(event) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(returned)) => {
+                if cancelled() {
+                    return Err(WORKER_CANCELLED.to_string());
+                }
+                let sleep_ms = if full_retries < 64 { 1 } else { 10 };
+                full_retries = full_retries.saturating_add(1);
+                thread::sleep(Duration::from_millis(sleep_ms));
+                event = returned;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(WORKER_CANCELLED.to_string());
+            }
+        }
     }
 }
 
