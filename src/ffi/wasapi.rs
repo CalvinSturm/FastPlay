@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt, mem,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     thread::{self, ThreadId},
@@ -308,14 +308,49 @@ impl Drop for MixFormat {
 /// different: that fails with `AUDCLNT_E_DEVICE_INVALIDATED` and is already
 /// handled on the next write.)
 ///
-/// The callback does the least work that is correct: it sets a flag. It runs on
-/// an MMDevice API worker thread, where COM forbids blocking and forbids
-/// re-entering the enumerator, and where none of the coordinator's state may be
-/// touched. `PlaybackSession` polls the flag on the UI thread during `tick`,
-/// exactly as it polls the window for resize requests.
+/// The callback does the least work that is correct: it hashes the provided
+/// endpoint ID and sets a flag only when that identity changes. It runs on an
+/// MMDevice API worker thread, where COM forbids blocking and forbids re-entering
+/// the enumerator, and where none of the coordinator's state may be touched.
+/// `PlaybackSession` polls the flag on the UI thread during `tick`, exactly as it
+/// polls the window for resize requests.
 #[windows::core::implement(IMMNotificationClient)]
 struct DefaultRenderEndpointNotifier {
     changed: Arc<AtomicBool>,
+    last_endpoint_hash: Arc<AtomicU64>,
+}
+
+/// Stable, allocation-free identity for an MMDevice endpoint ID.
+///
+/// Windows can deliver the same `(eRender, eConsole)` change more than once,
+/// far enough apart for the UI thread to consume the edge-triggered flag in
+/// between. Hashing the callback-owned UTF-16 ID lets the callback suppress
+/// those duplicates without blocking, allocating, or re-entering MMDevice.
+fn endpoint_id_hash(device_id: &windows_core::PCWSTR) -> u64 {
+    if device_id.is_null() {
+        return 1;
+    }
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    // SAFETY: MMDevice owns this NUL-terminated endpoint ID and guarantees it
+    // remains valid for the duration of the callback.
+    for code_unit in unsafe { device_id.as_wide() } {
+        hash ^= u64::from(*code_unit);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn current_default_endpoint_hash(enumerator: &IMMDeviceEnumerator) -> Option<u64> {
+    // SAFETY: the enumerator is live in this apartment. GetId returns a
+    // CoTaskMem allocation which is released before returning.
+    unsafe {
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+        let id = device.GetId().ok()?;
+        let hash = endpoint_id_hash(&windows_core::PCWSTR(id.0));
+        CoTaskMemFree(Some(id.0.cast()));
+        Some(hash)
+    }
 }
 
 impl IMMNotificationClient_Impl for DefaultRenderEndpointNotifier_Impl {
@@ -323,15 +358,22 @@ impl IMMNotificationClient_Impl for DefaultRenderEndpointNotifier_Impl {
         &self,
         flow: EDataFlow,
         role: ERole,
-        _default_device_id: &windows_core::PCWSTR,
+        default_device_id: &windows_core::PCWSTR,
     ) -> windows_core::Result<()> {
         // Only the render endpoint this sink asks for. Windows raises one
         // notification per role (eConsole / eMultimedia / eCommunications) for
         // the same physical switch; filtering to the role the sink is opened
-        // with (`eConsole`, see `create_shared_default`) keeps one user action
-        // to one recovery. The flag would coalesce duplicates anyway.
+        // with (`eConsole`, see `create_shared_default`) removes the other two.
+        // Some drivers still repeat the console notification after `tick` has
+        // consumed the first flag, so also suppress an unchanged endpoint ID.
         if flow == eRender && role == eConsole {
-            self.changed.store(true, Ordering::Release);
+            let endpoint_hash = endpoint_id_hash(default_device_id);
+            let previous = self
+                .last_endpoint_hash
+                .swap(endpoint_hash, Ordering::AcqRel);
+            if previous != endpoint_hash {
+                self.changed.store(true, Ordering::Release);
+            }
         }
         Ok(())
     }
@@ -388,8 +430,12 @@ impl DefaultRenderEndpointWatch {
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
         let changed = Arc::new(AtomicBool::new(false));
+        let last_endpoint_hash = Arc::new(AtomicU64::new(
+            current_default_endpoint_hash(&enumerator).unwrap_or(0),
+        ));
         let client: IMMNotificationClient = DefaultRenderEndpointNotifier {
             changed: changed.clone(),
+            last_endpoint_hash,
         }
         .into();
         unsafe { enumerator.RegisterEndpointNotificationCallback(&client)? };
@@ -474,6 +520,7 @@ mod tests {
         let changed = Arc::new(AtomicBool::new(false));
         let client: IMMNotificationClient = DefaultRenderEndpointNotifier {
             changed: changed.clone(),
+            last_endpoint_hash: Arc::new(AtomicU64::new(0)),
         }
         .into();
         (client, changed)
@@ -527,6 +574,7 @@ mod tests {
         let changed = Arc::new(AtomicBool::new(false));
         let client: IMMNotificationClient = DefaultRenderEndpointNotifier {
             changed: changed.clone(),
+            last_endpoint_hash: Arc::new(AtomicU64::new(0)),
         }
         .into();
         for _ in 0..5 {
@@ -537,6 +585,38 @@ mod tests {
             !changed.swap(false, Ordering::AcqRel),
             "and only one: the flag is edge-triggered"
         );
+        notify(&client, eRender, eConsole);
+        assert!(
+            !changed.load(Ordering::Acquire),
+            "the same endpoint remains suppressed after the flag was consumed"
+        );
+    }
+
+    #[test]
+    fn a_distinct_endpoint_records_a_new_switch() {
+        let changed = Arc::new(AtomicBool::new(false));
+        let last_endpoint_hash = Arc::new(AtomicU64::new(0));
+        let client: IMMNotificationClient = DefaultRenderEndpointNotifier {
+            changed: changed.clone(),
+            last_endpoint_hash,
+        }
+        .into();
+        let first = "endpoint-a\0".encode_utf16().collect::<Vec<_>>();
+        let second = "endpoint-b\0".encode_utf16().collect::<Vec<_>>();
+
+        unsafe {
+            client
+                .OnDefaultDeviceChanged(eRender, eConsole, windows_core::PCWSTR(first.as_ptr()))
+                .unwrap();
+        }
+        assert!(changed.swap(false, Ordering::AcqRel));
+
+        unsafe {
+            client
+                .OnDefaultDeviceChanged(eRender, eConsole, windows_core::PCWSTR(second.as_ptr()))
+                .unwrap();
+        }
+        assert!(changed.load(Ordering::Acquire));
     }
 
     #[test]
