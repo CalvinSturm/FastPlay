@@ -6,3 +6,6 @@ validation/*.mp4
 # Benchmark harness: generated corpus and result reports (see bench/README.md)
 bench/corpus/
 bench/results/
+
+# Local manual-testing launcher (build + run + session.log summary)
+run-fastplay.bat
