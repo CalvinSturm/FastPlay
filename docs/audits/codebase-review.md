@@ -128,9 +128,13 @@ No type checker or static analyser beyond `rustc`/`clippy` applies; there is no 
 linter or formatter config to run. `bench/run-bench.ps1` exists but is deliberately not wired
 into CI (`ROADMAP.md §2`) and needs a generated local corpus; it was not run.
 
-**Note on the lint baseline:** `clippy` is clean, but `src/main.rs:6-17` disables 12 lint
-categories crate-wide before clippy ever runs, and 7 modules disable `dead_code` wholesale.
-A clean clippy run here is a weaker signal than `docs/TECH_DEBT.md §3` claims. See §5-M4.
+**Note on the lint baseline (as audited):** `clippy` was clean, but `src/main.rs:6-17`
+disabled 12 lint categories crate-wide before clippy ever ran, and 7 modules disabled
+`dead_code` wholesale — so a clean run was a weaker signal than `docs/TECH_DEBT.md §3`
+claimed. Both were paid down in Stages 5 and M4: one crate-wide allow remains
+(`too_many_arguments`), the rest are scoped to the module that needs them or were fixed
+outright, and no blanket `dead_code` allow survives. A clean clippy run now means what it
+says everywhere outside the FFI seams.
 
 ---
 
@@ -187,7 +191,7 @@ Labels: **CD** confirmed defect · **HR** high-confidence risk · **MI** maintai
 | M1 | Medium | CD | Holding Ctrl+S toggles subtitles on every key repeat | `ffi/dxgi.rs:1826` |
 | M2 | Medium | MI | The entire input keymap lives inside `window_proc` in the unsafe FFI seam | `ffi/dxgi.rs:1652-2278` |
 | M3 | Medium | MI | ~1,240 lines of CPU 2D rasterizer live inside the D3D11 FFI seam | `ffi/d3d11.rs:3058-4294` |
-| M4 | Medium | MI | `TECH_DEBT.md` asserts "no baseline allow-list"; there are 12 crate allows + 7 module `dead_code` allows | `docs/TECH_DEBT.md §3`, `main.rs:6-17` |
+| ~~M4~~ | Medium | MI | ~~`TECH_DEBT.md` asserts "no baseline allow-list"; 12 crate allows + 7 module `dead_code` allows~~ — **DONE**: 12 crate-wide became 1, the rest scoped or fixed; all 7 `dead_code` allows gone | `docs/TECH_DEBT.md §3`, `main.rs` |
 | M5 | Medium | TG | Neither `window_proc` nor the rasterizer has a single direct test; both are untestable in place | `ffi/dxgi.rs`, `ffi/d3d11.rs` |
 | L1 | Low | HR | `AVFrame` not unreferenced on two of four error paths in `receive_video_frames` | `ffi/ffmpeg.rs:1528`, `:1543` |
 | L2 | Low | HR | Two latent `clamp` panics in timeline rendering, unreachable at the enforced minimum window size | `ffi/d3d11.rs:3276`, `:3289`, `:3305`; `render/timeline.rs:61` |
@@ -626,9 +630,17 @@ Each stage is one small, reviewable PR. Full validation (`fmt` / `clippy -D warn
   - Two stale module comments corrected: `media_ext.rs` and `play_queue.rs` both still claimed
     the play queue was "not yet wired into the open flow", long after `main.rs` began driving
     it.
-- **Not swept:** the 12 crate-wide clippy allows in `main.rs`. Several are legitimate for a
-  Win32/FFI codebase and the rest need case-by-case judgement; bundling them into a
-  mechanical pass would have hidden that judgement.
+- **The 12 crate-wide clippy allows were swept too**, after measuring each one individually
+  rather than judging it by name: remove the allow, count what clippy reports, and note which
+  files those reports land in. `explicit_auto_deref` was hiding nothing and was deleted. Three
+  (`upper_case_acronyms`, `useless_transmute`, `type_complexity`) fire *only* on the bindgen
+  output and moved to `ffi/ffmpeg.rs`, the module that `include!`s it. Five more are Win32/COM
+  idioms and moved to the specific seams that use them. Two — `manual_is_multiple_of` and
+  `unnecessary_map_or` — fired only in **safe application code**, three sites in total, and
+  were fixed rather than allowed. Only `too_many_arguments` remains crate-wide, because it
+  genuinely spans `app/`, `render/` and `ffi/`. **12 crate-wide allows became 1.** Verified by
+  injecting an `unnecessary_map_or` into `app/drop_stats.rs` and confirming it now fails
+  `-D warnings`, where the blanket allow used to absorb it silently.
 - **Regression risk:** realized as none — 210 tests still pass, `clippy -D warnings` clean.
 - **Depends on:** nothing; can run in parallel.
 

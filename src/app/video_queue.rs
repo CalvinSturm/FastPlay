@@ -68,7 +68,7 @@ impl VideoFrameQueue {
         let insert_at = if self
             .frames
             .back()
-            .map_or(true, |last| frame.pts() >= last.pts())
+            .is_none_or(|last| frame.pts() >= last.pts())
         {
             self.frames.len()
         } else {

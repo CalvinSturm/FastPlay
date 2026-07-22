@@ -1,3 +1,8 @@
+// The bindgen output is `include!`d into this module, so its lint profile is
+// this module's. `upper_case_acronyms`, `useless_transmute` and
+// `type_complexity` fire *only* on that generated code, never on code written
+// here; `unnecessary_cast` covers the width-normalizing casts around the C ABI,
+// where being explicit is the point.
 #![allow(
     dead_code,
     non_camel_case_types,
@@ -6,6 +11,10 @@
     improper_ctypes,
     unnecessary_transmutes
 )]
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::useless_transmute)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::unnecessary_cast)]
 
 use std::{
     cell::Cell,

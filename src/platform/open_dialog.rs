@@ -1,3 +1,6 @@
+// Raw null checks on the COM out-parameters the shell dialog fills in.
+#![allow(clippy::cmp_null)]
+
 use std::path::PathBuf;
 use std::ptr::null_mut;
 

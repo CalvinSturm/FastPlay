@@ -1,3 +1,11 @@
+// Win32 idioms confined to this seam: descriptor structs built field-by-field
+// from `Default::default()`, raw null checks on pointers handed in by the window
+// procedure, and the dangling-pointer construction Win32 expects for empty
+// buffer arguments.
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::cmp_null)]
+#![allow(clippy::manual_dangling_ptr)]
+
 use std::{
     cell::{Cell, RefCell},
     error::Error,
