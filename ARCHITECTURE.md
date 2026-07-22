@@ -234,8 +234,11 @@ It is the only subsystem allowed to:
 * WASAPI client lifetime
 * shared-mode stream initialization
 * buffer submission
-* audio endpoint recovery detection
 * audio clock reporting
+
+The sink does **not** own endpoint-change detection. It is bound to one
+`IMMDevice` for its lifetime and cannot observe the default moving away from it;
+see §19.
 
 ### Workers do **not**
 
@@ -265,11 +268,26 @@ enum SessionEvent {
     OpenFailed { open_gen, op_id, error },
     PlaybackFailed { open_gen, seek_gen, op_id, error },
     DeviceLost { open_gen, seek_gen, op_id },
-    AudioEndpointChanged { open_gen, seek_gen, op_id },
 }
 ```
 
 This preserves the **single-coordinator rule**.
+
+### Not a `SessionEvent`: default audio endpoint changes
+
+`SessionEvent` carries **worker output**, which is why every variant is stamped
+with generations — the coordinator rejects work belonging to a superseded open
+or seek before acting on it.
+
+A default-endpoint change is not worker output. It is a global fact about the
+machine, delivered by Windows on an MMDevice callback thread, and it is never
+"stale" in the sense generations model. Stamping it would be actively wrong: an
+endpoint change arriving mid-seek would carry pre-seek generations, be rejected
+by the staleness check, and be lost.
+
+It is therefore polled, not routed — the same shape as a window resize request
+(§17). The COM callback sets a flag and nothing else; `tick(now)` consumes it on
+the UI thread and acts with its own current state. See §19.
 
 ---
 
@@ -609,13 +627,39 @@ Record `device_recovery_ms`.
 
 ## 19. Audio Endpoint Changes
 
-Audio endpoint changes are part of v1 robustness testing.
+Audio endpoint changes are part of v1 robustness testing. There are two
+distinct cases and they are detected differently, because only one of them
+produces an error to react to.
+
+### Case 1 — the device in use goes away
+
+Unplugged, disabled, or removed. WASAPI calls against the sink begin failing
+with `AUDCLNT_E_DEVICE_INVALIDATED`. This is detected **reactively**: the failed
+write surfaces in `submit_due_audio`, which calls `recover_audio_endpoint`.
+Detection is within one `tick`.
+
+### Case 2 — the default moves to a different device
+
+The user plugs in headphones, changes output in the volume flyout, or connects a
+Bluetooth sink. An `IAudioClient` is bound to one specific `IMMDevice` for its
+lifetime, so **every WASAPI call keeps succeeding** and audio keeps rendering to
+the old endpoint. There is no error, and no reactive scheme can see this.
+
+This is detected **proactively**, by an `IMMNotificationClient` registered at
+session construction. The callback runs on an MMDevice worker thread where COM
+forbids blocking and forbids re-entering the enumerator, so it does the least
+work that is correct: it filters to `(eRender, eConsole)` — the flow and role the
+sink is opened with — and sets a flag. `tick(now)` polls that flag on the UI
+thread (see §7). Registration failure is non-fatal and degrades to Case 1 alone.
 
 ### On endpoint change
 
-* detect
-* flush/rebuild sink as needed
-* preserve session intent if possible
+* detect (per the two cases above)
+* rebuild the sink **and** respawn the decode workers — they resample to the
+  sink's mix format, captured at spawn, and the new device may differ in rate or
+  channel count
+* preserve session intent: a paused or finished player must not start playing
+  because the output device changed
 * do not let audio sink become a second coordinator
 
 ---

@@ -1,9 +1,17 @@
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use windows::Win32::{
     Media::Audio::{
-        eConsole, eRender, IAudioClient3, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+        eConsole, eRender, EDataFlow, ERole, IAudioClient3, IAudioRenderClient, IMMDevice,
+        IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
+        AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     },
     Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
     Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT,
@@ -11,6 +19,7 @@ use windows::Win32::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
         COINIT_APARTMENTTHREADED,
     },
+    UI::Shell::PropertiesSystem::PROPERTYKEY,
 };
 
 use crate::media::audio::AudioStreamFormat;
@@ -280,5 +289,212 @@ impl Drop for MixFormat {
         unsafe {
             CoTaskMemFree(Some(self.0.cast()));
         }
+    }
+}
+
+// ── Default-endpoint change notification ─────────────────────────────────────
+
+/// COM callback that records when Windows switches the default render endpoint.
+///
+/// Exists because the reactive path cannot see this case. An `IAudioClient` is
+/// bound to one specific `IMMDevice` for its lifetime, so when the *default*
+/// changes while the old device stays valid — the user plugs in headphones,
+/// picks another output in the volume flyout, connects a Bluetooth sink — every
+/// WASAPI call keeps succeeding and audio keeps coming out of the old endpoint.
+/// There is no error for `submit_due_audio` to notice. (Device *removal* is
+/// different: that fails with `AUDCLNT_E_DEVICE_INVALIDATED` and is already
+/// handled on the next write.)
+///
+/// The callback does the least work that is correct: it sets a flag. It runs on
+/// an MMDevice API worker thread, where COM forbids blocking and forbids
+/// re-entering the enumerator, and where none of the coordinator's state may be
+/// touched. `PlaybackSession` polls the flag on the UI thread during `tick`,
+/// exactly as it polls the window for resize requests.
+#[windows::core::implement(IMMNotificationClient)]
+struct DefaultRenderEndpointNotifier {
+    changed: Arc<AtomicBool>,
+}
+
+impl IMMNotificationClient_Impl for DefaultRenderEndpointNotifier_Impl {
+    fn OnDefaultDeviceChanged(
+        &self,
+        flow: EDataFlow,
+        role: ERole,
+        _default_device_id: &windows_core::PCWSTR,
+    ) -> windows_core::Result<()> {
+        // Only the render endpoint this sink asks for. Windows raises one
+        // notification per role (eConsole / eMultimedia / eCommunications) for
+        // the same physical switch; filtering to the role the sink is opened
+        // with (`eConsole`, see `create_shared_default`) keeps one user action
+        // to one recovery. The flag would coalesce duplicates anyway.
+        if flow == eRender && role == eConsole {
+            self.changed.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn OnDeviceStateChanged(
+        &self,
+        _device_id: &windows_core::PCWSTR,
+        _new_state: DEVICE_STATE,
+    ) -> windows_core::Result<()> {
+        // Removal/disable of the device in use surfaces as a failed WASAPI
+        // write, which `submit_due_audio` already recovers from. Reacting here
+        // too would double-recover on one event.
+        Ok(())
+    }
+
+    fn OnDeviceAdded(&self, _device_id: &windows_core::PCWSTR) -> windows_core::Result<()> {
+        // A new device only matters if Windows makes it the default, which
+        // arrives separately as OnDefaultDeviceChanged.
+        Ok(())
+    }
+
+    fn OnDeviceRemoved(&self, _device_id: &windows_core::PCWSTR) -> windows_core::Result<()> {
+        Ok(())
+    }
+
+    fn OnPropertyValueChanged(
+        &self,
+        _device_id: &windows_core::PCWSTR,
+        _key: &PROPERTYKEY,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// A live registration for default-render-endpoint changes.
+///
+/// Holds the enumerator and the registered client so both outlive the
+/// notification. Deliberately never unregisters: the process exits via
+/// `process::exit` without tearing down COM (see `PlaybackSession::shutdown`),
+/// and unregistering during a callback is exactly the re-entrancy COM forbids.
+pub struct DefaultRenderEndpointWatch {
+    changed: Arc<AtomicBool>,
+    _com: ComApartment,
+    _enumerator: IMMDeviceEnumerator,
+    _client: IMMNotificationClient,
+}
+
+impl DefaultRenderEndpointWatch {
+    /// Register for default-render-endpoint changes. Non-fatal by design: the
+    /// caller degrades to the reactive-only path if this fails.
+    pub fn install() -> Result<Self, Box<dyn Error>> {
+        let com = ComApartment::initialize()?;
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+        let changed = Arc::new(AtomicBool::new(false));
+        let client: IMMNotificationClient = DefaultRenderEndpointNotifier {
+            changed: changed.clone(),
+        }
+        .into();
+        unsafe { enumerator.RegisterEndpointNotificationCallback(&client)? };
+        Ok(Self {
+            changed,
+            _com: com,
+            _enumerator: enumerator,
+            _client: client,
+        })
+    }
+
+    /// Consume the "default render endpoint changed" flag, returning whether one
+    /// was pending. Edge-triggered: true at most once per switch.
+    pub fn take_changed(&self) -> bool {
+        self.changed.swap(false, Ordering::AcqRel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Media::Audio::{eCapture, eCommunications, eMultimedia};
+
+    /// Build the notifier behind its COM interface, plus the flag it writes, so
+    /// the callback can be invoked exactly as the audio engine would.
+    fn notifier() -> (IMMNotificationClient, Arc<AtomicBool>) {
+        let changed = Arc::new(AtomicBool::new(false));
+        let client: IMMNotificationClient = DefaultRenderEndpointNotifier {
+            changed: changed.clone(),
+        }
+        .into();
+        (client, changed)
+    }
+
+    fn notify(client: &IMMNotificationClient, flow: EDataFlow, role: ERole) {
+        unsafe {
+            client
+                .OnDefaultDeviceChanged(flow, role, windows_core::PCWSTR::null())
+                .expect("callback must not fail");
+        }
+    }
+
+    #[test]
+    fn records_a_default_render_console_switch() {
+        let (client, changed) = notifier();
+        assert!(!changed.load(Ordering::Acquire), "starts clear");
+        notify(&client, eRender, eConsole);
+        assert!(
+            changed.load(Ordering::Acquire),
+            "the switch must be recorded"
+        );
+    }
+
+    #[test]
+    fn ignores_roles_and_flows_the_sink_does_not_use() {
+        // The sink opens (eRender, eConsole). Windows raises a notification per
+        // role for one physical switch, and capture devices are irrelevant here;
+        // reacting to those would restart playback for events that do not affect
+        // where this stream is rendered.
+        for (flow, role) in [
+            (eRender, eMultimedia),
+            (eRender, eCommunications),
+            (eCapture, eConsole),
+            (eCapture, eMultimedia),
+            (eCapture, eCommunications),
+        ] {
+            let (client, changed) = notifier();
+            notify(&client, flow, role);
+            assert!(
+                !changed.load(Ordering::Acquire),
+                "flow {flow:?} role {role:?} must not trigger a switch"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_notifications_coalesce_into_one_switch() {
+        // One user action can raise several notifications. The coordinator must
+        // restart once, not once per notification.
+        let changed = Arc::new(AtomicBool::new(false));
+        let client: IMMNotificationClient = DefaultRenderEndpointNotifier {
+            changed: changed.clone(),
+        }
+        .into();
+        for _ in 0..5 {
+            notify(&client, eRender, eConsole);
+        }
+        assert!(changed.swap(false, Ordering::AcqRel), "one switch pending");
+        assert!(
+            !changed.swap(false, Ordering::AcqRel),
+            "and only one: the flag is edge-triggered"
+        );
+    }
+
+    #[test]
+    fn the_other_callbacks_do_not_trigger_a_switch() {
+        // Device add/remove/state/property changes are either irrelevant or
+        // already covered by the reactive write-failure path. Reacting here too
+        // would double-recover on a single event.
+        let (client, changed) = notifier();
+        unsafe {
+            let id = windows_core::PCWSTR::null();
+            client.OnDeviceAdded(id).unwrap();
+            client.OnDeviceRemoved(id).unwrap();
+            client.OnDeviceStateChanged(id, DEVICE_STATE(1)).unwrap();
+            client
+                .OnPropertyValueChanged(id, PROPERTYKEY::default())
+                .unwrap();
+        }
+        assert!(!changed.load(Ordering::Acquire));
     }
 }
