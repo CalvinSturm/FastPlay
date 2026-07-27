@@ -1,7 +1,6 @@
 target/
 validation/*.log
 validation/*.mp4
-.agent/
 
 # Benchmark harness: generated corpus and result reports (see bench/README.md)
 bench/corpus/

@@ -736,8 +736,8 @@ uncommitted modifications to `session.rs`, `main.rs`, `metrics.rs`, `app/mod.rs`
 It was diffed as part of this review. The uncommitted work is an **early draft of the v0.3.0
 `OverlayManager` / `MetricsCollector` / `timeline_ui` extraction — all three of which already
 shipped on `main`**. Nothing in it is salvageable. It is safe to `git worktree remove` at the
-owner's discretion; this review deliberately did not remove it. (`.agent/` is gitignored, so
-it does not affect the tracked tree.)
+owner's discretion; this review deliberately did not remove it. (The worktree directory is
+untracked, so it does not affect the tracked tree.)
 
 **Documentation drift to reconcile** (L8, M4):
 
