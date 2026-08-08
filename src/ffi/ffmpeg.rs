@@ -611,8 +611,15 @@ impl DecodeSession {
                         }
                     }
                 }
-                ffmpeg_check(send_result, "avcodec_send_packet(video)")?;
+                // Unref before propagating: this session outlives a failed run
+                // (the worker reports the error, parks on `wait_next`, and a
+                // later seek calls `run_to_eof` again), and `av_read_frame`
+                // overwrites the packet without unreferencing what it already
+                // holds. Returning `?` directly leaked one packet buffer per
+                // error.
+                let send_check = ffmpeg_check(send_result, "avcodec_send_packet(video)");
                 av_packet_unref(self.packet.0);
+                send_check?;
                 receive_video_frames(
                     &mut self.video,
                     self.frame.0,
@@ -641,11 +648,13 @@ impl DecodeSession {
 
             if let Some(audio) = self.audio.as_mut() {
                 if (*self.packet.0).stream_index == audio.stream_index as i32 {
-                    ffmpeg_check(
+                    // Unref before propagating; see the video branch above.
+                    let send_check = ffmpeg_check(
                         avcodec_send_packet(audio.codec.0, self.packet.0),
                         "avcodec_send_packet(audio)",
-                    )?;
+                    );
                     av_packet_unref(self.packet.0);
+                    send_check?;
                     receive_audio_frames(
                         audio,
                         self.frame.0,
@@ -878,11 +887,16 @@ impl AudioDecodeSession {
             self.interrupt.set_deadline(None);
 
             if (*self.packet.0).stream_index == self.audio.stream_index as i32 {
-                ffmpeg_check(
+                // Unref before propagating: a mid-stream audio decode error is
+                // explicitly non-fatal (the worker logs it, parks, and serves
+                // the next seek on this same session), so leaking the packet
+                // buffer here would accumulate across a file's errors.
+                let send_check = ffmpeg_check(
                     avcodec_send_packet(self.audio.codec.0, self.packet.0),
                     "avcodec_send_packet(audio)",
-                )?;
+                );
                 av_packet_unref(self.packet.0);
+                send_check?;
                 receive_audio_frames(
                     &mut self.audio,
                     self.frame.0,
