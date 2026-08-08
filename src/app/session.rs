@@ -1422,7 +1422,6 @@ impl PlaybackSession {
         self.audio.reset_clock();
         self.drop_buckets = VideoDropBuckets::default();
         self.metrics.reset_for_operation();
-        self.video_stream_ended = false;
         self.audio_stream_ended = false;
         self.active_decode_mode = None;
         self.overlay.volume_overlay_until = None;
@@ -1436,6 +1435,8 @@ impl PlaybackSession {
             // determination (the worker is not respawned to re-report it).
             self.video_stream_expected = true;
         }
+        // Must follow the `video_stream_expected` reset above, which decides it.
+        self.video_stream_ended = video_starts_ended(self.video_stream_expected);
 
         if rebuild_audio_sink {
             self.audio_sink = match AudioSink::create_shared_default() {
@@ -1607,6 +1608,21 @@ impl PlaybackSession {
                             )
                         },
                     )
+                };
+                // `open` reports a supersession two different ways. It returns
+                // `Cancelled` when it polls `cancelled` itself, but its progress
+                // callbacks (decode mode, presentation path, duration) go
+                // through `worker_send`, which reports `WORKER_CANCELLED` when a
+                // newer command arrives while it is blocked on a full event
+                // channel. Both mean "a seek is pending", not "this file failed
+                // to open" — and the `Err` arm below exits the thread, which is
+                // exactly the wedge the retry loop exists to prevent (the
+                // coordinator keeps sending seeks to a control channel that
+                // outlives the thread and never learns nobody is reading it).
+                // Normalize the two before dispatching.
+                let open_result = match open_result {
+                    Err(ref error) if error == WORKER_CANCELLED => Ok(ffmpeg::VideoOpen::Cancelled),
+                    other => other,
                 };
                 match open_result {
                     Ok(ffmpeg::VideoOpen::Ready(session)) => break session,
@@ -1870,6 +1886,9 @@ impl PlaybackSession {
             // Serve the command instead and reopen at its target.
             let mut start_at = start_position;
             let mut session = loop {
+                // Unlike the video worker, this open takes no progress callbacks
+                // and so never reports a `worker_send` cancellation as an open
+                // error; `AudioOpen::Cancelled` is the only supersession path.
                 match unsafe {
                     AudioDecodeSession::open(
                         &source,
@@ -2748,9 +2767,31 @@ impl PlaybackSession {
         ))
     }
 
+    /// Drop the frame the presenter is showing and the frames queued behind it,
+    /// on the way into [`PlaybackState::Error`].
+    ///
+    /// Required for the error overlay to be visible at all. `Presenter::render`
+    /// takes the `render_surface` path whenever a surface is selected, and that
+    /// path is not passed the idle overlay — so an error that arrives *after* a
+    /// frame has been shown left the last frame on screen and the "Drop a file"
+    /// message unreachable. Worse, it self-perpetuated: `set_idle_overlay`
+    /// clears `has_ever_shown_content` to re-arm the idle path, `render` set it
+    /// straight back because a surface was still selected, and
+    /// `show_error_idle_overlay` therefore rebuilt the GDI text overlay and
+    /// forced a present on *every* tick of an errored session, forever.
+    ///
+    /// The queue is released before the epoch reset only so each frame takes the
+    /// ordinary [`Self::clear_video_queue`] release path; `clear_for_new_epoch`
+    /// drops the entries outright, so the surfaces are freed either way.
+    fn release_presented_content(&mut self) {
+        self.clear_video_queue();
+        self.presenter.reset_surfaces();
+    }
+
     fn fail_open(&mut self, error: String) {
         self.decode_thread.teardown(false);
         self.audio_decode_thread.teardown(false);
+        self.release_presented_content();
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
@@ -2762,6 +2803,7 @@ impl PlaybackSession {
     fn fail_playback(&mut self, error: String) {
         self.decode_thread.teardown(false);
         self.audio_decode_thread.teardown(false);
+        self.release_presented_content();
         self.pending_seek_target = None;
         self.last_error = Some(error.clone());
         self.active_operation_id = None;
@@ -2975,9 +3017,33 @@ fn media_time_origin(first_pts: Duration, start_position: Duration) -> Duration 
     first_pts.saturating_sub(start_position)
 }
 
+/// Whether the video side counts as already-ended when a new operation resets
+/// the runtime state, given whether this file is still expected to have video.
+///
+/// End-of-stream is normally re-learned from the worker on every operation, so
+/// it clears. The exception is a file with **no video track at all**: the video
+/// worker reports `NoVideoStream` once, retires, and is deliberately never
+/// respawned ([`SeekDelivery::Retired`]) so that scrubbing an `.mp3` does not
+/// reopen and re-demux it on every seek just to rediscover the same absence.
+/// Nothing will ever set the flag again, so clearing it on a seek left
+/// `video_stream_ended == false` forever — and `can_finish_with_buffered`
+/// requires it. Audio-only media could then never reach `Ended` after a single
+/// scrub: no play-queue auto-advance, no replay on Space, and the UI loop kept
+/// spin-pacing at 1 ms because `is_idle_for_input` excludes `Draining`.
+///
+/// A stream the file does not have is trivially already at its end. There is no
+/// audio counterpart because `audio_stream_expected` means "audio has been seen"
+/// rather than "audio exists", and `can_finish_with_buffered` skips the audio
+/// terms entirely when it is false.
+fn video_starts_ended(video_stream_expected: bool) -> bool {
+    !video_stream_expected
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_switch_for, media_time_origin, EndedSignal, EndpointSwitch};
+    use super::{
+        endpoint_switch_for, media_time_origin, video_starts_ended, EndedSignal, EndpointSwitch,
+    };
     use crate::app::state::PlaybackState;
     use std::time::Duration;
 
@@ -3097,5 +3163,27 @@ mod tests {
     fn keyframe_before_target_saturates_without_underflow() {
         // A backward seek may land a hair before the target; never underflow.
         assert_eq!(media_time_origin(s(58), s(60)), s(0));
+    }
+
+    #[test]
+    fn a_file_with_video_relearns_end_of_stream_each_operation() {
+        // The video worker is live and will report VideoStreamEnded again, so
+        // every open/seek/recovery must start from "not ended".
+        assert!(!video_starts_ended(true));
+    }
+
+    #[test]
+    fn audio_only_media_stays_ended_across_a_seek() {
+        // Regression: the video worker reports NoVideoStream once and retires,
+        // and `SeekDelivery::Retired` deliberately never respawns it. Clearing
+        // video_stream_ended on a seek therefore left it false forever, and
+        // `can_finish_with_buffered` requires it — so an .mp3 that had been
+        // scrubbed even once could never reach Ended. No auto-advance to the
+        // next queued track, no replay on Space, and the UI loop kept
+        // spin-pacing because Draining is not idle.
+        assert!(
+            video_starts_ended(false),
+            "a file with no video track is trivially already at its video end"
+        );
     }
 }
