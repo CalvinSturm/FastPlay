@@ -58,15 +58,12 @@ fn main() {
             let _ = std::fs::write(dir.join("crash.log"), &msg);
         }
     }));
+    // Only errors raised *before* the session exists reach here — startup
+    // failures like argument parsing or window creation. Once a session is
+    // live, `run()` routes both outcomes through `shutdown_and_exit` instead.
     if let Err(error) = run() {
-        let msg = format!("fatal: {error}");
-        flog!("{msg}");
+        report_fatal(&*error);
         logging::dump_to_session_log();
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            let dir = std::path::PathBuf::from(appdata).join("FastPlay");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join("crash.log"), &msg);
-        }
         std::process::exit(1);
     }
 
@@ -124,21 +121,49 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Path of the currently-open file, so its progress can be saved when we
     // switch files or exit. `None` until the first file opens.
     let mut current: Option<PathBuf> = None;
-    // Recent overlay selection; `Some(index)` while the overlay is open.
-    let mut recent_selected: Option<usize> = None;
     // The play queue. Owned here, beside `RecentFiles`; `PlaybackSession` stays a
     // single-file coordinator and is unaware of it. Empty until the first open.
     let mut play_queue: PlayQueue = PlayQueue::from_paths(Vec::<PathBuf>::new());
 
+    // Every fallible step that runs while `session` is alive lives inside
+    // `event_loop`, and its outcome — clean close or fatal error — leaves
+    // through `shutdown_and_exit`. Keeping the `?`s behind that boundary is what
+    // stops a fatal error from dropping `session` on the way out; see
+    // `shutdown_and_exit` for why that drop is a bug and not merely untidy.
+    //
+    // `session` is passed by reference, never moved: `install_modal_tick` above
+    // registered a raw pointer to it with the window.
+    let outcome = event_loop(
+        &mut session,
+        &mut recent,
+        &mut current,
+        &mut play_queue,
+        &mut timeline_ui,
+        media_path,
+    );
+
+    shutdown_and_exit(&mut session, &mut recent, &current, outcome)
+}
+
+/// The UI event loop: pumps messages, dispatches input, and drives playback
+/// until the window closes or a step fails.
+///
+/// Fatal errors are *returned*, never propagated out of [`run`]. The caller
+/// owns `session` and must hand the outcome to [`shutdown_and_exit`], which is
+/// the only path allowed to end a live session.
+fn event_loop(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &mut Option<PathBuf>,
+    play_queue: &mut PlayQueue,
+    timeline_ui: &mut TimelineUiState,
+    media_path: Option<MediaSource>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Recent overlay selection; `Some(index)` while the overlay is open.
+    let mut recent_selected: Option<usize> = None;
+
     if let Some(source) = media_path {
-        open_single_file(
-            &mut session,
-            &mut recent,
-            &mut current,
-            &mut play_queue,
-            source,
-            Instant::now(),
-        )?;
+        open_single_file(session, recent, current, play_queue, source, Instant::now())?;
     }
 
     let mut input_events: Vec<InputEvent> = Vec::new();
@@ -156,18 +181,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if recent_selected.is_some() {
                 handle_recent_overlay_input(
                     &input,
-                    &mut session,
-                    &mut recent,
+                    session,
+                    recent,
                     &mut recent_selected,
-                    &mut current,
-                    &mut play_queue,
+                    current,
+                    play_queue,
                     now,
                 )?;
                 continue;
             }
             if matches!(input, InputEvent::ToggleRecentOverlay) {
                 recent_selected = Some(0);
-                show_recent_overlay(&mut session, &recent, 0)?;
+                show_recent_overlay(session, recent, 0)?;
                 continue;
             }
 
@@ -214,27 +239,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 InputEvent::BackspaceKey => {
                     if timeline_ui.is_scrubbing() {
-                        timeline_ui.cancel_scrub(&mut session, now)?;
+                        timeline_ui.cancel_scrub(session, now)?;
                     }
                 }
                 InputEvent::FilesDropped(paths) => {
-                    open_dropped_paths(
-                        &mut session,
-                        &mut recent,
-                        &mut current,
-                        &mut play_queue,
-                        paths,
-                        now,
-                    )?;
+                    open_dropped_paths(session, recent, current, play_queue, paths, now)?;
                 }
                 InputEvent::OpenFileDialog => {
                     let hwnd = session.window().raw_window().hwnd();
                     if let Some(path) = show_open_file_dialog(hwnd) {
                         open_single_file(
-                            &mut session,
-                            &mut recent,
-                            &mut current,
-                            &mut play_queue,
+                            session,
+                            recent,
+                            current,
+                            play_queue,
                             MediaSource::new(path),
                             now,
                         )?;
@@ -242,20 +260,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 InputEvent::QueuePrevious => {
                     navigate_queue(
-                        &mut session,
-                        &mut recent,
-                        &mut current,
-                        &mut play_queue,
+                        session,
+                        recent,
+                        current,
+                        play_queue,
                         QueueDirection::Previous,
                         now,
                     )?;
                 }
                 InputEvent::QueueNext => {
                     navigate_queue(
-                        &mut session,
-                        &mut recent,
-                        &mut current,
-                        &mut play_queue,
+                        session,
+                        recent,
+                        current,
+                        play_queue,
                         QueueDirection::Next,
                         now,
                     )?;
@@ -266,18 +284,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
-        timeline_ui.update(&mut session, now)?;
+        timeline_ui.update(session, now)?;
         session.tick(now)?;
         // A natural end-of-file (no loop/auto-replay/out-point) latches the
         // ended signal exactly once; auto-advance to the next queued item.
         if session.take_ended_signal() {
-            auto_advance_queue(
-                &mut session,
-                &mut recent,
-                &mut current,
-                &mut play_queue,
-                now,
-            )?;
+            auto_advance_queue(session, recent, current, play_queue, now)?;
         }
         if session.take_idle_pace_request() {
             // The tick produced no frame to present. While playback is actively
@@ -295,8 +307,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Persist the position of whatever was playing when the user quit.
-    save_current_progress(&session, &mut recent, &current, Instant::now());
+    Ok(())
+}
+
+/// Persist state, stop the workers, flush the trace, and end the process.
+///
+/// This is the only exit from a live session, and it deliberately never drops
+/// `session`. Releasing the D3D11 device, swap chain, or HW-decode surfaces
+/// in-process intermittently faults inside the graphics driver (access
+/// violation through a dangling vtable), which hands an unhandled exception to
+/// Windows Error Reporting. WER then freezes the still-visible window for
+/// several seconds while it writes a multi-megabyte crash dump before the
+/// process dies — the "lag on close". Letting the OS reclaim GPU resources on
+/// process teardown is instant and crash-free.
+///
+/// The error path is what used to get this wrong. A `?` anywhere in the event
+/// loop returned straight out of `run()`, which dropped `session` — releasing
+/// the device with the decode and audio workers still running inside the very
+/// drivers being torn down, because `shutdown()` was skipped on that path too.
+/// So a GDI allocation failure in the overlay rasterizers (reachable once the
+/// per-process or session-wide GDI pool is exhausted, e.g. many instances at
+/// once) surfaced not as an error message but as a hung, unclosable window
+/// parked in WER. Clean close and fatal error now leave through here alike.
+fn shutdown_and_exit(
+    session: &mut PlaybackSession,
+    recent: &mut RecentFiles,
+    current: &Option<PathBuf>,
+    outcome: Result<(), Box<dyn std::error::Error>>,
+) -> ! {
+    // Persist the position of whatever was playing when we stopped. Worth doing
+    // on the error path too: it reads CPU-side playback state, not the device
+    // that may have just failed.
+    save_current_progress(session, recent, current, Instant::now());
     recent.save();
 
     // Stop the background workers (decode + audio) so no thread is executing
@@ -304,17 +346,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     session.window().clear_modal_tick();
     session.shutdown();
 
-    // Flush the buffered trace, then hard-exit the process. We deliberately do
-    // NOT release the D3D11 device, swap chain, or HW-decode surfaces: doing so
-    // in-process at exit intermittently faults inside the graphics driver
-    // (access violation through a dangling vtable), which hands an unhandled
-    // exception to Windows Error Reporting. WER then freezes the still-visible
-    // window for several seconds while it writes a multi-megabyte crash dump
-    // before the process dies — the "lag on close". Letting the OS reclaim GPU
-    // resources on process teardown is instant and crash-free. State is
-    // persisted and workers are stopped above, so there is nothing left to do.
+    let code = match outcome {
+        Ok(()) => 0,
+        Err(error) => {
+            report_fatal(&*error);
+            1
+        }
+    };
+
+    // Flush the buffered trace (metrics, mode changes, and any fatal line
+    // recorded above), then hard-exit without unwinding. State is persisted and
+    // workers are stopped, so there is nothing left to do.
     logging::dump_to_session_log();
-    std::process::exit(0);
+    std::process::exit(code);
+}
+
+/// Record a fatal error to the trace ring and to `crash.log`.
+fn report_fatal(error: &dyn std::error::Error) {
+    let msg = format!("fatal: {error}");
+    flog!("{msg}");
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let dir = std::path::PathBuf::from(appdata).join("FastPlay");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("crash.log"), &msg);
+    }
 }
 
 /// Format a millisecond position as `m:ss` (or `h:mm:ss` past an hour).
