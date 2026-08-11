@@ -64,14 +64,19 @@ Work that landed since `0.4.4` and ships here for the first time:
 ## Validation
 
 - `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test`
-  (256 passing, including new UTC-stamp, retention, and GDI source-invariant
-  tests), `cargo build --release`, `cargo wix`
+  (257 passing, including new UTC-stamp, retention, GDI source-invariant, and
+  run-log resolution tests), `cargo build --release`, `cargo wix`
 - GDI growth over 40 seek pairs: +708 → 0, flat across two runs
 - Fault injection at the real GDI failure site: before, no worker-exit lines
   in the trace and the device released under live workers; after, workers
   stop first, exit code 1, no Windows Error Reporting event
-- Twelve concurrent instances driven through overlay rebuilds, with
-  session-wide GDI handle counts and per-instance logs verified
+- **Development build**, twelve concurrent instances tiled so none is occluded,
+  40 seek pairs each: GDI handles 300 → 606 and climbing on `0.4.4`, flat at
+  192 on `0.4.5`; all twelve closed from the title-bar X, and each wrote its
+  own intact log
+- **Installed MSI**, same twelve-instance test against
+  `C:\Program Files\fastplay\bin\fastplay.exe`, plus in-place upgrade over
+  `0.4.4`, Start Menu shortcut, `.mp4` association, and uninstall/reinstall
 
 ## Upgrade notes
 

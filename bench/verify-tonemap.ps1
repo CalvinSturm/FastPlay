@@ -57,6 +57,7 @@ param(
     [switch]$KeepArtifacts
 )
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "FastPlayLog.psm1") -Force
 $W = 1280; $H = 720
 $WM_APP_SAVE_SCREENSHOT = 0x8001  # WM_APP + 1, see window_proc in src/ffi/dxgi.rs
 $WM_CLOSE = 0x0010
@@ -107,11 +108,17 @@ function Find-FastPlayWindow([uint32]$TargetPid) {
 
 $screenshotDir = Join-Path $env:USERPROFILE "Pictures\FastPlay"
 $script:capturedShots = @()
+# Session log of the most recent app run, reported to a caller that did not
+# launch the process itself (verify-hdr-passthrough) via -RunLogOut.
+$script:lastRunLog = $null
 
 # Play $Clip, trigger the backbuffer screenshot, return the captured bitmap path.
 function Capture-Backbuffer([string]$Clip) {
     $launchTime = Get-Date
     $proc = Start-Process -FilePath $Exe -ArgumentList "`"$Clip`"" -PassThru
+    # Anything matching this PID right now predates the run; clear it so a
+    # recycled PID cannot later masquerade as this run's log.
+    Clear-FastPlayRunLog -ProcessId $proc.Id
     $hwnd = [IntPtr]::Zero
     try {
         foreach ($attempt in 1..30) {
@@ -142,14 +149,11 @@ function Capture-Backbuffer([string]$Clip) {
         if (-not $proc.HasExited) { $proc.Kill() }
 
         # The ring only reaches disk on graceful exit, so resolve after the wait
-        # above. Scoped to this PID; sorted in case Windows recycled it.
-        $runLog = Get-ChildItem -Path (Join-Path $env:APPDATA "FastPlay") `
-            -Filter "session-*-$($proc.Id).log" -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($runLog) {
-            $script:lastRunLog = $runLog.FullName
-            if ($RunLogOut) { Set-Content -Path $RunLogOut -Value $runLog.FullName }
-        }
+        # above, requiring a log written after this run started. Recorded, not
+        # thrown on: this is a `finally`, and throwing here would mask whatever
+        # real failure (missing window, no screenshot) brought us to it. The
+        # caller asserts on it once the capture has succeeded.
+        $script:lastRunLog = Resolve-FastPlayRunLog -ProcessId $proc.Id -LaunchTime $launchTime
     }
 }
 
@@ -297,6 +301,17 @@ if (-not $KeepArtifacts) {
     Remove-Item $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
 } else {
     Write-Host "artifacts retained: $WorkDir + $($script:capturedShots.Count) screenshot(s)"
+}
+
+# Hand the caller this run's log. Required when asked for: verify-hdr-passthrough
+# asserts HDR path selection against it, and resolving to an earlier run's
+# trace would let that oracle pass while testing nothing.
+if ($RunLogOut) {
+    if (-not $script:lastRunLog) {
+        Write-Host "RESULT: FAIL (no session log resolved for the last run; refusing to report a stale one)"
+        exit 1
+    }
+    Set-Content -Path $RunLogOut -Value $script:lastRunLog
 }
 
 if ($overallFail) {

@@ -31,6 +31,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $WM_CLOSE = 0x0010
+Import-Module (Join-Path $PSScriptRoot "FastPlayLog.psm1") -Force
 # Resolved after the run from the PID this script launched — see below.
 $logPath = $null
 
@@ -63,7 +64,12 @@ public class FpMetaWin {
 }
 "@
 
+$launchTime = Get-Date
 $proc = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
+# Anything matching this PID right now is from an earlier run that happened to
+# hold it; this run has not flushed yet. Clearing plus the launch-time filter
+# below means a recycled PID cannot satisfy the oracle with a stale trace.
+Clear-FastPlayRunLog -ProcessId $proc.Id
 try {
     Start-Sleep -Seconds $SettleSeconds
     if ($proc.HasExited) { throw "player exited early (code $($proc.ExitCode))" }
@@ -83,14 +89,11 @@ finally {
     if (-not $proc.HasExited) { $proc.Kill() }
 }
 
-# Each run writes session-<utc-stamp>-<pid>.log, and the ring only reaches disk
-# on graceful exit — so resolve after the wait above, scoped to the PID this
-# script launched rather than to whichever log happens to be newest. Sorting
-# covers the case where Windows recycled that PID from an earlier run.
-$logPath = Get-ChildItem -Path (Join-Path $env:APPDATA "FastPlay") `
-    -Filter "session-*-$($proc.Id).log" -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-if (-not $logPath) { throw "no session log for pid $($proc.Id) in $env:APPDATA\FastPlay" }
+# The ring only reaches disk on graceful exit, so resolve after the wait above.
+# -Required makes a missing flush fail loudly: this script asserts on log
+# contents, and silently falling back to an earlier run's trace would let the
+# metadata oracle pass while testing nothing.
+$logPath = Resolve-FastPlayRunLog -ProcessId $proc.Id -LaunchTime $launchTime -Required
 $log = Get-Content $logPath -Raw
 if ($log -notmatch [regex]::Escape("path=HdrPqOutput")) {
     throw "FAIL: open did not select HdrPqOutput (is the Windows HDR toggle on?)"
