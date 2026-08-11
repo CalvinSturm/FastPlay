@@ -2,7 +2,7 @@
 
 A local, repeatable harness that measures FastPlay's latency and playback-health
 metrics, implementing `docs/ROADMAP.md` §2. It drives the real player and
-aggregates the metrics the app already logs to `session.log` into p50/p95
+aggregates the metrics the app already logs to its session log into p50/p95
 reports — there is no instrumentation build and no change to app code.
 
 This is a **local/optional tool**. It is intentionally not part of `cargo build`
@@ -81,15 +81,18 @@ pwsh -File bench/run-bench.ps1 -LatencyOnly
 
 For each clip × iteration the harness:
 
-1. Deletes `%APPDATA%\FastPlay\session.log`.
+1. Clears any stale `%APPDATA%\FastPlay\session-*-<pid>.log` left by an earlier
+   run that happened to be given the same PID.
 2. Launches the player on the clip and finds the render window by its
    `" - FastPlay"` title suffix (scoped to the launched PID).
 3. Waits for `open_to_first_frame_ms` to confirm open.
 4. Posts seek keypresses (`PostMessageW` `WM_KEYDOWN` VK_RIGHT/VK_LEFT), then a
    pause/resume (`WM_CHAR` space).
 5. Unless `-LatencyOnly`, waits for the `playback_summary` line (full playthrough).
-6. Closes via `WM_CLOSE` — `session.log` only flushes on a graceful exit.
-7. Parses the log and aggregates.
+6. Closes via `WM_CLOSE` — the session log only flushes on a graceful exit.
+7. Resolves that run's `session-<utc-stamp>-<pid>.log` **by the PID it launched**
+   — not by "the newest log", which would race any other FastPlay instance
+   exiting mid-benchmark — then parses and aggregates.
 
 ## Correctness verifiers
 
@@ -105,7 +108,7 @@ and exit non-zero on failure.
 | `verify-overlay-hdr.ps1` | The overlay renderer's PQ-chain shader variant (sRGB→BT.2020→203-nit→PQ), opaque and alpha-blended, vs a CPU model |
 | `verify-subtitles-hdr.ps1` | Overlays composite correctly on top of HDR video |
 | `verify-tonemap.ps1` | The HDR shader's SDR tone-map output matches a double-precision CPU model of its math (PQ clipped bars, PQ unclipped midtones, HLG); on an HDR-active display the same clips exercise the passthrough+screenshot composition instead |
-| `verify-hdr-passthrough.ps1` | End-to-end HDR passthrough on an HDR-active display: runs `verify-tonemap` under the composed model, asserts from `session.log` that `HdrPqOutput` was actually selected and the chain swapped, then verifies a mid-playback resize leaves the bars byte-stable |
+| `verify-hdr-passthrough.ps1` | End-to-end HDR passthrough on an HDR-active display: runs `verify-tonemap` under the composed model, asserts from the reported session log that `HdrPqOutput` was actually selected and the chain swapped, then verifies a mid-playback resize leaves the bars byte-stable |
 | `verify-hdr-caps.ps1` | Display HDR detection (`display_hdr_active` tracks the Windows HDR toggle; run with `-ExpectHdr on` / `off`) |
 | `verify-hdr-metadata.ps1` | HDR10 static metadata flows from real x265 SEI through conversion to `SetHDRMetaData`, with the MSDN worked-example values asserted in the log |
 

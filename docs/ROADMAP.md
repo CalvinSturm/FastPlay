@@ -41,13 +41,13 @@ evidence-driven rather than pursued solely to reduce line count.
 ## 2. Benchmark harness — **implemented** (`bench/`)
 
 A repeatable harness that turns the metrics the app already logs to
-`session.log` into reportable percentiles, matching `ARCHITECTURE.md §24`. It is
+the session log into reportable percentiles, matching `ARCHITECTURE.md §24`. It is
 Windows-only, drives the real release build via `PostMessageW`, and does not
 touch the steady-state hot path or app code. See [`bench/README.md`](../bench/README.md).
 
 - `bench/gen-corpus.ps1` — generates a synthetic ffmpeg corpus (no media in repo).
 - `bench/run-bench.ps1` — drives open → seeks → pause/resume → playthrough →
-  graceful close per clip/iteration, parses `session.log`, and emits a p50/p95
+  graceful close per clip/iteration, parses that run's session log, and emits a p50/p95
   console table plus `bench/results/*.json` and `*.csv`.
 
 It is intentionally **not** wired into `cargo`/CI yet (local/optional first, per

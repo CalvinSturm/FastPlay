@@ -46,6 +46,12 @@ param(
     # audited baseline measured 0 (PQ), 1 (PQ-DIM), 1 (HLG).
     [int]$Tolerance = 1,
     [int]$SettleSeconds = 3,
+    # Optional file to receive the session-log path of the LAST app run this
+    # script launches. Each run writes session-<utc-stamp>-<pid>.log, so a
+    # caller that did not start the process itself (verify-hdr-passthrough)
+    # cannot identify the run otherwise — and picking the newest log would race
+    # any other FastPlay instance exiting at the same moment.
+    [string]$RunLogOut = "",
     # Keep generated clips, decoded NV12 dumps, and captured screenshots for
     # diagnosis instead of deleting them at the end.
     [switch]$KeepArtifacts
@@ -134,6 +140,16 @@ function Capture-Backbuffer([string]$Clip) {
         }
         $proc.WaitForExit(8000) | Out-Null
         if (-not $proc.HasExited) { $proc.Kill() }
+
+        # The ring only reaches disk on graceful exit, so resolve after the wait
+        # above. Scoped to this PID; sorted in case Windows recycled it.
+        $runLog = Get-ChildItem -Path (Join-Path $env:APPDATA "FastPlay") `
+            -Filter "session-*-$($proc.Id).log" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($runLog) {
+            $script:lastRunLog = $runLog.FullName
+            if ($RunLogOut) { Set-Content -Path $RunLogOut -Value $runLog.FullName }
+        }
     }
 }
 

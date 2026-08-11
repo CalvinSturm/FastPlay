@@ -40,6 +40,11 @@ use platform::window::NativeWindow;
 const IDLE_MESSAGE_WAIT_MS: u32 = 100;
 
 fn main() {
+    // Fix this run's log identity and sweep stale files before anything can
+    // panic or fault, so neither the panic hook nor the crash handler has to
+    // allocate a run id while the process is already failing.
+    logging::init();
+
     // ── Vectored Exception Handler ─────────────────────────────────────
     // Access violations from d3d11.dll kill the process instantly —
     // Rust's panic handler never fires.  A VEH runs BEFORE the default
@@ -52,11 +57,7 @@ fn main() {
         flog!("{msg}");
         // Flush the buffered trace so the panic context survives.
         logging::dump_to_session_log();
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            let dir = std::path::PathBuf::from(appdata).join("FastPlay");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join("crash.log"), &msg);
-        }
+        write_crash_log(&msg);
     }));
     // Only errors raised *before* the session exists reach here — startup
     // failures like argument parsing or window creation. Once a session is
@@ -361,15 +362,26 @@ fn shutdown_and_exit(
     std::process::exit(code);
 }
 
-/// Record a fatal error to the trace ring and to `crash.log`.
+/// Record a fatal error to the trace ring and to this run's crash log.
 fn report_fatal(error: &dyn std::error::Error) {
     let msg = format!("fatal: {error}");
     flog!("{msg}");
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        let dir = std::path::PathBuf::from(appdata).join("FastPlay");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("crash.log"), &msg);
+    write_crash_log(&msg);
+}
+
+/// Write `msg` to this run's crash log, best effort.
+///
+/// Shared by the panic hook and [`report_fatal`] so both land in the same
+/// per-run file. Every failure is swallowed: this only ever runs on a path that
+/// is already reporting a failure.
+fn write_crash_log(msg: &str) {
+    let Some(path) = logging::crash_log_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
+    let _ = std::fs::write(&path, msg);
 }
 
 /// Format a millisecond position as `m:ss` (or `h:mm:ss` past an hour).

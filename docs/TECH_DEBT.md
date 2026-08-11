@@ -85,7 +85,7 @@ ownership model.
 `ARCHITECTURE.md §24` specifies percentile metrics (open-to-first-frame,
 seek-to-first-frame, pause/resume, drops, underruns, hw-fallback). A repeatable
 harness now produces p50/p95 from these by driving the release build and parsing
-`session.log` — see [`bench/README.md`](../bench/README.md) and `ROADMAP.md §2`.
+the session log — see [`bench/README.md`](../bench/README.md) and `ROADMAP.md §2`.
 Remaining: it is local/optional and not yet wired into CI, so regressions are
 observable on demand but not automatically gated. Promote to CI once it is
 proven stable across machines.

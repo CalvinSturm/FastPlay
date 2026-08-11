@@ -60,15 +60,12 @@ pub fn install_crash_handler() {
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        // Flush the in-memory trace ring to session.log first (best effort,
-        // never blocks on the ring lock) so the lines leading up to the fault
-        // are on disk before we append the crash marker below.
+        // Flush the in-memory trace ring to this run's session log first (best
+        // effort, never blocks on the ring lock) so the lines leading up to the
+        // fault are on disk before we append the crash marker below.
         crate::logging::dump_to_session_log_crash_safe();
 
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            let dir = std::path::PathBuf::from(appdata).join("FastPlay");
-            let _ = std::fs::create_dir_all(&dir);
-
+        {
             let addr = record.ExceptionAddress as usize;
             let rw = if record.NumberParameters >= 1 {
                 match record.ExceptionInformation[0] {
@@ -100,18 +97,26 @@ pub fn install_crash_handler() {
                  Target address: 0x{target:016X}\n\
                  \n\
                  This is a hardware exception (not a Rust panic).\n\
-                 Check session.log for the buffered trace leading up to this crash.\n\
+                 Check this run's session log for the buffered trace leading up \
+                 to this crash.\n\
                  \n\
                  Backtrace:\n{backtrace}\n"
             );
-            let _ = std::fs::write(dir.join("crash.log"), &msg);
+
+            // Both files carry this run's id, so a fault in one of a dozen
+            // concurrent instances cannot overwrite another's evidence.
+            if let Some(path) = crate::logging::crash_log_path() {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&path, &msg);
+            }
 
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .append(true)
-                .open(dir.join("session.log"))
-            {
-                let _ = writeln!(f, "\n=== CRASH ===\n{msg}");
+            if let Some(path) = crate::logging::session_log_path() {
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+                    let _ = writeln!(f, "\n=== CRASH ===\n{msg}");
+                }
             }
         }
 

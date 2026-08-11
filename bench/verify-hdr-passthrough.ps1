@@ -12,7 +12,7 @@
        converts the R10G10B10A2 readback back to SDR through the audited
        CPU model — so the same reference model applies, composed, with only
        the 10-bit PQ round-trip quantization added (measured max delta 1;
-       tolerance 3). Then asserts from session.log that the LAST case
+       tolerance 3). Then asserts from the reported session log that the LAST case
        actually took path=HdrPqOutput and swapped the chain — without this
        oracle, a silently broken gate falling back to tone-map would still
        pass the pixel comparison.
@@ -45,7 +45,10 @@ $ErrorActionPreference = "Stop"
 $W = 1280; $H = 720
 $WM_APP_SAVE_SCREENSHOT = 0x8001
 $WM_CLOSE = 0x0010
-$logPath = Join-Path $env:APPDATA "FastPlay\session.log"
+# verify-tonemap launches the app, so it reports back which run's log to read.
+# Resolving "the newest session-*.log" here instead would race any other
+# FastPlay instance that exited while this script was running.
+$runLogOut = Join-Path $WorkDir "last-run-log.txt"
 
 if (-not (Test-Path $Exe)) { throw "fastplay binary not found: $Exe (build first)" }
 if (-not (Get-Command $Ffmpeg -ErrorAction SilentlyContinue)) { throw "ffmpeg not found on PATH" }
@@ -53,12 +56,13 @@ New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 
 # ---- Stage 1: composed-model pixel check + path oracle ----------------------
 Write-Host "=== stage 1: verify-tonemap through the passthrough path ==="
-& pwsh -File (Join-Path $PSScriptRoot "verify-tonemap.ps1") -Exe $Exe -Ffmpeg $Ffmpeg -Tolerance $Tolerance
+& pwsh -File (Join-Path $PSScriptRoot "verify-tonemap.ps1") -Exe $Exe -Ffmpeg $Ffmpeg -Tolerance $Tolerance -RunLogOut $runLogOut
 if ($LASTEXITCODE -ne 0) { throw "verify-tonemap failed under passthrough (exit $LASTEXITCODE)" }
 
-# session.log is rewritten per app session; after the child script it holds
-# the last case's run (HLG).
-if (-not (Test-Path $logPath)) { throw "session.log not found at $logPath" }
+# The reported log is the last case's run (HLG).
+if (-not (Test-Path $runLogOut)) { throw "verify-tonemap did not report a run log at $runLogOut" }
+$logPath = (Get-Content $runLogOut -Raw).Trim()
+if (-not $logPath -or -not (Test-Path $logPath)) { throw "reported session log not found: $logPath" }
 $log = Get-Content $logPath -Raw
 if ($log -notmatch [regex]::Escape("path=HdrPqOutput")) {
     throw "ORACLE FAILED: last open did not select HdrPqOutput (is the Windows HDR toggle on?)"
