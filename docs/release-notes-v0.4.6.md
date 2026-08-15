@@ -37,7 +37,7 @@ from the repository.
 
 - The executable, installer, and Start menu now use the new FastPlay badge, with
   dedicated icon entries from 16 through 256 pixels.
-- Explorer video thumbnails use a separate mark-only FastPlay overlay so the
+- Explorer video thumbnails use a dedicated mark-only FastPlay icon file so the
   file association stays recognizable without covering the thumbnail in the
   full app badge.
 

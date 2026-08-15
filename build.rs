@@ -17,7 +17,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/ffi/ffmpeg_shim.h");
     println!("cargo:rerun-if-changed=assets/fastplay.rc");
     println!("cargo:rerun-if-changed=assets/icon/fastplay.ico");
-    println!("cargo:rerun-if-changed=assets/icon/fastplay-association.ico");
 
     let ffmpeg = discover_ffmpeg()?;
 
@@ -45,17 +44,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .join("assets")
         .join("icon")
         .join("fastplay.ico");
-    let association_icon_path = PathBuf::from(&manifest_dir)
-        .join("assets")
-        .join("icon")
-        .join("fastplay-association.ico");
     let rc_path = PathBuf::from(env::var("OUT_DIR")?).join("fastplay.rc");
     fs::write(
         &rc_path,
         format!(
-            "1 ICON \"{}\"\n2 ICON \"{}\"\n",
-            icon_path.to_string_lossy().replace('\\', "/"),
-            association_icon_path.to_string_lossy().replace('\\', "/")
+            "1 ICON \"{}\"\n",
+            icon_path.to_string_lossy().replace('\\', "/")
         ),
     )?;
     let _ = embed_resource::compile(&rc_path, embed_resource::NONE);

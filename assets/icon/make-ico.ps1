@@ -3,7 +3,7 @@
     Build assets/icon/fastplay.ico from a square RGBA master PNG.
 
 .DESCRIPTION
-    Generates the eight sizes Windows consumes (256, 128, 64, 48, 32, 24, 20, 16),
+    Generates the six sizes Windows consumes (256, 128, 64, 48, 32, 16),
     lanczos-downscaled by ffmpeg, and assembles a classic .ico: each entry
     a 32-bit BGRA BMP (bottom-up) with a zeroed, row-padded AND mask — the
     alpha channel carries all transparency. No PNG-compressed entries, for
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 if (-not (Test-Path $Master)) { throw "master PNG not found: $Master" }
 if (-not (Get-Command $Ffmpeg -ErrorAction SilentlyContinue)) { throw "ffmpeg not found on PATH" }
 
-$sizes = @(256, 128, 64, 48, 32, 24, 20, 16)
+$sizes = @(256, 128, 64, 48, 32, 16)
 $tmp = Join-Path $env:TEMP "fastplay-ico-build"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
