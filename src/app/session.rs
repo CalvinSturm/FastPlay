@@ -501,6 +501,11 @@ impl PlaybackSession {
                     flog!("fullscreen_toggle_ms={}", elapsed.as_millis());
                 }
             }
+            SessionCommand::ToggleFramelessWindowed => {
+                if self.window.toggle_frameless_windowed() {
+                    flog!("frameless_windowed={}", self.window.is_frameless_windowed());
+                }
+            }
             SessionCommand::ZoomAtCursor {
                 delta,
                 cursor_x,

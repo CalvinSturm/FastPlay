@@ -29,6 +29,7 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         InputEvent::RotateClockwise => SessionCommand::RotateClockwise,
         InputEvent::RotateCounterClockwise => SessionCommand::RotateCounterClockwise,
         InputEvent::ToggleBorderlessFullscreen => SessionCommand::ToggleBorderlessFullscreen,
+        InputEvent::ToggleFramelessWindowed => SessionCommand::ToggleFramelessWindowed,
         InputEvent::ZoomAtCursor {
             delta,
             cursor_x,
@@ -107,6 +108,10 @@ mod tests {
         assert_eq!(
             command_for(&InputEvent::ToggleBorderlessFullscreen),
             Some(SessionCommand::ToggleBorderlessFullscreen)
+        );
+        assert_eq!(
+            command_for(&InputEvent::ToggleFramelessWindowed),
+            Some(SessionCommand::ToggleFramelessWindowed)
         );
         assert_eq!(
             command_for(&InputEvent::ResetView),
