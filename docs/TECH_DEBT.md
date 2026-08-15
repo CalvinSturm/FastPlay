@@ -1,6 +1,6 @@
 # Technical Debt
 
-Status: 2026-06-26 · FastPlay v0.4.0
+Status: 2026-08-14 · FastPlay v0.4.5
 
 This document tracks **maintainability** debt only. It does not propose
 architecture changes. `ARCHITECTURE.md` remains the locked charter; everything
@@ -106,7 +106,7 @@ historical context, not current guidance.
 - `cargo clippy --all-targets -- -D warnings` — **clean**, but see R5 below: the
   run is clean *against a crate-wide allow-list*, which is a weaker signal than
   this section previously claimed.
-- `cargo test --all-targets` — **245 passing, 0 failing** (2026-08-08).
+- `cargo test --all-targets` — **257 passing, 0 failing** (2026-08-14).
 
 CI runs all three on `windows-latest`.
 
@@ -208,21 +208,25 @@ The original v0.3.0 priorities are complete:
 
 Next maintenance work should be driven by observed defects, difficult review
 areas, or benchmark regressions rather than a line-count target. The 2026-07-21
-[codebase review](./audits/codebase-review.md) §10 sequences the current
-candidates, in value order:
+[codebase review](./audits/codebase-review.md) §10 sequenced the candidates in
+value order. **All but one have since been paid down**; only item 3 is still
+open:
 
-1. Extract the input keymap out of `window_proc` into `platform/input.rs` as a
-   pure function. It is the single largest untested surface in the program and
-   it has already shipped one user-visible bug (a held Ctrl+S toggled subtitles,
-   because a guarded match arm fell through to an unguarded one).
-2. Extract the pure geometry/blend layer of the overlay rasterizer out of
-   `ffi/d3d11.rs` into `render/`, with unit tests. The GDI text path stays in
-   the seam.
-3. De-duplicate the worker plumbing (`worker_send`, the device-lost event
-   mapping) — but only as private helpers, not a worker trait; there are two
-   consumers and they differ.
-4. R5 above (lint allow-list).
-5. Extend the worker-liveness discipline to the audio handle (see R6).
+1. ✅ **Done** — Extract the input keymap out of `window_proc` into
+   `platform/input.rs` as a pure function. It was the single largest untested
+   surface in the program and had already shipped one user-visible bug (a held
+   Ctrl+S toggled subtitles, because a guarded match arm fell through to an
+   unguarded one).
+2. ✅ **Done** — Extract the pure geometry/blend layer of the overlay
+   rasterizer out of `ffi/d3d11.rs` into `render/overlay_raster.rs`, with unit
+   tests. The GDI text path correctly stays in the seam.
+3. **Open** — De-duplicate the worker plumbing (`worker_send`, the device-lost
+   event mapping), but only as private helpers, not a worker trait; there are
+   two consumers and they differ. `worker_send` is still declared twice as a
+   local closure in `app/session.rs` (the video and audio spawn paths).
+4. ✅ **Done** — R5 above (lint allow-list), paid down 2026-07-21.
+5. ✅ **Done** — Extend the worker-liveness discipline to the audio handle,
+   paid down 2026-07-21 (see R6).
 
 ### R6 — Worker liveness — **paid down** (2026-07-21)
 
