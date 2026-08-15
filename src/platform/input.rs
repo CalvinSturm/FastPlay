@@ -92,12 +92,14 @@ pub(crate) fn command_for_key(
                 Some(InputEvent::ShowHelp)
             }
         }
-        // Ctrl+S → screenshot, first press only (holding must not spray files).
-        // S alone → toggle subtitles.
+        // Ctrl+Shift+S → frameless windowed mode, Ctrl+S → screenshot.
+        // Both Ctrl shortcuts are first-press only; S alone toggles subtitles.
         vk::S => {
             if ctrl {
                 if is_repeat {
                     None
+                } else if shift {
+                    Some(InputEvent::ToggleFramelessWindowed)
                 } else {
                     Some(InputEvent::SaveScreenshot)
                 }
@@ -204,6 +206,7 @@ pub enum InputEvent {
     RotateClockwise,
     RotateCounterClockwise,
     ToggleBorderlessFullscreen,
+    ToggleFramelessWindowed,
     ZoomAtCursor {
         delta: i16,
         cursor_x: i32,
@@ -314,7 +317,7 @@ mod tests {
             case("H", vk::H, false, false, false, Some(ShowHelp)),
             case("H (repeat)", vk::H, false, false, true, None),
             case("Shift+H", vk::H, false, true, false, Some(ShowHelp)),
-            // ── S: the Ctrl+S / subtitles collision this suite exists for ──
+            // ── S: screenshot / frameless / subtitles ──
             case("Ctrl+S", vk::S, true, false, false, Some(SaveScreenshot)),
             case("Ctrl+S (repeat)", vk::S, true, false, true, None),
             case(
@@ -323,7 +326,7 @@ mod tests {
                 true,
                 true,
                 false,
-                Some(SaveScreenshot),
+                Some(ToggleFramelessWindowed),
             ),
             case("Ctrl+Shift+S (repeat)", vk::S, true, true, true, None),
             case("S", vk::S, false, false, false, Some(ToggleSubtitles)),
@@ -637,6 +640,11 @@ mod tests {
                 "a held Ctrl+S must emit nothing, not ToggleSubtitles"
             );
         }
+        assert_eq!(
+            command_for_key(vk::S, true, true, false),
+            Some(InputEvent::ToggleFramelessWindowed),
+            "Ctrl+Shift+S toggles frameless windowed mode"
+        );
     }
 
     /// Generalizes the case above. For every key that means one thing with

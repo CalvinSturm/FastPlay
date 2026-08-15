@@ -66,6 +66,14 @@ impl NativeWindow {
         self.inner.toggle_borderless_fullscreen();
     }
 
+    pub fn toggle_frameless_windowed(&self) -> bool {
+        self.inner.toggle_frameless_windowed()
+    }
+
+    pub fn is_frameless_windowed(&self) -> bool {
+        self.inner.is_frameless_windowed()
+    }
+
     pub fn is_borderless(&self) -> bool {
         self.inner.is_borderless()
     }

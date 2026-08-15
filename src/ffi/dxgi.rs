@@ -51,23 +51,28 @@ use windows::{
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
+            HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_SHIFT},
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
                 AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW,
-                GetWindowPlacement, GetWindowRect, LoadCursorW, LoadImageW,
+                GetWindowPlacement, GetWindowRect, IsZoomed, LoadCursorW, LoadImageW,
                 MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
                 SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
                 TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-                GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HWND_TOP, IDC_ARROW, IMAGE_ICON,
-                MINMAXINFO, MSG, PM_REMOVE, QS_ALLINPUT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_APP,
-                WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP,
-                WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN,
-                WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_MOUSEWHEEL, WM_MOVING, WM_NCCREATE, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE,
-                WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+                GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+                HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW,
+                IMAGE_ICON, MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
+                SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT,
+                WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
+                WM_DPICHANGED, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
+                WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+                WM_MOUSEWHEEL, WM_MOVING, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
+                WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW,
+                WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -145,6 +150,8 @@ pub struct ResizeRequest {
 
 struct WindowState {
     is_open: Cell<bool>,
+    is_borderless: Cell<bool>,
+    is_frameless_windowed: Cell<bool>,
     resize_request: Cell<Option<ResizeRequest>>,
     input_events: RefCell<Vec<InputEvent>>,
     modal_tick_fn: Cell<Option<unsafe fn(*mut c_void)>>,
@@ -160,7 +167,6 @@ struct WindowState {
 pub struct NativeWindowInner {
     hwnd: HWND,
     state: Rc<WindowState>,
-    is_borderless: Cell<bool>,
     saved_placement: Cell<WINDOWPLACEMENT>,
     saved_style: Cell<u32>,
     _drop_target: IDropTarget,
@@ -180,6 +186,8 @@ impl NativeWindowInner {
         let title_wide = to_wide(title);
         let state = Rc::new(WindowState {
             is_open: Cell::new(true),
+            is_borderless: Cell::new(false),
+            is_frameless_windowed: Cell::new(false),
             resize_request: Cell::new(None),
             input_events: RefCell::new(Vec::new()),
             modal_tick_fn: Cell::new(None),
@@ -242,7 +250,6 @@ impl NativeWindowInner {
         Ok(Self {
             hwnd,
             state,
-            is_borderless: Cell::new(false),
             saved_placement: Cell::new(placement),
             saved_style: Cell::new(WS_OVERLAPPEDWINDOW.0),
             _drop_target: drop_target,
@@ -332,7 +339,11 @@ impl NativeWindowInner {
     }
 
     pub fn is_borderless(&self) -> bool {
-        self.is_borderless.get()
+        self.state.is_borderless.get()
+    }
+
+    pub fn is_frameless_windowed(&self) -> bool {
+        self.state.is_frameless_windowed.get()
     }
 
     pub fn client_size(&self) -> Result<(u32, u32), Box<dyn Error>> {
@@ -374,7 +385,7 @@ impl NativeWindowInner {
     }
 
     pub fn resize_for_content(&self, content_width: u32, content_height: u32, center: bool) {
-        if self.is_borderless.get() || content_width == 0 || content_height == 0 {
+        if self.state.is_borderless.get() || content_width == 0 || content_height == 0 {
             return;
         }
 
@@ -406,7 +417,9 @@ impl NativeWindowInner {
             }
 
             // Convert client size to window size (accounts for title bar / borders).
-            let Ok((win_w, win_h)) = adjust_window_size(w, h) else {
+            let Ok((win_w, win_h)) =
+                window_size_for_client(w, h, self.state.is_frameless_windowed.get())
+            else {
                 return;
             };
 
@@ -443,7 +456,7 @@ impl NativeWindowInner {
     /// Resize the window to fill the work area top-to-bottom with no black
     /// padding, keeping the window's horizontal center position.
     pub fn fit_window_to_content(&self, content_width: u32, content_height: u32) {
-        if self.is_borderless.get() || content_width == 0 || content_height == 0 {
+        if self.state.is_borderless.get() || content_width == 0 || content_height == 0 {
             return;
         }
 
@@ -458,7 +471,9 @@ impl NativeWindowInner {
             }
             let work = info.rcWork;
 
-            let Ok((chrome_w, chrome_h)) = adjust_window_size(0, 0) else {
+            let Ok((chrome_w, chrome_h)) =
+                window_chrome_size(self.state.is_frameless_windowed.get())
+            else {
                 return;
             };
             let max_client_w = ((work.right - work.left) - chrome_w).max(1) as u32;
@@ -478,7 +493,9 @@ impl NativeWindowInner {
                 max_client_h
             };
 
-            let Ok((win_w, win_h)) = adjust_window_size(w, h) else {
+            let Ok((win_w, win_h)) =
+                window_size_for_client(w, h, self.state.is_frameless_windowed.get())
+            else {
                 return;
             };
 
@@ -506,7 +523,7 @@ impl NativeWindowInner {
     /// Resize the window so the client area is exactly `content_width × content_height`,
     /// keeping the window's current horizontal center and top edge, clamped to the work area.
     pub fn set_window_client_size(&self, content_width: u32, content_height: u32) {
-        if self.is_borderless.get() || content_width == 0 || content_height == 0 {
+        if self.state.is_borderless.get() || content_width == 0 || content_height == 0 {
             return;
         }
 
@@ -527,7 +544,11 @@ impl NativeWindowInner {
             }
             let work = info.rcWork;
 
-            let Ok((win_w, win_h)) = adjust_window_size(content_width, content_height) else {
+            let Ok((win_w, win_h)) = window_size_for_client(
+                content_width,
+                content_height,
+                self.state.is_frameless_windowed.get(),
+            ) else {
                 return;
             };
 
@@ -557,7 +578,7 @@ impl NativeWindowInner {
         // - GetWindowLongPtrW / SetWindowLongPtrW / SetWindowPos are safe with valid HWND
         // - MonitorFromWindow / GetMonitorInfoW use system-provided handles
         unsafe {
-            if self.is_borderless.get() {
+            if self.state.is_borderless.get() {
                 // Restore windowed mode.
                 let style = self.saved_style.get();
                 SetWindowLongPtrW(self.hwnd, GWL_STYLE, style as isize);
@@ -575,7 +596,7 @@ impl NativeWindowInner {
                         | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
                         | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
                 );
-                self.is_borderless.set(false);
+                self.state.is_borderless.set(false);
             } else {
                 // Save current placement and style.
                 let mut placement = WINDOWPLACEMENT::default();
@@ -608,9 +629,97 @@ impl NativeWindowInner {
                         SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     );
                 }
-                self.is_borderless.set(true);
+                self.state.is_borderless.set(true);
             }
         }
+    }
+
+    /// Toggle the ordinary window between the native Windows frame and a
+    /// client-drawn frameless presentation. The underlying overlapped-window
+    /// style stays intact so Windows keeps resize, maximize, Snap, and shadow
+    /// behavior; `WM_NCCALCSIZE` removes the visible non-client frame.
+    ///
+    /// The client dimensions are preserved across the toggle, so this command
+    /// does not resize the swap chain or disturb playback. Fullscreen owns its
+    /// own style/placement transition and deliberately ignores this command.
+    pub fn toggle_frameless_windowed(&self) -> bool {
+        if self.state.is_borderless.get() {
+            return false;
+        }
+
+        let Ok((client_width, client_height)) = self.client_size() else {
+            return false;
+        };
+        let mut current = RECT::default();
+        unsafe {
+            if GetWindowRect(self.hwnd, &mut current).is_err() {
+                return false;
+            }
+        }
+
+        let was_frameless = self.state.is_frameless_windowed.get();
+        let will_be_frameless = !was_frameless;
+        let Ok((mut window_width, mut window_height)) =
+            window_size_for_client(client_width, client_height, will_be_frameless)
+        else {
+            return false;
+        };
+
+        let mut x = current.left;
+        let mut y = current.top;
+        unsafe {
+            let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                let work = info.rcWork;
+                window_width = window_width.min((work.right - work.left).max(1));
+                window_height = window_height.min((work.bottom - work.top).max(1));
+                x = x
+                    .max(work.left)
+                    .min((work.right - window_width).max(work.left));
+                y = y
+                    .max(work.top)
+                    .min((work.bottom - window_height).max(work.top));
+            }
+        }
+
+        // Set the state before SWP_FRAMECHANGED: Windows synchronously asks
+        // WM_NCCALCSIZE for the new client geometry during SetWindowPos.
+        self.state.is_frameless_windowed.set(will_be_frameless);
+        let changed = unsafe {
+            SetWindowPos(
+                self.hwnd,
+                HWND_TOP,
+                x,
+                y,
+                window_width,
+                window_height,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            )
+            .is_ok()
+        };
+        if !changed {
+            self.state.is_frameless_windowed.set(was_frameless);
+            unsafe {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE
+                        | SWP_NOZORDER
+                        | SWP_NOMOVE
+                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
+                        | SWP_FRAMECHANGED,
+                );
+            }
+        }
+        changed
     }
 
     pub(crate) fn hwnd(&self) -> HWND {
@@ -1558,6 +1667,75 @@ fn adjust_window_size(width: u32, height: u32) -> Result<(i32, i32), Box<dyn Err
     Ok((rect.right - rect.left, rect.bottom - rect.top))
 }
 
+fn window_size_for_client(
+    width: u32,
+    height: u32,
+    frameless: bool,
+) -> Result<(i32, i32), Box<dyn Error>> {
+    if frameless {
+        Ok((
+            width.min(i32::MAX as u32) as i32,
+            height.min(i32::MAX as u32) as i32,
+        ))
+    } else {
+        adjust_window_size(width, height)
+    }
+}
+
+fn window_chrome_size(frameless: bool) -> Result<(i32, i32), Box<dyn Error>> {
+    if frameless {
+        Ok((0, 0))
+    } else {
+        adjust_window_size(0, 0)
+    }
+}
+
+fn frameless_resize_hit_test(
+    rect: RECT,
+    screen_x: i32,
+    screen_y: i32,
+    border_x: i32,
+    border_y: i32,
+) -> u32 {
+    let on_left = screen_x >= rect.left && screen_x < rect.left + border_x;
+    let on_right = screen_x < rect.right && screen_x >= rect.right - border_x;
+    let on_top = screen_y >= rect.top && screen_y < rect.top + border_y;
+    let on_bottom = screen_y < rect.bottom && screen_y >= rect.bottom - border_y;
+
+    match (on_left, on_right, on_top, on_bottom) {
+        (true, _, true, _) => HTTOPLEFT,
+        (_, true, true, _) => HTTOPRIGHT,
+        (true, _, _, true) => HTBOTTOMLEFT,
+        (_, true, _, true) => HTBOTTOMRIGHT,
+        (true, _, _, _) => HTLEFT,
+        (_, true, _, _) => HTRIGHT,
+        (_, _, true, _) => HTTOP,
+        (_, _, _, true) => HTBOTTOM,
+        _ => HTCLIENT,
+    }
+}
+
+unsafe fn frameless_resize_border(hwnd: HWND) -> (i32, i32) {
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let padded = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi).max(0);
+    (
+        (GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + padded).max(1),
+        (GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + padded).max(1),
+    )
+}
+
+unsafe fn point_is_in_timeline(hwnd: HWND, y: i32) -> bool {
+    let mut rect = RECT::default();
+    GetClientRect(hwnd, &mut rect).is_ok() && {
+        let height = rect.bottom - rect.top;
+        height > 0 && y >= height - crate::render::timeline::TIMELINE_ACTIVATION_ZONE_PX
+    }
+}
+
+fn request_close(state: &WindowState) {
+    state.is_open.set(false);
+}
+
 fn to_wide(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(Some(0)).collect()
 }
@@ -1657,6 +1835,12 @@ unsafe fn extract_drop_paths(data_obj: &IDataObject) -> Vec<PathBuf> {
 /// synthesize.
 pub(crate) const WM_APP_SAVE_SCREENSHOT: u32 = WM_APP + 1;
 
+/// Automation hook for frameless-window runtime validation. Like the screenshot
+/// hook above, this queues the same input event as the real keyboard shortcut;
+/// it does not bypass coordinator ownership or call the window transition
+/// directly from the foreign process.
+pub(crate) const WM_APP_TOGGLE_FRAMELESS: u32 = WM_APP + 2;
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -1673,6 +1857,15 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_APP_TOGGLE_FRAMELESS => {
+            if let Some(state) = window_state(hwnd) {
+                state
+                    .input_events
+                    .borrow_mut()
+                    .push(InputEvent::ToggleFramelessWindowed);
+            }
+            LRESULT(0)
+        }
         WM_NCCREATE => {
             // SAFETY:
             // - `lparam` contains the CREATESTRUCTW pointer for WM_NCCREATE
@@ -1681,6 +1874,59 @@ unsafe extern "system" fn window_proc(
             let state_ptr = (*createstruct).lpCreateParams as *const WindowState;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
             LRESULT(1)
+        }
+        WM_NCCALCSIZE => {
+            if window_state(hwnd).is_some_and(|state| state.is_frameless_windowed.get()) {
+                // Treat the entire outer rectangle as client area. Keeping the
+                // WS_OVERLAPPEDWINDOW style while removing its non-client area
+                // preserves Windows resize, maximize, Snap, and DWM shadow
+                // behavior without drawing the stock title bar or borders.
+                //
+                // A maximized overlapped window deliberately extends its
+                // invisible resize border beyond the monitor. Clamp its client
+                // rect to rcWork so those off-screen pixels do not clip video or
+                // cover the taskbar.
+                if IsZoomed(hwnd).as_bool() {
+                    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    let mut info = MONITORINFO {
+                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                        if wparam.0 != 0 {
+                            let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
+                            if !params.is_null() {
+                                (*params).rgrc[0] = info.rcWork;
+                            }
+                        } else {
+                            let rect = lparam.0 as *mut RECT;
+                            if !rect.is_null() {
+                                *rect = info.rcWork;
+                            }
+                        }
+                    }
+                }
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_NCHITTEST => {
+            let frameless_windowed = window_state(hwnd).is_some_and(|state| {
+                state.is_frameless_windowed.get() && !state.is_borderless.get()
+            }) && !IsZoomed(hwnd).as_bool();
+            if frameless_windowed {
+                let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rect = RECT::default();
+                if GetWindowRect(hwnd, &mut rect).is_ok() {
+                    let (border_x, border_y) = frameless_resize_border(hwnd);
+                    return LRESULT(frameless_resize_hit_test(
+                        rect, screen_x, screen_y, border_x, border_y,
+                    ) as isize);
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
         }
         WM_SIZE => {
             if let Some(state) = window_state(hwnd) {
@@ -1706,7 +1952,7 @@ unsafe extern "system" fn window_proc(
             // tear the swap chain down after its window is gone, racing the
             // driver and intermittently crashing during device release at exit.
             if let Some(state) = window_state(hwnd) {
-                state.is_open.set(false);
+                request_close(state);
             }
             LRESULT(0)
         }
@@ -1782,6 +2028,13 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_MBUTTONDOWN => LRESULT(0),
+        WM_MBUTTONUP => {
+            if let Some(state) = window_state(hwnd) {
+                request_close(state);
+            }
+            LRESULT(0)
+        }
         WM_CHAR => {
             if let Some(state) = window_state(hwnd) {
                 if wparam.0 as u32 == ' ' as u32 {
@@ -1825,6 +2078,7 @@ unsafe extern "system" fn window_proc(
                 if state.left_button_down_owned.get() && (wparam.0 as u32 & 0x0001) == 0 {
                     state.left_button_down_owned.set(false);
                     state.ctrl_pan_active.set(false);
+                    state.caption_tracking.set(false);
                     let _ = ReleaseCapture();
                 }
                 if state.ctrl_pan_active.get() {
@@ -1856,6 +2110,7 @@ unsafe extern "system" fn window_proc(
                         // Mouse crossed the drag threshold — end tracking
                         // and enter the real modal move loop via SC_MOVE.
                         state.caption_tracking.set(false);
+                        state.left_button_down_owned.set(false);
                         let _ = ReleaseCapture();
                         // SC_MOVE | HTCAPTION tells Windows the move is
                         // mouse-initiated from the caption, preserving
@@ -1882,6 +2137,19 @@ unsafe extern "system" fn window_proc(
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     state.ctrl_pan_active.set(true);
                     state.ctrl_pan_last_client.set(POINT { x, y });
+                } else if state.is_frameless_windowed.get()
+                    && !state.is_borderless.get()
+                    && !point_is_in_timeline(hwnd, ((lparam.0 >> 16) & 0xFFFF) as i16 as i32)
+                {
+                    // In frameless mode the video surface replaces the title
+                    // bar as the move handle. Keep timeline scrubbing and
+                    // Ctrl+drag pan in the client path, and wait for the system
+                    // drag threshold so a click/double-click remains a click.
+                    let _ = BringWindowToTop(hwnd);
+                    let mut pt = POINT::default();
+                    let _ = GetCursorPos(&mut pt);
+                    state.caption_tracking.set(true);
+                    state.caption_drag_origin.set(pt);
                 }
             }
             LRESULT(0)
@@ -1898,11 +2166,7 @@ unsafe extern "system" fn window_proc(
                 // bottom of the window.  Without this, rapidly clicking the
                 // timeline to seek triggers accidental fullscreen toggles.
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                let mut rect = RECT::default();
-                let in_timeline = GetClientRect(hwnd, &mut rect).is_ok() && {
-                    let height = rect.bottom - rect.top;
-                    height > 0 && y >= height - crate::render::timeline::TIMELINE_ACTIVATION_ZONE_PX
-                };
+                let in_timeline = point_is_in_timeline(hwnd, y);
                 if !in_timeline {
                     state
                         .input_events
@@ -2050,9 +2314,12 @@ unsafe extern "system" fn window_proc(
             // resize or aspect-ratio calculations.
             let mmi = lparam.0 as *mut MINMAXINFO;
             if !mmi.is_null() {
-                // Convert minimum client size to window size (adds chrome).
+                let frameless =
+                    window_state(hwnd).is_some_and(|state| state.is_frameless_windowed.get());
+                // Convert the minimum client size to the active window shape.
                 let (min_w, min_h) =
-                    adjust_window_size(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT).unwrap_or((640, 360));
+                    window_size_for_client(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT, frameless)
+                        .unwrap_or((640, 360));
                 unsafe {
                     (*mmi).ptMinTrackSize = POINT { x: min_w, y: min_h };
                 }
@@ -2100,5 +2367,52 @@ unsafe fn take_window_state(hwnd: HWND) -> Option<*const WindowState> {
         None
     } else {
         Some(ptr)
+    }
+}
+
+#[cfg(test)]
+mod frameless_tests {
+    use super::*;
+
+    const WINDOW: RECT = RECT {
+        left: 100,
+        top: 200,
+        right: 900,
+        bottom: 650,
+    };
+
+    #[test]
+    fn frameless_hit_test_keeps_interior_in_the_client_area() {
+        assert_eq!(frameless_resize_hit_test(WINDOW, 500, 400, 8, 8), HTCLIENT);
+    }
+
+    #[test]
+    fn frameless_hit_test_exposes_all_resize_edges_and_corners() {
+        let cases = [
+            ((100, 300), HTLEFT),
+            ((899, 300), HTRIGHT),
+            ((500, 200), HTTOP),
+            ((500, 649), HTBOTTOM),
+            ((100, 200), HTTOPLEFT),
+            ((899, 200), HTTOPRIGHT),
+            ((100, 649), HTBOTTOMLEFT),
+            ((899, 649), HTBOTTOMRIGHT),
+        ];
+        for ((x, y), expected) in cases {
+            assert_eq!(
+                frameless_resize_hit_test(WINDOW, x, y, 8, 8),
+                expected,
+                "unexpected hit result at ({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn frameless_client_size_has_no_chrome_overhead() {
+        assert_eq!(
+            window_size_for_client(1280, 720, true).unwrap(),
+            (1280, 720)
+        );
+        assert_eq!(window_chrome_size(true).unwrap(), (0, 0));
     }
 }

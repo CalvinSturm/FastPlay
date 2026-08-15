@@ -13,6 +13,7 @@ pub enum SessionCommand {
     RotateClockwise,
     RotateCounterClockwise,
     ToggleBorderlessFullscreen,
+    ToggleFramelessWindowed,
     ZoomAtCursor {
         delta: i16,
         cursor_x: i32,
