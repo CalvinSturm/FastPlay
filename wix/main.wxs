@@ -121,6 +121,14 @@
                                 Source='$(var.CargoTargetBinDir)\fastplay.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='association_icon' Guid='*'>
+                            <File
+                                Id='association_icon_file'
+                                Name='fastplay-mark.ico'
+                                DiskId='1'
+                                Source='assets\icon\fastplay-mark.ico'
+                                KeyPath='yes'/>
+                        </Component>
                         <Component Id='dll_avcodec' Guid='*'>
                             <File Id='avcodec' Name='avcodec-62.dll' DiskId='1' Source='$(var.CargoTargetBinDir)\avcodec-62.dll' KeyPath='yes'/>
                         </Component>
@@ -160,8 +168,12 @@
                         <Component Id='FileAssociations' Guid='*'>
                             <!-- ProgId: description, icon, and open command -->
                             <RegistryValue Root='HKCR' Key='FastPlay.VideoFile' Value='FastPlay Video File' Type='string' KeyPath='yes'/>
-                            <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\DefaultIcon' Value='"[Bin]fastplay.exe",0' Type='string'/>
+                            <!-- A standalone path avoids Explorer reusing its cached executable icon. -->
+                            <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\DefaultIcon' Value='"[Bin]fastplay-mark.ico",0' Type='string'/>
                             <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\shell\open\command' Value='"[Bin]fastplay.exe" "%1"' Type='string'/>
+
+                            <!-- Modern Windows may store the per-user choice as Applications\fastplay.exe. -->
+                            <RegistryValue Root='HKCR' Key='Applications\fastplay.exe\DefaultIcon' Value='"[Bin]fastplay-mark.ico",0' Type='string'/>
 
                             <!-- File extension associations -->
                             <RegistryValue Root='HKCR' Key='.mp4' Value='FastPlay.VideoFile' Type='string'/>
@@ -187,6 +199,7 @@
             Absent='disallow'>
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='association_icon'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='FileAssociations'/>
             <ComponentRef Id='dll_avcodec'/>

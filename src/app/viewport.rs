@@ -166,7 +166,8 @@ impl ViewportState {
     }
 
     /// Orient content dimensions for the current rotation: odd quarter-turns
-    /// swap width and height. Used for fit/half-size window sizing.
+    /// swap width and height. Used for initial-open, fit, and half-size window
+    /// sizing.
     pub fn orient_dimensions(&self, width: u32, height: u32) -> (u32, u32) {
         if !self.rotation_quarter_turns.is_multiple_of(2) {
             (height, width)
@@ -268,6 +269,24 @@ mod tests {
         assert_eq!(v.orient_dimensions(1920, 1080), (1080, 1920));
         v.rotate(1); // now 2 quarter turns (even)
         assert_eq!(v.orient_dimensions(1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn stream_rotation_orients_initial_window_dimensions() {
+        let mut v = ViewportState::new();
+        v.apply_stream_rotation(1);
+        assert_eq!(
+            v.orient_dimensions(1920, 1080),
+            (1080, 1920),
+            "90-degree stream metadata must open a portrait window"
+        );
+
+        v.apply_stream_rotation(3);
+        assert_eq!(
+            v.orient_dimensions(1920, 1080),
+            (1080, 1920),
+            "270-degree stream metadata must open a portrait window"
+        );
     }
 
     #[test]
