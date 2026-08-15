@@ -64,7 +64,7 @@ Work that landed since `0.4.4` and ships here for the first time:
 ## Validation
 
 - `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test`
-  (257 passing, including new UTC-stamp, retention, GDI source-invariant, and
+  (260 passing, including new UTC-stamp, retention, GDI source-invariant, and
   run-log resolution tests), `cargo build --release`, `cargo wix`
 - GDI growth over 40 seek pairs: +708 → 0, flat across two runs
 - Fault injection at the real GDI failure site: before, no worker-exit lines

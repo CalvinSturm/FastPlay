@@ -81,18 +81,23 @@ pwsh -File bench/run-bench.ps1 -LatencyOnly
 
 For each clip × iteration the harness:
 
-1. Clears any stale `%APPDATA%\FastPlay\session-*-<pid>.log` left by an earlier
-   run that happened to be given the same PID.
-2. Launches the player on the clip and finds the render window by its
-   `" - FastPlay"` title suffix (scoped to the launched PID).
-3. Waits for `open_to_first_frame_ms` to confirm open.
-4. Posts seek keypresses (`PostMessageW` `WM_KEYDOWN` VK_RIGHT/VK_LEFT), then a
+1. Records the launch time, then launches the player on the clip and finds the
+   render window by its `" - FastPlay"` title suffix (scoped to the launched
+   PID).
+2. Waits for `open_to_first_frame_ms` to confirm open.
+3. Posts seek keypresses (`PostMessageW` `WM_KEYDOWN` VK_RIGHT/VK_LEFT), then a
    pause/resume (`WM_CHAR` space).
-5. Unless `-LatencyOnly`, waits for the `playback_summary` line (full playthrough).
-6. Closes via `WM_CLOSE` — the session log only flushes on a graceful exit.
-7. Resolves that run's `session-<utc-stamp>-<pid>.log` **by the PID it launched**
-   — not by "the newest log", which would race any other FastPlay instance
-   exiting mid-benchmark — then parses and aggregates.
+4. Unless `-LatencyOnly`, waits for the `playback_summary` line (full playthrough).
+5. Closes via `WM_CLOSE` — the session log only flushes on a graceful exit.
+6. Resolves that run's `session-<utc-stamp>-<pid>.log` **by the PID it launched
+   and a write time after the launch** — not by "the newest log", which would
+   race any other FastPlay instance exiting mid-benchmark, and not by PID alone,
+   since Windows recycles PIDs and an older run holding the same one would
+   satisfy the glob. Then parses and aggregates.
+
+Nothing deletes logs here: the harness never removes a file it might be racing
+the player to write. Retention is the app's own job (`logging::init` sweeps
+after seven days).
 
 ## Correctness verifiers
 

@@ -114,7 +114,19 @@ pub fn install_crash_handler() {
 
             use std::io::Write;
             if let Some(path) = crate::logging::session_log_path() {
-                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+                // `create(true)` is load-bearing, not belt-and-braces. Under the
+                // old fixed `session.log` the file was always there from an
+                // earlier run; a per-run name exists only if the flush above
+                // just made it — and that flush returns early, before creating
+                // anything, when the ring lock is contended. That is exactly the
+                // case this handler exists for (a thread faulting mid-`push`),
+                // so without `create` the crash marker would be dropped in
+                // precisely the scenario it is needed.
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&path)
+                {
                     let _ = writeln!(f, "\n=== CRASH ===\n{msg}");
                 }
             }

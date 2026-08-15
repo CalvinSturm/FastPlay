@@ -156,9 +156,6 @@ function Invoke-Run([string]$clip, [double]$duration) {
     $script:runStart = Get-Date
     $proc = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
     $script:runPid = $proc.Id
-    # Anything already matching this PID is from an earlier run given the same
-    # PID; clear it so only this run's log can match.
-    Clear-FastPlayRunLog -ProcessId $proc.Id
     try {
         $hwnd = Find-Window $proc.Id
         if ($hwnd -eq [IntPtr]::Zero) { throw "render window not found" }

@@ -19,31 +19,22 @@
         testing nothing.
 
     So a run is identified by PID *and* by having been written after the
-    process was launched, and callers are expected to clear pre-existing
-    matches immediately after launch as well. Both guards are cheap; either
-    alone leaves a hole.
+    process was launched. The launch-time filter closes the recycled-PID hole
+    on its own: an older run's log necessarily predates the launch.
+
+    There used to be a companion Clear-FastPlayRunLog that deleted matching
+    logs immediately after launch. It was removed because it could only
+    subtract. The PID is not knowable until the process exists, so the delete
+    inevitably raced the run it had just started: a player that panicked during
+    open flushed its trace (the panic hook dumps the ring) well before a
+    PowerShell Get-ChildItem | Remove-Item pipeline reached disk, and the clear
+    then destroyed the very evidence these per-run logs exist to preserve.
 #>
 
 Set-StrictMode -Version Latest
 
 function Get-FastPlayLogDir {
     Join-Path $env:APPDATA 'FastPlay'
-}
-
-<#
-.SYNOPSIS
-    Delete any session log already matching a PID, immediately after launch.
-.DESCRIPTION
-    Anything matching at that moment is necessarily from an earlier run given
-    the same PID, since the run under test has not flushed yet.
-#>
-function Clear-FastPlayRunLog {
-    param(
-        [Parameter(Mandatory)][int]$ProcessId,
-        [string]$LogDir = (Get-FastPlayLogDir)
-    )
-    Get-ChildItem -Path $LogDir -Filter "session-*-$ProcessId.log" -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 <#
@@ -83,4 +74,4 @@ function Resolve-FastPlayRunLog {
     return $match.FullName
 }
 
-Export-ModuleMember -Function Get-FastPlayLogDir, Clear-FastPlayRunLog, Resolve-FastPlayRunLog
+Export-ModuleMember -Function Get-FastPlayLogDir, Resolve-FastPlayRunLog

@@ -112,10 +112,19 @@ fn prune_old_logs() {
     let Some(dir) = log_dir() else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    prune_logs_in(&dir, SystemTime::now());
+}
+
+/// The sweep itself, with the directory and the current time injected.
+///
+/// Split out so the retention policy — which is the only code in this module
+/// that *deletes* anything — can be tested against synthesized files in a temp
+/// directory, without mutating `APPDATA` for the whole test process or having
+/// to backdate modification times.
+fn prune_logs_in(dir: &std::path::Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let now = SystemTime::now();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -287,5 +296,91 @@ mod tests {
     #[test]
     fn run_id_is_stable_within_a_process() {
         assert_eq!(run_id(), run_id());
+    }
+
+    /// A fresh temp directory holding one file per name in `names`.
+    fn dir_with_files(tag: &str, names: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fastplay_logging_{tag}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        for name in names {
+            std::fs::write(dir.join(name), b"trace").expect("write temp file");
+        }
+        dir
+    }
+
+    fn exists(dir: &std::path::Path, name: &str) -> bool {
+        dir.join(name).exists()
+    }
+
+    /// Every file the sweep must consider, in one fixture: both owned
+    /// prefixes, the two non-log files FastPlay keeps in the same directory,
+    /// and a `.log` that belongs to somebody else.
+    const FIXTURE: [&str; 5] = [
+        "session-20260810T120000Z-4242.log",
+        "crash-20260810T120000Z-4242.log",
+        "recent.tsv",
+        "settings.txt",
+        "ffmpeg.log",
+    ];
+
+    #[test]
+    fn logs_within_the_retention_window_survive() {
+        let dir = dir_with_files("keep", &FIXTURE);
+
+        // The files were written moments ago, so "now" is well inside the week.
+        prune_logs_in(&dir, SystemTime::now());
+
+        for name in FIXTURE {
+            assert!(exists(&dir, name), "{name} was deleted while still fresh");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logs_past_the_retention_window_are_swept() {
+        let dir = dir_with_files("sweep", &FIXTURE);
+
+        // Advancing `now` past the window is equivalent to backdating every
+        // file, and does not depend on the filesystem honouring a set mtime.
+        let later = SystemTime::now() + LOG_RETENTION + Duration::from_secs(60);
+        prune_logs_in(&dir, later);
+
+        assert!(
+            !exists(&dir, "session-20260810T120000Z-4242.log"),
+            "an expired session log survived the sweep"
+        );
+        assert!(
+            !exists(&dir, "crash-20260810T120000Z-4242.log"),
+            "an expired crash log survived the sweep"
+        );
+
+        // Retention is scoped by prefix *and* extension. Deleting app state
+        // would lose the user's recent-file list and settings; deleting
+        // `ffmpeg.log` would be reaching outside this module's own files.
+        assert!(exists(&dir, "recent.tsv"), "recent.tsv must never be swept");
+        assert!(
+            exists(&dir, "settings.txt"),
+            "settings.txt must never be swept"
+        );
+        assert!(
+            exists(&dir, "ffmpeg.log"),
+            "a .log this module does not own must never be swept"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_log_directory_is_not_an_error() {
+        // First run on a new machine: `init` calls this before anything has
+        // created `%APPDATA%\FastPlay`.
+        let absent = std::env::temp_dir().join("fastplay_logging_definitely_absent_zzz");
+        let _ = std::fs::remove_dir_all(&absent);
+        prune_logs_in(&absent, SystemTime::now());
     }
 }

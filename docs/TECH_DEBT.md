@@ -106,7 +106,7 @@ historical context, not current guidance.
 - `cargo clippy --all-targets -- -D warnings` — **clean**, but see R5 below: the
   run is clean *against a crate-wide allow-list*, which is a weaker signal than
   this section previously claimed.
-- `cargo test --all-targets` — **257 passing, 0 failing** (2026-08-14).
+- `cargo test --all-targets` — **260 passing, 0 failing** (2026-08-14).
 
 CI runs all three on `windows-latest`.
 

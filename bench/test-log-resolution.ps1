@@ -77,16 +77,13 @@ try {
         (Resolve-FastPlayRunLog -ProcessId $pid1 -LaunchTime $launch -LogDir $dir) -eq $fresh
     }
 
-    # ---- Clear removes pre-existing matches, and only those -----------------
-    Clear-FastPlayRunLog -ProcessId $pid1 -LogDir $dir
-    Assert-That 'Clear removed both logs for the target PID' {
-        -not (Test-Path $stale) -and -not (Test-Path $fresh)
-    }
-    Assert-That 'Clear left the other PID alone' { Test-Path $other }
-
-    Assert-That 'after Clear, -Required throws for the missing run' {
-        try { Resolve-FastPlayRunLog -ProcessId $pid1 -LaunchTime $launch -LogDir $dir -Required | Out-Null; $false }
-        catch { $true }
+    # ---- A PID with no log at all is a loud failure under -Required ---------
+    # The launch-time filter is the only guard now (there is no post-launch
+    # clear to lean on), so a run that never flushed must throw rather than
+    # quietly resolve to anything.
+    Assert-That '-Required throws when the PID has no log whatsoever' {
+        try { Resolve-FastPlayRunLog -ProcessId 31337 -LaunchTime $launch -LogDir $dir -Required | Out-Null; $false }
+        catch { $_.Exception.Message -match 'no session log for pid 31337' }
     }
 
     # ---- Missing directory is a clean miss, not a crash ---------------------

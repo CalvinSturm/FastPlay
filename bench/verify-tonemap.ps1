@@ -116,9 +116,6 @@ $script:lastRunLog = $null
 function Capture-Backbuffer([string]$Clip) {
     $launchTime = Get-Date
     $proc = Start-Process -FilePath $Exe -ArgumentList "`"$Clip`"" -PassThru
-    # Anything matching this PID right now predates the run; clear it so a
-    # recycled PID cannot later masquerade as this run's log.
-    Clear-FastPlayRunLog -ProcessId $proc.Id
     $hwnd = [IntPtr]::Zero
     try {
         foreach ($attempt in 1..30) {

@@ -50,17 +50,46 @@ fn code_lines(source: &str) -> impl Iterator<Item = &str> {
         .filter(|line| !line.trim().is_empty())
 }
 
-/// Body of `name`, from its signature to the first line that closes it at the
-/// function's own indentation.
+/// The item `name`, from its outer attributes to the first line that closes it
+/// at the function's own indentation.
+///
+/// The slice starts *above* the signature on purpose. An attribute is the one
+/// place a helper could be compiled out of release builds wholesale, and it has
+/// to be written on the line before `fn` — so a slice beginning at the
+/// signature could never contain one, and the guard in
+/// [`helpers_delete_unconditionally_in_release_builds`] that looks for
+/// `#[cfg(debug_assertions)]` would be unable to fire.
 fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
-    let start = source
+    let signature = source
         .find(name)
         .unwrap_or_else(|| panic!("{name} not found in src/ffi/d3d11.rs"));
+    let start = item_start(source, signature);
     let rest = &source[start..];
     let end = rest
         .find("\n}\n")
         .unwrap_or_else(|| panic!("no closing brace for {name}"));
     &rest[..end]
+}
+
+/// Offset where the item containing `signature` begins, walking backwards over
+/// the contiguous block of `#[..]` attribute lines above it.
+fn item_start(source: &str, signature: usize) -> usize {
+    let mut start = line_start(source, signature);
+    while start > 0 {
+        let previous = line_start(source, start - 1);
+        if !source[previous..start].trim_start().starts_with("#[") {
+            break;
+        }
+        start = previous;
+    }
+    start
+}
+
+/// Offset of the first character of the line containing `offset`.
+fn line_start(source: &str, offset: usize) -> usize {
+    source[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1)
 }
 
 #[test]
@@ -120,7 +149,9 @@ fn helpers_delete_unconditionally_in_release_builds() {
             }
         }
 
-        // Guard against the helper itself being wrapped away.
+        // Guard against the helper itself being wrapped away. `function_body`
+        // includes the attribute block above the signature precisely so this
+        // can see it.
         assert!(
             !body.contains("#[cfg(debug_assertions)]"),
             "{helper} is compiled out of release builds"

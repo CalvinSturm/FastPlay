@@ -66,10 +66,6 @@ public class FpMetaWin {
 
 $launchTime = Get-Date
 $proc = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
-# Anything matching this PID right now is from an earlier run that happened to
-# hold it; this run has not flushed yet. Clearing plus the launch-time filter
-# below means a recycled PID cannot satisfy the oracle with a stale trace.
-Clear-FastPlayRunLog -ProcessId $proc.Id
 try {
     Start-Sleep -Seconds $SettleSeconds
     if ($proc.HasExited) { throw "player exited early (code $($proc.ExitCode))" }
