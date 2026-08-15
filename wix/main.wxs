@@ -160,7 +160,8 @@
                         <Component Id='FileAssociations' Guid='*'>
                             <!-- ProgId: description, icon, and open command -->
                             <RegistryValue Root='HKCR' Key='FastPlay.VideoFile' Value='FastPlay Video File' Type='string' KeyPath='yes'/>
-                            <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\DefaultIcon' Value='"[Bin]fastplay.exe",0' Type='string'/>
+                            <!-- Resource index 1 is the mark-only icon Explorer overlays on video thumbnails. -->
+                            <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\DefaultIcon' Value='"[Bin]fastplay.exe",1' Type='string'/>
                             <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\shell\open\command' Value='"[Bin]fastplay.exe" "%1"' Type='string'/>
 
                             <!-- File extension associations -->
