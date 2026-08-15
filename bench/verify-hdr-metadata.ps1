@@ -7,7 +7,7 @@
     carry the exact MSDN DXGI_HDR_METADATA_HDR10 worked-example values
     (DCI-P3 primaries, D65 white point, 1000-nit max / 0.001-nit min
     mastering luminance, MaxCLL 2000, MaxFALL 500), plays it through the
-    real player on the HDR path, and asserts from session.log that the
+    real player on the HDR path, and asserts from that run's session log that the
     metadata was extracted from the first decoded frame, converted, and
     applied to the HDR swapchain with the expected values:
 
@@ -31,7 +31,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $WM_CLOSE = 0x0010
-$logPath = Join-Path $env:APPDATA "FastPlay\session.log"
+Import-Module (Join-Path $PSScriptRoot "FastPlayLog.psm1") -Force
+# Resolved after the run from the PID this script launched — see below.
+$logPath = $null
 
 if (-not (Test-Path $Exe)) { throw "fastplay binary not found: $Exe (build first)" }
 if (-not (Get-Command $Ffmpeg -ErrorAction SilentlyContinue)) { throw "ffmpeg not found on PATH" }
@@ -62,6 +64,7 @@ public class FpMetaWin {
 }
 "@
 
+$launchTime = Get-Date
 $proc = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
 try {
     Start-Sleep -Seconds $SettleSeconds
@@ -82,7 +85,11 @@ finally {
     if (-not $proc.HasExited) { $proc.Kill() }
 }
 
-if (-not (Test-Path $logPath)) { throw "session.log not found at $logPath" }
+# The ring only reaches disk on graceful exit, so resolve after the wait above.
+# -Required makes a missing flush fail loudly: this script asserts on log
+# contents, and silently falling back to an earlier run's trace would let the
+# metadata oracle pass while testing nothing.
+$logPath = Resolve-FastPlayRunLog -ProcessId $proc.Id -LaunchTime $launchTime -Required
 $log = Get-Content $logPath -Raw
 if ($log -notmatch [regex]::Escape("path=HdrPqOutput")) {
     throw "FAIL: open did not select HdrPqOutput (is the Windows HDR toggle on?)"
@@ -90,7 +97,7 @@ if ($log -notmatch [regex]::Escape("path=HdrPqOutput")) {
 $expected = "[hdr_metadata] applied: maxMastering=1000 minMastering(0.0001nit)=10 maxCLL=2000 maxFALL=500"
 if ($log -notmatch [regex]::Escape($expected)) {
     $seen = ($log -split "`n" | Select-String "hdr_metadata") -join "; "
-    throw "FAIL: expected '$expected' in session.log; saw: $seen"
+    throw "FAIL: expected '$expected' in $logPath; saw: $seen"
 }
 Write-Host "PASS: mastering/content-light SEI extracted, converted, and applied ($expected)"
 exit 0

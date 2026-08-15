@@ -46,11 +46,18 @@ param(
     # audited baseline measured 0 (PQ), 1 (PQ-DIM), 1 (HLG).
     [int]$Tolerance = 1,
     [int]$SettleSeconds = 3,
+    # Optional file to receive the session-log path of the LAST app run this
+    # script launches. Each run writes session-<utc-stamp>-<pid>.log, so a
+    # caller that did not start the process itself (verify-hdr-passthrough)
+    # cannot identify the run otherwise — and picking the newest log would race
+    # any other FastPlay instance exiting at the same moment.
+    [string]$RunLogOut = "",
     # Keep generated clips, decoded NV12 dumps, and captured screenshots for
     # diagnosis instead of deleting them at the end.
     [switch]$KeepArtifacts
 )
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "FastPlayLog.psm1") -Force
 $W = 1280; $H = 720
 $WM_APP_SAVE_SCREENSHOT = 0x8001  # WM_APP + 1, see window_proc in src/ffi/dxgi.rs
 $WM_CLOSE = 0x0010
@@ -101,6 +108,9 @@ function Find-FastPlayWindow([uint32]$TargetPid) {
 
 $screenshotDir = Join-Path $env:USERPROFILE "Pictures\FastPlay"
 $script:capturedShots = @()
+# Session log of the most recent app run, reported to a caller that did not
+# launch the process itself (verify-hdr-passthrough) via -RunLogOut.
+$script:lastRunLog = $null
 
 # Play $Clip, trigger the backbuffer screenshot, return the captured bitmap path.
 function Capture-Backbuffer([string]$Clip) {
@@ -134,6 +144,13 @@ function Capture-Backbuffer([string]$Clip) {
         }
         $proc.WaitForExit(8000) | Out-Null
         if (-not $proc.HasExited) { $proc.Kill() }
+
+        # The ring only reaches disk on graceful exit, so resolve after the wait
+        # above, requiring a log written after this run started. Recorded, not
+        # thrown on: this is a `finally`, and throwing here would mask whatever
+        # real failure (missing window, no screenshot) brought us to it. The
+        # caller asserts on it once the capture has succeeded.
+        $script:lastRunLog = Resolve-FastPlayRunLog -ProcessId $proc.Id -LaunchTime $launchTime
     }
 }
 
@@ -281,6 +298,17 @@ if (-not $KeepArtifacts) {
     Remove-Item $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
 } else {
     Write-Host "artifacts retained: $WorkDir + $($script:capturedShots.Count) screenshot(s)"
+}
+
+# Hand the caller this run's log. Required when asked for: verify-hdr-passthrough
+# asserts HDR path selection against it, and resolving to an earlier run's
+# trace would let that oracle pass while testing nothing.
+if ($RunLogOut) {
+    if (-not $script:lastRunLog) {
+        Write-Host "RESULT: FAIL (no session log resolved for the last run; refusing to report a stale one)"
+        exit 1
+    }
+    Set-Content -Path $RunLogOut -Value $script:lastRunLog
 }
 
 if ($overallFail) {

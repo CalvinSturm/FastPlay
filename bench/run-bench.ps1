@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
     Benchmark harness for FastPlay. Drives the release build over a corpus and
-    aggregates the metrics it logs to session.log into p50/p95 reports.
+    aggregates the metrics it logs to its session log into p50/p95 reports.
 
 .DESCRIPTION
     For each clip x iteration the harness launches the player, drives a scripted
     workload via PostMessageW (open -> seeks -> pause/resume -> play to end ->
-    graceful close), then parses %APPDATA%\FastPlay\session.log. It reports the
+    graceful close), then parses that run's %APPDATA%\FastPlay\session-*-<pid>.log. It reports the
     roadmap metrics (docs/ROADMAP.md section 2):
 
       - open_to_first_frame_ms        (open-to-first-frame)
@@ -23,7 +23,7 @@
     -Iterations for stable percentiles.
 
     The player must be a release build (the debug build is a console-subsystem
-    app whose window the title match would miss). session.log only flushes on a
+    app whose window the title match would miss). The session log only flushes on a
     graceful exit, so the harness always closes via WM_CLOSE.
 
 .EXAMPLE
@@ -55,8 +55,22 @@ if (-not (Test-Path $CorpusDir)) {
 $clips = @(Get-ChildItem $CorpusDir -File | Where-Object { $_.Extension -in '.mp4', '.mkv', '.mov', '.webm', '.avi' })
 if ($clips.Count -eq 0) { throw "No media files in $CorpusDir" }
 
-$log = "$env:APPDATA\FastPlay\session.log"
+Import-Module (Join-Path $PSScriptRoot "FastPlayLog.psm1") -Force
+
+# A run is identified by the PID this script launched AND by having been written
+# after that launch — see bench/FastPlayLog.psm1 for why either guard alone
+# leaves a hole.
+$script:runPid = 0
+$script:runStart = [datetime]::MinValue
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+# This run's log, or $null before it has exited (the ring only flushes on
+# graceful exit).
+function Resolve-RunLog {
+    param([switch]$Required)
+    if (-not $script:runPid) { return $null }
+    Resolve-FastPlayRunLog -ProcessId $script:runPid -LaunchTime $script:runStart -Required:$Required
+}
 
 Add-Type @"
 using System;
@@ -109,7 +123,8 @@ function Find-Window([int]$processId) {
 function Wait-ForLogLine([string]$pattern, [double]$timeoutSec) {
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     while ((Get-Date) -lt $deadline) {
-        if ((Test-Path $log) -and (Select-String -Path $log -Pattern $pattern -Quiet)) { return $true }
+        $log = Resolve-RunLog
+        if ($log -and (Select-String -Path $log -Pattern $pattern -Quiet)) { return $true }
         Start-Sleep -Milliseconds 150
     }
     return $false
@@ -138,8 +153,9 @@ function Get-AllMatches([string]$text, [string]$pattern) {
 }
 
 function Invoke-Run([string]$clip, [double]$duration) {
-    if (Test-Path $log) { Remove-Item $log -Force }
+    $script:runStart = Get-Date
     $proc = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
+    $script:runPid = $proc.Id
     try {
         $hwnd = Find-Window $proc.Id
         if ($hwnd -eq [IntPtr]::Zero) { throw "render window not found" }
@@ -172,6 +188,7 @@ function Invoke-Run([string]$clip, [double]$duration) {
         if (-not $proc.HasExited) { $proc | Stop-Process -Force }
     }
 
+    $log = Resolve-RunLog -Required
     $text = Get-Content $log -Raw
     $openArr = Get-AllMatches $text 'open_to_first_frame_ms=(\d+)'
     $summaryDrop = Get-AllMatches $text 'playback_summary .*?dropped_video_frames=(\d+)'
