@@ -1105,6 +1105,7 @@ impl PlaybackSession {
                     self.has_shown_content = true;
                     let ffmpeg::PendingVideoFrame::D3D11 { surface, .. } = &frame;
                     let (disp_w, disp_h) = surface.display_size();
+                    let (disp_w, disp_h) = self.viewport.orient_dimensions(disp_w, disp_h);
                     self.window.resize_for_content(disp_w, disp_h, center);
                 }
 

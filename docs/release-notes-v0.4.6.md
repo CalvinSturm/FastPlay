@@ -1,8 +1,8 @@
 # FastPlay v0.4.6
 
 FastPlay `0.4.6` adds a frameless windowed mode that stays out of the way and
-remembers how you left it. It also makes the portable Windows build reproducible
-from the repository.
+remembers how you left it, fixes portrait videos opening inside a landscape
+window, and makes the portable Windows build reproducible from the repository.
 
 ## Highlights
 
@@ -33,13 +33,22 @@ from the repository.
   itself continues to store settings, recent files, resume positions, and logs
   under `%APPDATA%\FastPlay`.
 
+### Portrait videos open without empty side space
+
+- FastPlay now applies 90-degree and 270-degree display-matrix rotation before
+  sizing the window for the first frame.
+- Phone videos stored as landscape-coded frames with portrait rotation metadata
+  now open in a portrait window instead of a landscape window with large black
+  side areas. Native portrait and unrotated landscape sizing are unchanged.
+
 ### Updated Windows icon
 
-- The executable, installer, and Start menu now use the new FastPlay badge, with
-  dedicated icon entries from 16 through 256 pixels.
-- Explorer video thumbnails use a dedicated mark-only FastPlay icon file so the
-  file association stays recognizable without covering the thumbnail in the
-  full app badge.
+- The executable, installer, Start menu, and video file associations now use the
+  supplied FastPlay mark, with dedicated icon entries from 16 through 256
+  pixels.
+- The installer registers an exact standalone copy for both FastPlay's file type
+  and Windows' per-user application association, avoiding stale executable-icon
+  fallbacks on Explorer video thumbnails.
 
 ## Performance
 
@@ -59,9 +68,11 @@ latency claims.
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo test --all-targets` (266 passing)
+- `cargo test --all-targets` (267 passing)
 - `cargo build --release`
 - `cargo wix`
+- live window-geometry checks for native portrait, 90-degree metadata-rotated
+  portrait, and unrotated landscape clips
 - portable ZIP structure plus extracted hardware-D3D11 and software-fallback
   playback checks
 - MSI administrative extraction and extracted-payload hardware playback check
