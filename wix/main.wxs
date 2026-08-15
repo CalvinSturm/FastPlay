@@ -164,6 +164,9 @@
                             <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\DefaultIcon' Value='"[Bin]fastplay.exe",1' Type='string'/>
                             <RegistryValue Root='HKCR' Key='FastPlay.VideoFile\shell\open\command' Value='"[Bin]fastplay.exe" "%1"' Type='string'/>
 
+                            <!-- Modern Windows may store the per-user choice as Applications\fastplay.exe. -->
+                            <RegistryValue Root='HKCR' Key='Applications\fastplay.exe\DefaultIcon' Value='"[Bin]fastplay.exe",1' Type='string'/>
+
                             <!-- File extension associations -->
                             <RegistryValue Root='HKCR' Key='.mp4' Value='FastPlay.VideoFile' Type='string'/>
                             <RegistryValue Root='HKCR' Key='.mkv' Value='FastPlay.VideoFile' Type='string'/>
