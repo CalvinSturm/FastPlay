@@ -4,7 +4,7 @@ FastPlay is a keyboard-first Windows video player for fast local playback, smoot
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-**[Download FastPlay v0.4.5 for Windows x64](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.5/fastplay-0.4.5-x86_64.msi)** • [All releases](../../releases) • [Report an issue](../../issues)
+**[Download FastPlay v0.4.5 for Windows x64 (MSI)](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.5/fastplay-0.4.5-x86_64.msi)** • **[Portable ZIP](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.5/fastplay-0.4.5-windows-x86_64-portable.zip)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
@@ -203,6 +203,15 @@ The build expects the usual FFmpeg development layout with `include/` and `lib/`
 ```powershell
 cargo build --release
 ```
+
+Create the no-installer portable release archive from that build:
+
+```powershell
+.\scripts\package-portable.ps1 -SkipBuild
+```
+
+The ZIP is written to `target\dist\`. Portable FastPlay still stores settings,
+recent-file history, resume positions, and logs under `%APPDATA%\FastPlay`.
 
 ## Run
 
