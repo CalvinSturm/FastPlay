@@ -49,7 +49,7 @@ Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. R
 | `Ctrl+Shift+O` | Recent files overlay (↑↓ select · Enter open · Del remove · Esc close) |
 | `PageUp` / `PageDown` | Previous / next file in the play queue |
 | `Ctrl+S` | Save screenshot |
-| `Ctrl+Shift+S` | Toggle framed/frameless windowed mode |
+| `Ctrl+Shift+S` | Toggle framed/frameless windowed mode (remembered for new instances) |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
 | `Shift+I` | Clear in-point |

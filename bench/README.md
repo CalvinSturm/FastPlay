@@ -116,6 +116,7 @@ and exit non-zero on failure.
 | `verify-hdr-passthrough.ps1` | End-to-end HDR passthrough on an HDR-active display: runs `verify-tonemap` under the composed model, asserts from the reported session log that `HdrPqOutput` was actually selected and the chain swapped, then verifies a mid-playback resize leaves the bars byte-stable |
 | `verify-hdr-caps.ps1` | Display HDR detection (`display_hdr_active` tracks the Windows HDR toggle; run with `-ExpectHdr on` / `off`) |
 | `verify-hdr-metadata.ps1` | HDR10 static metadata flows from real x265 SEI through conversion to `SetHDRMetaData`, with the MSDN worked-example values asserted in the log |
+| `verify-frameless-persistence.ps1` | Frameless mode persists across new processes in both directions without touching the user's real `%APPDATA%` |
 
 `verify-subtitles-hdr.ps1` exists because HDR frames reach the backbuffer by a
 different route than SDR ones: SDR is blitted by the D3D11 video processor,

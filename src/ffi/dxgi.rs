@@ -178,7 +178,12 @@ pub trait ModalTickTarget {
 }
 
 impl NativeWindowInner {
-    pub fn create(title: &str, width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
+    pub fn create(
+        title: &str,
+        width: u32,
+        height: u32,
+        frameless_windowed: bool,
+    ) -> Result<Self, Box<dyn Error>> {
         let instance = module_handle()?;
         let class_name = w!("FastPlayWindowClass");
         register_window_class(instance, class_name)?;
@@ -187,7 +192,7 @@ impl NativeWindowInner {
         let state = Rc::new(WindowState {
             is_open: Cell::new(true),
             is_borderless: Cell::new(false),
-            is_frameless_windowed: Cell::new(false),
+            is_frameless_windowed: Cell::new(frameless_windowed),
             resize_request: Cell::new(None),
             input_events: RefCell::new(Vec::new()),
             modal_tick_fn: Cell::new(None),
@@ -201,7 +206,8 @@ impl NativeWindowInner {
         });
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
-        let (window_width, window_height) = adjust_window_size(width, height)?;
+        let (window_width, window_height) =
+            window_size_for_client(width, height, frameless_windowed)?;
 
         // SAFETY:
         // - class name and title pointers stay alive for the duration of the call
