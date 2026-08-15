@@ -209,8 +209,8 @@ The original v0.3.0 priorities are complete:
 Next maintenance work should be driven by observed defects, difficult review
 areas, or benchmark regressions rather than a line-count target. The 2026-07-21
 [codebase review](./audits/codebase-review.md) §10 sequenced the candidates in
-value order. **All but one have since been paid down**; only item 3 is still
-open:
+value order. **All five have since been paid down**, so this list is now a
+record rather than a plan:
 
 1. ✅ **Done** — Extract the input keymap out of `window_proc` into
    `platform/input.rs` as a pure function. It was the single largest untested
@@ -220,13 +220,23 @@ open:
 2. ✅ **Done** — Extract the pure geometry/blend layer of the overlay
    rasterizer out of `ffi/d3d11.rs` into `render/overlay_raster.rs`, with unit
    tests. The GDI text path correctly stays in the seam.
-3. **Open** — De-duplicate the worker plumbing (`worker_send`, the device-lost
-   event mapping), but only as private helpers, not a worker trait; there are
-   two consumers and they differ. `worker_send` is still declared twice as a
-   local closure in `app/session.rs` (the video and audio spawn paths).
+3. ✅ **Done** — De-duplicate the worker plumbing (`worker_send`, the
+   device-lost event mapping) as private helpers rather than a worker trait.
+   The ~30-line retrying channel send is now the single `send_to_ui`; the
+   device-lost mapping is `worker_failure_event` / `is_device_lost`. The two
+   remaining three-line `worker_send` closures in `app/session.rs` are not
+   duplication — each captures its own `cancelled` and delegates to
+   `send_to_ui`, and they were kept deliberately so the ~20 call sites did not
+   have to churn.
 4. ✅ **Done** — R5 above (lint allow-list), paid down 2026-07-21.
 5. ✅ **Done** — Extend the worker-liveness discipline to the audio handle,
    paid down 2026-07-21 (see R6).
+
+With that queue empty, the open maintenance items are the two still marked as
+such above: **R8** (the UI thread's COM initialization ownership, §2) and the
+remainder of **R3** (promote the benchmark harness to CI once it has proven
+stable across machines). Neither is urgent, and per the paragraph above,
+neither should preempt work driven by an observed defect.
 
 ### R6 — Worker liveness — **paid down** (2026-07-21)
 
