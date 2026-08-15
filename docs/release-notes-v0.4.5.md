@@ -1,9 +1,13 @@
 # FastPlay v0.4.5
 
-FastPlay `0.4.5` is a reliability release. Its headline fix is a leak that
-only bit people who keep many players open at once: with a dozen instances
-running, one would eventually freeze, refuse to close, and sometimes take
-other applications — including Windows Explorer — down with it.
+FastPlay `0.4.5` is a reliability release, with two fixes worth calling out.
+
+A leak that only bit people who keep many players open at once: with a dozen
+instances running, one would eventually freeze, refuse to close, and sometimes
+take other applications — including Windows Explorer — down with it.
+
+And a scrubbing bug that could silently kill video for the rest of a file,
+reachable on any clip that falls back to software decode.
 
 ## Fixes
 
@@ -26,6 +30,26 @@ applications crashed alongside FastPlay.
 Six `CreateDIBSection` sites also leaked the font and device context on their
 error path. All deletes now route through helpers that run in every build,
 with a test that fails if a raw delete reappears outside them.
+
+### Scrubbing could kill video for the rest of the file
+
+Seeking while the video decoder was reopening left the picture frozen for the
+remainder of that file — audio kept playing, the timeline kept moving, and only
+reopening the file brought video back. Reachable by scrubbing any clip that
+falls back to software decode.
+
+The decoder's control channel is deliberately shared and outlives the worker
+thread, so holding one was never evidence that a worker was alive. The
+coordinator asked exactly that question, so a worker that had exited on a
+cancelled open left its channel registered forever, and every subsequent seek
+went to a channel nobody was reading.
+
+Liveness alone was too blunt a fix: "no worker is running" has two causes that
+need opposite responses. A worker that died on a cancelled open must be
+respawned; one that exited because the file has no video stream at all must
+not, or every seek reopens and re-demuxes the file to rediscover the same
+absence. Seek delivery is now three-way, and both cases are handled. Measured
+on an audio-only `.m4a` over 8 seeks: 9 video-worker spawns before, 1 after.
 
 ### A fatal error left the window hung instead of reporting
 
@@ -53,6 +77,10 @@ swept after 7 days.
 
 Work that landed since `0.4.4` and ships here for the first time:
 
+- a new app icon: the old one was the full tile artwork, whose dark plate
+  dominated at small sizes — the 16px entry was 97% opaque dark pixels, reading
+  as a black square with an illegible glyph in the title bar and taskbar. It is
+  now the glyph alone on transparency
 - audio-only files reach the end-of-file state on seek, the error overlay
   displays rather than failing silently, and demuxer packet leaks are closed
 - playback follows the default audio endpoint when Windows switches devices,
