@@ -32,11 +32,11 @@
         "applicationCategory": "MultimediaApplication",
         "applicationSubCategory": "Video Player",
         "description": "A fast, free, open-source Windows video player with hardware-accelerated decode, responsive seek, per-file resume, a lightweight play queue, and GPU-resident presentation.",
-        "softwareVersion": "0.4.0",
+        "softwareVersion": "0.4.6",
         "license": "https://opensource.org/licenses/MIT",
         "url": "https://calvinsturm.github.io/FastPlay/",
         "downloadUrl": "https://github.com/CalvinSturm/FastPlay/releases/latest",
-        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.4.0.md",
+        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.4.6.md",
         "author": {
             "@type": "Person",
             "name": "Calvin Sturm",
@@ -476,7 +476,7 @@
     <div class="container">
         <a class="nav-brand" href="#">FastPlay</a>
         <ul class="nav-links">
-            <li><a href="#release">v0.4.0</a></li>
+            <li><a href="#release">v0.4.6</a></li>
             <li><a href="#features">Features</a></li>
             <li><a href="#architecture">Architecture</a></li>
             <li><a href="#controls">Controls</a></li>
@@ -493,7 +493,7 @@
             <a class="btn btn-primary" href="https://github.com/CalvinSturm/FastPlay/releases/latest">Download for Windows</a>
             <a class="btn btn-secondary" href="https://github.com/CalvinSturm/FastPlay">View Source</a>
         </div>
-        <span class="version-badge">v0.4.0 &middot; Windows 10+ &middot; MIT License</span>
+        <span class="version-badge">v0.4.6 &middot; Windows 10+ &middot; MIT License</span>
         <span class="hero-note">Windows x64 local playback. No streaming, media library, or plugin system.</span>
 
         <div class="demo">
@@ -505,12 +505,13 @@
 <section id="release">
     <div class="container">
         <div class="release-panel">
-            <h2>New in v0.4.0: lightweight queue and folder playback</h2>
-            <p>Drop multiple files or a folder, step through the queue with PageUp and PageDown, and let FastPlay auto-advance when the current file naturally ends. The queue is session-only and stays deliberately outside media-library territory.</p>
+            <h2>New in v0.4.6: frameless windows that stay that way</h2>
+            <p>Switch between framed and frameless windowed modes without changing the playback path. Move a frameless player from the video surface, resize it from the edges, and let newly launched instances remember your choice.</p>
             <ul class="release-list">
-                <li><strong>Multi-file drops</strong>Build an in-memory queue from selected files or a non-recursive folder drop.</li>
-                <li><strong>Manual next / previous</strong>Use PageDown and PageUp to move through the current queue without wrapping.</li>
-                <li><strong>Natural auto-advance</strong>Move to the next file at end-of-file while respecting loops, replay, and in/out ranges.</li>
+                <li><strong>Framed / frameless toggle</strong>Press Ctrl+Shift+S without interfering with the existing Ctrl+S screenshot shortcut.</li>
+                <li><strong>Move and resize naturally</strong>Drag outside the timeline to move the window, or use any edge and corner to resize it.</li>
+                <li><strong>Remembered for new instances</strong>Your selected window style is saved and applied when another FastPlay process starts.</li>
+                <li><strong>Reproducible portable builds</strong>The in-repo packager keeps the no-installer ZIP aligned with the MSI runtime files.</li>
             </ul>
         </div>
     </div>
