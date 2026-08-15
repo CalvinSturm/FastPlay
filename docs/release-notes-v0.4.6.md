@@ -33,6 +33,11 @@ from the repository.
   itself continues to store settings, recent files, resume positions, and logs
   under `%APPDATA%\FastPlay`.
 
+### Updated Windows icon
+
+- The executable, installer, and Windows shell surfaces now use the new FastPlay
+  badge, with dedicated icon entries from 16 through 256 pixels.
+
 ## Performance
 
 The frameless implementation does not change the steady-state playback path.
