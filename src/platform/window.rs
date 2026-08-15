@@ -13,8 +13,17 @@ impl NativeWindow {
         width: u32,
         height: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::create_with_frameless_windowed(title, width, height, false)
+    }
+
+    pub fn create_with_frameless_windowed(
+        title: &str,
+        width: u32,
+        height: u32,
+        frameless_windowed: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
-            inner: NativeWindowInner::create(title, width, height)?,
+            inner: NativeWindowInner::create(title, width, height, frameless_windowed)?,
         })
     }
 

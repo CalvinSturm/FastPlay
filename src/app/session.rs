@@ -194,9 +194,11 @@ impl EndedSignal {
 }
 
 impl PlaybackSession {
-    pub fn new(window: NativeWindow) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        window: NativeWindow,
+        saved_volume: f32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let presenter = Presenter::new(&window)?;
-        let saved_volume = super::settings::load_volume();
         let queue_defaults = QueueDefaults::default();
         // Independent bounded channels for video/control vs audio events. A
         // single shared channel meant the drain loop stopped pulling *both*
@@ -503,7 +505,9 @@ impl PlaybackSession {
             }
             SessionCommand::ToggleFramelessWindowed => {
                 if self.window.toggle_frameless_windowed() {
-                    flog!("frameless_windowed={}", self.window.is_frameless_windowed());
+                    let enabled = self.window.is_frameless_windowed();
+                    super::settings::save_frameless_windowed(enabled);
+                    flog!("frameless_windowed={enabled}");
                 }
             }
             SessionCommand::ZoomAtCursor {
