@@ -73,6 +73,8 @@ Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. R
 | `Backspace` | Cancel scrub and return to original position |
 | `` ` `` | Toggle HW/SW decode mode in title bar |
 
+Frameless windowed mode is remembered in `%APPDATA%\FastPlay\settings.txt`. After you enable it, every newly launched FastPlay instance starts frameless until you toggle it off again.
+
 Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
 
 ### In / Out range
