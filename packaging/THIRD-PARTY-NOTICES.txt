@@ -1,0 +1,15 @@
+Third-party notices
+===================
+
+This FastPlay distribution includes shared libraries from FFmpeg and pkgconf.
+Those components are distributed under their own licenses, not FastPlay's MIT
+license. The licenses directory contains the notices supplied by the exact
+dependency distribution used to build this package.
+
+Project and source information:
+
+- FFmpeg: https://ffmpeg.org/
+- FFmpeg source: https://ffmpeg.org/download.html#get-sources
+- pkgconf: https://github.com/pkgconf/pkgconf
+
+FastPlay's own license is provided as licenses\FastPlay-MIT.txt.
