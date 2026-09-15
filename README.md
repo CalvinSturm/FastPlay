@@ -1,221 +1,328 @@
 # <img width="36" alt="FastPlay icon" src="assets/icon/fastplay-mark.png" /> FastPlay
 
-FastPlay is a keyboard-first Windows video player for fast local playback, smooth scrubbing, and ergonomic control across monitors.
+**FastPlay is a fast, keyboard-first video player for Windows, built for opening local files quickly, scrubbing smoothly, and staying out of your way.**
 
-It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
+No media library. No plugin maze. No feature sprawl. Just fast local playback, responsive controls, and a focused Windows-native experience.
 
 **[Download FastPlay v0.4.6 for Windows x64 (MSI)](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.6/fastplay-0.4.6-x86_64.msi)** • **[Portable ZIP](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.6/fastplay-0.4.6-windows-x86_64-portable.zip)** • [All releases](../../releases) • [Report an issue](../../issues)
 
-**Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
+**Current status:** FastPlay is stable for everyday local playback on Windows x64. Development is now focused on maintenance, bug fixes, and useful feature requests.
 
 https://github.com/user-attachments/assets/460ffc36-5a44-4030-bfc2-c05cfc38a724
 
+## Get started
+
+1. Install FastPlay using the MSI above, or download the portable ZIP.
+2. Open a video directly, drag a file onto FastPlay, or set FastPlay as your default Windows media app.
+3. Drop multiple files or a folder onto the window to create a temporary play queue.
+4. Use the keyboard for fast seeking, playback control, zoom, rotation, screenshots, and more.
+
+FastPlay is designed for local playback. No account, migration, or internet connection is required.
+
 ## Why FastPlay exists
 
-Most of the time you open a video player, you are not managing a library or transcoding a stream. You are opening one local file and watching it. FastPlay is built around that single moment: how fast the file opens, how quickly the first frame appears, whether it resumes where you left off, and how cleanly it scrubs and gets out of the way.
+Most of the time, opening a video player is simple: you have a local file and you want to watch it.
 
-The mainstream players are excellent and do far more than this. FastPlay deliberately does less, so the path from double-click to watching stays short and the controls stay responsive. It is a focused tool for local playback on Windows, not a replacement for a full-featured media suite.
+FastPlay is built around making that moment as frictionless as possible:
 
-## Compared to VLC and MPC-HC
+* open the file quickly
+* show the first frame quickly
+* scrub and seek without fighting the player
+* remember where you stopped
+* fit the video cleanly to the screen
+* stay responsive
+* get out of the way
 
-VLC and MPC-HC are mature, capable, and the right choice for most people when they need broad format support, streaming, playlists, deep configuration, and years of hardening. FastPlay is not trying to compete on breadth.
+Mainstream players such as VLC and MPC-HC are excellent and support far more features.
 
-Where FastPlay differs is scope and intent:
+FastPlay deliberately does less.
 
-| | FastPlay | VLC | MPC-HC |
-|---|---|---|---|
-| Primary focus | Fast local playback on Windows | Everything, everywhere | Lightweight local playback (Windows) |
-| Platforms | Windows x64 only | Cross-platform | Windows |
-| Format/codec breadth | Common formats via FFmpeg | Very broad | Broad |
-| Streaming / network | No | Yes | Limited |
-| Playlists / library | No | Yes | Basic |
-| Per-file resume | Built in | Plugin/config | Limited |
-| Render path | D3D11-first, GPU-resident | Multiple backends | DirectShow / madVR etc. |
-
-Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. Reach for FastPlay when you want a snappy, no-friction window for the local file in front of you.
-
-## Controls
-
-| Key | Action |
-|-----|--------|
-| `Space` | Pause / resume / replay at end |
-| `Left` | Seek backward 5s, hold for 15s steps |
-| `Right` | Seek forward 5s, hold for 15s steps |
-| `Ctrl+F` | Move one frame forward |
-| `Ctrl+B` | Move one frame backward |
-| `Ctrl+O` | Open media file |
-| `Ctrl+Shift+O` | Recent files overlay (↑↓ select · Enter open · Del remove · Esc close) |
-| `PageUp` / `PageDown` | Previous / next file in the play queue |
-| `Ctrl+S` | Save screenshot |
-| `Ctrl+Shift+S` | Toggle framed/frameless windowed mode (remembered for new instances) |
-| `S` | Toggle subtitles |
-| `I` | Set in-point at current position |
-| `Shift+I` | Clear in-point |
-| `O` | Set out-point at current position |
-| `Shift+O` | Clear out-point |
-| `R` | Toggle loop range (if in/out set) · toggle auto-replay (if no range) |
-| `MouseWheel` | Adjust volume |
-| `Esc` | Exit borderless fullscreen |
-| `Ctrl+H` | Toggle borderless fullscreen |
-| `Ctrl+W` | Fill screen height with no black padding |
-| `Ctrl+Q` | Snap window to half the video's native resolution |
-| `Ctrl+R` | Rotate clockwise 90 degrees |
-| `Ctrl+E` | Rotate counter-clockwise 90 degrees |
-| `Ctrl+MouseWheel` | Zoom at cursor |
-| `Ctrl+Drag` | Pan when zoomed in |
-| `Drag` | Move the window in frameless mode (outside the timeline) |
-| `Ctrl+0` | Reset zoom, pan, and rotation |
-| `H` (hold) | Show controls overlay |
-| `[` / `]` | Decrease / increase playback speed |
-| `\` | Reset playback speed to 1× |
-| `Backspace` | Cancel scrub and return to original position |
-| `` ` `` | Toggle HW/SW decode mode in title bar |
-
-Frameless windowed mode is remembered in `%APPDATA%\FastPlay\settings.txt`. After you enable it, every newly launched FastPlay instance starts frameless until you toggle it off again.
-
-Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
-
-### In / Out range
-
-Press `I` to mark where playback starts and `O` to mark where it ends. The range adapts to however many points are set:
-
-| In | Out | Plays | Space at end goes to |
-|----|-----|-------|----------------------|
-| — | — | start → end | start |
-| ✓ | — | in-point → end | in-point |
-| — | ✓ | start → out-point | start |
-| ✓ | ✓ | in-point → out-point | in-point |
-
-Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shift+O` to clear individual points. In/out points reset when a new file is opened.
+It is a focused Windows player for people who want a snappy, no-friction window for the local file in front of them.
 
 ## Features
 
-### Playback
-- `Ctrl+O` file open dialog and drag-and-drop file open
-- lightweight play queue: drop multiple files or a folder, step through with `PageUp` / `PageDown`, and auto-advance to the next file at the natural end of each one
-- recent-files overlay with automatic per-file resume playback
-- quick open and first-frame path
-- responsive keyboard seek with accelerated hold behavior
-- timeline scrubbing overlay with playback position
-- in/out point range with loop and auto-replay
-- replay at end of playback
-- playback metrics such as open-to-frame latency, seek latency, and dropped frames
+### Fast local playback
 
-### Video and audio
-- FFmpeg-based demux and decode
-- hardware video decode on the preferred D3D11 path
-- software video decode fallback with D3D11 upload and present
-- native HDR output on HDR displays (HDR10 PQ and HLG, including iPhone recordings, on a 10-bit PQ swapchain with static metadata), with pixel-shader tone mapping to SDR on SDR displays
-- high-frame-rate playback (120 fps at full cadence on high-refresh displays)
-- WASAPI shared-mode audio playback
-- audio-master playback timing when audio exists
-- audio-only file playback (e.g. `.mp3`, `.flac`, `.wav`, `.m4a`, `.opus`) with the idle background shown while audio plays
-- generation-safe seek and reopen behavior
-- device-loss and resize recovery paths
+* quick open and first-frame path
+* responsive keyboard seeking
+* accelerated seek while holding the arrow keys
+* timeline scrubbing
+* automatic per-file resume positions
+* replay at end of playback
+* in/out points with range playback and looping
+* lightweight multi-file and folder play queues
+* automatic advance to the next queued file
+* playback metrics including open-to-frame latency, seek latency, and dropped frames
 
-### Viewing controls
-- borderless fullscreen
-- cursor-centered zoom and drag-to-pan
-- 90-degree view rotation with auto-rotate from stream display matrix metadata
-- fit-to-screen window sizing with no black padding
-- half native resolution window sizing
-- volume control with on-screen overlay
-- hold-to-show keybind reference overlay
+### Video
+
+* FFmpeg-based demux and decode
+* D3D11 hardware video decode on the preferred path
+* software decoding fallback with D3D11 upload and presentation
+* high-frame-rate playback, including 120 fps at full cadence on high-refresh displays
+* automatic rotation from stream display-matrix metadata
+* manual 90-degree rotation
+* portrait-aware window sizing for phone videos
+* cursor-centered zoom
+* drag-to-pan while zoomed
+* fit-to-screen sizing without black padding
+* half-native-resolution window sizing
+
+### HDR
+
+* native HDR output on HDR displays
+* HDR10 PQ support
+* HLG support
+* iPhone HDR recording support
+* 10-bit PQ swapchain output
+* HDR10 static metadata passed to the display
+* GPU tone mapping to SDR when the active display is not using HDR
+
+### Audio
+
+* WASAPI shared-mode audio output
+* audio-master playback timing when audio exists
+* audio-only file playback
+* `.mp3`, `.flac`, `.wav`, `.m4a`, and `.opus` playback
+* idle background while playing audio-only files
+
+### Window behavior
+
+* normal framed windowed mode
+* remembered frameless windowed mode
+* move and resize frameless windows normally
+* maximize frameless windows
+* borderless fullscreen
+* per-monitor DPI awareness
+* minimum window size enforcement
+* device-loss and resize recovery
+
+Press `Ctrl+Shift+S` to switch between framed and frameless windowed modes. FastPlay remembers your preference for future instances.
 
 ### Subtitles
-- external `.srt` subtitle overlay
-- runtime subtitle toggle
-- accepts both comma and period millisecond separators in SRT timestamps
-- UTF-8 with BOM support and Windows-1252 fallback encoding
-- strips common formatting tags (`<b>`, `<i>`, `<u>`, `<font>`)
 
-### Platform
-- per-monitor DPI awareness (Per-Monitor V2 with system-aware fallback)
-- minimum window size enforcement (640×360)
+FastPlay currently supports external `.srt` sidecar subtitles.
+
+Features include:
+
+* runtime subtitle toggle
+* comma or period millisecond separators
+* UTF-8 with BOM
+* Windows-1252 fallback
+* stripping of common formatting tags such as `<b>`, `<i>`, `<u>`, and `<font>`
+
+## Compared to VLC and MPC-HC
+
+FastPlay is not trying to beat mature media players on feature breadth.
+
+|                     | FastPlay                    | VLC                            | MPC-HC                          |
+| ------------------- | --------------------------- | ------------------------------ | ------------------------------- |
+| Primary focus       | Fast local Windows playback | Broad media playback           | Lightweight Windows playback    |
+| Platforms           | Windows x64                 | Cross-platform                 | Windows                         |
+| Streaming / network | No                          | Yes                            | Limited                         |
+| Media library       | No                          | Yes                            | Basic                           |
+| Per-file resume     | Built in                    | Configuration/plugin dependent | Limited                         |
+| Render path         | D3D11-first                 | Multiple backends              | DirectShow / optional renderers |
+| Philosophy          | Focused and minimal         | Broad and configurable         | Lightweight and configurable    |
+
+Use VLC or MPC-HC when you need extensive format coverage, streaming, playlists, deep configuration, or broader platform support.
+
+Use FastPlay when you want to double-click a local file and start watching it with as little friction as possible.
+
+## Controls
+
+| Key                   | Action                                       |
+| --------------------- | -------------------------------------------- |
+| `Space`               | Pause / resume / replay at end               |
+| `Left`                | Seek backward 5s, hold for 15s steps         |
+| `Right`               | Seek forward 5s, hold for 15s steps          |
+| `Ctrl+F`              | Move one frame forward                       |
+| `Ctrl+B`              | Move one frame backward                      |
+| `Ctrl+O`              | Open media file                              |
+| `Ctrl+Shift+O`        | Recent files overlay                         |
+| `PageUp` / `PageDown` | Previous / next queued file                  |
+| `Ctrl+S`              | Save screenshot                              |
+| `Ctrl+Shift+S`        | Toggle framed / frameless windowed mode      |
+| `S`                   | Toggle subtitles                             |
+| `I`                   | Set in-point                                 |
+| `Shift+I`             | Clear in-point                               |
+| `O`                   | Set out-point                                |
+| `Shift+O`             | Clear out-point                              |
+| `R`                   | Loop active range or toggle auto-replay      |
+| `MouseWheel`          | Adjust volume                                |
+| `Esc`                 | Exit borderless fullscreen                   |
+| `Ctrl+H`              | Toggle borderless fullscreen                 |
+| `Ctrl+W`              | Fill screen height without black padding     |
+| `Ctrl+Q`              | Half-native-resolution window size           |
+| `Ctrl+R`              | Rotate clockwise 90°                         |
+| `Ctrl+E`              | Rotate counter-clockwise 90°                 |
+| `Ctrl+MouseWheel`     | Zoom at cursor                               |
+| `Ctrl+Drag`           | Pan while zoomed                             |
+| `Drag`                | Move window in frameless mode                |
+| `Ctrl+0`              | Reset zoom, pan, and rotation                |
+| `H` (hold)            | Show controls overlay                        |
+| `[` / `]`             | Decrease / increase playback speed           |
+| `\`                   | Reset playback speed to 1×                   |
+| `Backspace`           | Cancel scrub and return to original position |
+| `` ` ``               | Toggle HW / SW decode mode in title bar      |
+
+The recent-files overlay supports:
+
+* `↑` / `↓` to select
+* `Enter` to open
+* `Del` to remove an entry
+* `Esc` to close
+
+Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
+
+## In / Out range
+
+Press `I` to mark where playback begins and `O` to mark where it ends.
+
+| In | Out | Playback range       | Space at end returns to |
+| -- | --- | -------------------- | ----------------------- |
+| —  | —   | start → end          | start                   |
+| ✓  | —   | in-point → end       | in-point                |
+| —  | ✓   | start → out-point    | start                   |
+| ✓  | ✓   | in-point → out-point | in-point                |
+
+Press `R` while a range is active to loop it continuously.
+
+Use `Shift+I` and `Shift+O` to clear individual points.
+
+In/out points reset when a new file is opened.
 
 ## Goals
 
 FastPlay prioritizes:
 
-- low open-to-first-frame latency
-- responsive seek behavior
-- GPU-resident presentation on the normal hardware path
-- bounded queues and explicit ownership
-- narrow, maintainable architecture
-- Windows-specific performance rather than broad platform support
+* low open-to-first-frame latency
+* responsive seeking and scrubbing
+* GPU-resident presentation on the normal hardware path
+* predictable playback behavior
+* narrow, maintainable architecture
+* Windows-specific performance
+* useful controls without unnecessary product complexity
 
 ## Non-goals
 
-FastPlay does **not** currently aim to provide:
+FastPlay does not currently aim to provide:
 
-* media library management, scraping, or collection organization
-* streaming support
+* media library management
+* metadata scraping or collection organization
+* network or streaming playback
 * plugin support
-* browser or web UI
-* advanced subtitle styling or embedded subtitle track selection
-* metadata-driven (dynamic) tone mapping or exposure/curve controls
-* extra hardware backends beyond the current D3D11-first design
+* a browser or web interface
+* full persistent playlist management
+* advanced subtitle styling
+* embedded subtitle track selection
+* metadata-driven dynamic HDR tone mapping
+* exposure or curve controls
+* additional hardware rendering backends beyond the current D3D11-first design
 
-Lightweight queue/folder playback is implemented (see Features); full playlists, persistent playlist files, and media-library behavior remain non-goals.
+FastPlay does support lightweight queue and folder playback, but those queues are temporary and intentionally much simpler than a full playlist or media-library system.
 
 ## Known limitations
 
-These are current real-world caveats, separate from the deliberate non-goals above:
-
-* **Windows x64 only.** No macOS, Linux, or ARM builds.
-* **Common formats, not exhaustive.** Decoding depends on the FFmpeg build in use; uncommon or exotic codecs may not play. Software decode is the fallback when hardware decode is unavailable.
-* **External `.srt` subtitles only.** Embedded subtitle tracks and other subtitle formats are not loaded, and styling is intentionally minimal.
-* **Queue is in-memory and session-only.** Dropping multiple files or a folder builds a play queue you can step through (`PageUp` / `PageDown`) with auto-advance at end of file, but the queue is not saved between runs, there are no persistent playlist files, folder scanning is non-recursive, and there is no shuffle, repeat, or in-window queue list.
-* **No streaming or network sources.** Local files only.
-* **Audio is WASAPI shared-mode.** No exclusive mode, no multi-track/audio-track switching.
-* **HDR output follows the monitor the window opens on.** With Windows HDR enabled, HDR video (HDR10 PQ and HLG — including iPhone recordings and full-range PQ exports) presents natively in HDR, with the stream's HDR10 static metadata passed to the display. On an SDR display (or with HDR off) the same content is tone-mapped to SDR in a pixel shader with a fixed curve (no exposure controls). The HDR-or-SDR decision is made per file open for the monitor the window is on: dragging a playing HDR window onto a non-HDR monitor mid-play looks washed out until the file is reopened.
-* **Early release.** Behavior, shortcuts, and metrics are still changing between versions.
+* **Windows x64 only.** There are currently no macOS, Linux, Windows ARM, or other platform builds.
+* **Format support is broad but not exhaustive.** Playback depends on the FFmpeg build used by FastPlay. Uncommon or exotic formats may not work.
+* **External `.srt` subtitles only.** Embedded subtitle tracks and other subtitle formats are not currently loaded.
+* **Queues are session-only.** There are no persistent playlist files, shuffle mode, or in-window queue browser.
+* **Folder scanning is non-recursive.**
+* **No streaming or network sources.** FastPlay is intentionally focused on local files.
+* **WASAPI shared-mode audio only.** There is currently no exclusive mode or runtime audio-track switching.
+* **HDR mode is selected when a file is opened.** If an HDR video is opened on an HDR display and the playing window is then moved to a non-HDR display, the image may appear washed out until the file is reopened.
 
 ## Requirements
 
-- Windows 10 or later
-- Rust toolchain
-- FFmpeg development headers and libraries available locally
-- D3D11 / DXGI / WASAPI-capable system
+For normal use:
 
-## FFmpeg setup
+* Windows 10 or later
+* Windows x64
+* D3D11 / DXGI / WASAPI-capable system
 
-`build.rs` supports these FFmpeg discovery patterns.
+Rust and FFmpeg development files are **not** required when using the normal MSI or portable release.
 
-### Preferred
+## Portable version
 
-Set `FFMPEG_DIR`.
+The portable Windows ZIP can be downloaded from the release links at the top of this page.
 
-### Or set explicitly
+Portable FastPlay does not require installation, but it still stores:
 
-- `FFMPEG_INCLUDE_DIR`
-- `FFMPEG_LIB_DIR`
-- optional: `FFMPEG_BIN_DIR`
+* settings
+* recent-file history
+* resume positions
+* logs
+
+under:
+
+```text
+%APPDATA%\FastPlay
+```
+
+## Building from source
+
+### Requirements
+
+* Rust toolchain
+* FFmpeg development headers and libraries
+* Windows development environment with D3D11, DXGI, and WASAPI support
+
+### FFmpeg setup
+
+`build.rs` supports several FFmpeg discovery methods.
+
+#### Preferred
+
+Set:
+
+```text
+FFMPEG_DIR
+```
+
+#### Or configure paths explicitly
+
+```text
+FFMPEG_INCLUDE_DIR
+FFMPEG_LIB_DIR
+FFMPEG_BIN_DIR
+```
+
+`FFMPEG_BIN_DIR` is optional.
 
 ### Fallback search locations
 
-- `%VCPKG_ROOT%/installed/x64-windows`
-- `%USERPROFILE%/vcpkg/installed/x64-windows`
-- `C:\tools\vcpkg\installed\x64-windows`
+FastPlay also checks:
 
-The build expects the usual FFmpeg development layout with `include/` and `lib/`. Runtime DLL staging works when a `bin/` directory is available.
+```text
+%VCPKG_ROOT%/installed/x64-windows
+%USERPROFILE%/vcpkg/installed/x64-windows
+C:\tools\vcpkg\installed\x64-windows
+```
 
-## Build
+The build expects the standard FFmpeg development layout containing `include/` and `lib/`.
+
+Runtime DLL staging also works when a `bin/` directory is available.
+
+### Build
 
 ```powershell
 cargo build --release
 ```
 
-Create the no-installer portable release archive from that build:
+### Create a portable ZIP
 
 ```powershell
 .\scripts\package-portable.ps1 -SkipBuild
 ```
 
-The ZIP is written to `target\dist\`. Portable FastPlay still stores settings,
-recent-file history, resume positions, and logs under `%APPDATA%\FastPlay`.
+The resulting archive is written to:
 
-## Run
+```text
+target\dist\
+```
+
+## Run from source
 
 Normal playback:
 
@@ -223,44 +330,74 @@ Normal playback:
 cargo run --release -- <path-to-media>
 ```
 
-Or drag and drop a media file onto the FastPlay window.
-
-Force software decode fallback:
+Force software decoding:
 
 ```powershell
 cargo run --release -- --force-sw <path-to-media>
 ```
 
+You can also drag and drop media directly onto the FastPlay window.
+
 ## External subtitles
 
-FastPlay supports **external sidecar `.srt` files only**. Place a subtitle file next to the media file with the same basename:
+FastPlay supports external sidecar `.srt` subtitles.
+
+Place the subtitle file beside the video using the same basename:
 
 ```text
 movie.mp4
 movie.srt
 ```
 
-The subtitle sidecar will be auto-loaded if present.
+FastPlay automatically loads the matching subtitle file when the video is opened.
 
 ## Architecture
 
-### Preferred path
+FastPlay is intentionally Windows-focused and uses a D3D11-first playback architecture.
 
-`FFmpeg -> AV_PIX_FMT_D3D11 -> D3D11 video processor -> DXGI present`
+### Preferred video path
 
-### Software fallback path
+```text
+FFmpeg
+  ↓
+AV_PIX_FMT_D3D11
+  ↓
+D3D11 video processor
+  ↓
+DXGI present
+```
 
-`FFmpeg demux -> software decode -> D3D11 upload -> D3D11 video processor -> DXGI present`
+### Software decoding fallback
+
+```text
+FFmpeg demux
+  ↓
+software decode
+  ↓
+D3D11 upload
+  ↓
+D3D11 video processor
+  ↓
+DXGI present
+```
 
 ### Audio path
 
-`FFmpeg decode -> WASAPI shared-mode sink`
+```text
+FFmpeg decode
+  ↓
+WASAPI shared-mode sink
+```
 
 ### Subtitle path
 
-- external `.srt` sidecar only
-- CPU parsing and layout
-- GPU alpha composition during present
+```text
+SRT sidecar
+  ↓
+CPU parsing and layout
+  ↓
+GPU alpha composition during present
+```
 
 For the full implementation charter, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
@@ -276,6 +413,14 @@ src/
   playback/   # clock, metrics, queue policy, generations
   render/     # presenter, swapchain, surface registry, timeline overlay
 ```
+
+## Feedback and feature requests
+
+FastPlay is now stable for my own everyday use, so active development will be more selective while I work on other projects.
+
+If there is a bug, format issue, workflow improvement, or feature that would make FastPlay better for you, please [open an issue](../../issues).
+
+Useful requests are welcome.
 
 ## License
 
