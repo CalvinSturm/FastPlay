@@ -77,6 +77,11 @@ if (-not $Exe) { throw "Player not found. Build it first: cargo build --release"
 if (-not (Get-Command $Ffprobe -ErrorAction SilentlyContinue)) { throw "ffprobe not found on PATH (needed for media info)" }
 
 $mediaExt = '.mp4', '.mkv', '.mov', '.webm', '.avi', '.m4v', '.ts'
+# `pwsh -File` passes `a,b` as one string rather than an array; split it
+# unless the whole string is itself an existing path.
+$CorpusDir = @(foreach ($entry in $CorpusDir) {
+        if (Test-Path -LiteralPath $entry) { $entry } else { $entry -split ',' | Where-Object { $_ } }
+    })
 $clips = @(foreach ($entry in $CorpusDir) {
         if (Test-Path $entry -PathType Container) {
             Get-ChildItem $entry -File | Where-Object { $_.Extension -in $mediaExt }
