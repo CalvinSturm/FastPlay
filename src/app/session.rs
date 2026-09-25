@@ -34,6 +34,7 @@ use crate::{
     },
     media::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
+        export::{self, ExportRange},
         seek::{PlaybackSnapshot, PositionKind, SeekTarget},
         source::MediaSource,
         subtitle::SubtitleTrack,
@@ -170,6 +171,7 @@ pub struct PlaybackSession {
     /// on the UI thread, exactly like the window's resize request; the COM
     /// callback itself only sets a flag.
     audio_endpoint_watch: Option<DefaultRenderEndpointWatch>,
+    active_export: Option<(OpenGeneration, SeekGeneration, OperationId)>,
 }
 
 /// A one-shot, edge-triggered "playback just ended" latch.
@@ -276,7 +278,43 @@ impl PlaybackSession {
                     None
                 }
             },
+            active_export: None,
         })
+    }
+
+    pub fn export_range_request(&self) -> Result<ExportRange, &'static str> {
+        let source = self
+            .current_source
+            .as_ref()
+            .ok_or("Open media before exporting.")?;
+        ExportRange::new(
+            source.path(),
+            self.clip_range.in_point(),
+            self.clip_range.out_point(),
+        )
+    }
+
+    pub fn start_export(&mut self, range: ExportRange, destination: PathBuf) {
+        if self.active_export.is_some() {
+            self.show_status_message("A clip export is already running.");
+            return;
+        }
+        let open_gen = self.generations.open();
+        let seek_gen = self.generations.seek();
+        let op_id = self.operation_clock.next();
+        self.active_export = Some((open_gen, seek_gen, op_id));
+        self.show_status_message("Exporting clip…");
+        let sender = self.event_tx.clone();
+        thread::spawn(move || {
+            let result = export::export_range(&range, &destination);
+            let _ = sender.send(SessionEvent::ExportFinished {
+                open_gen,
+                seek_gen,
+                op_id,
+                destination,
+                result,
+            });
+        });
     }
 
     pub fn window(&self) -> &NativeWindow {
@@ -514,6 +552,10 @@ impl PlaybackSession {
                 let mode = self.window.cycle_menu_bar_mode();
                 super::settings::save_menu_bar_mode(mode);
                 flog!("menu_bar_mode={}", mode.as_setting());
+                self.show_status_message(match mode {
+                    crate::platform::menu::MenuBarMode::Visible => "Menu bar: On",
+                    crate::platform::menu::MenuBarMode::Hidden => "Menu bar: Off",
+                });
             }
             SessionCommand::ZoomAtCursor {
                 delta,
@@ -983,6 +1025,28 @@ impl PlaybackSession {
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match event {
+            SessionEvent::ExportFinished {
+                open_gen,
+                seek_gen,
+                op_id,
+                destination,
+                result,
+            } => {
+                if self.active_export != Some((open_gen, seek_gen, op_id)) {
+                    return Ok(());
+                }
+                self.active_export = None;
+                match result {
+                    Ok(()) => {
+                        let name = destination
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("clip");
+                        self.show_status_message(&format!("Exported {name}"));
+                    }
+                    Err(error) => self.show_status_message(&error),
+                }
+            }
             SessionEvent::DecodeModeSelected {
                 open_gen,
                 seek_gen,

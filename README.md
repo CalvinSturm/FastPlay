@@ -50,6 +50,7 @@ Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. R
 | `PageUp` / `PageDown` | Previous / next file in the play queue |
 | `Ctrl+S` | Save screenshot |
 | `Ctrl+Shift+S` | Toggle framed/frameless windowed mode (remembered for new instances) |
+| `Ctrl+Shift+M` | Toggle the native menu bar on/off (remembered for new instances) |
 | `S` | Toggle subtitles |
 | `I` | Set in-point at current position |
 | `Shift+I` | Clear in-point |
@@ -73,7 +74,7 @@ Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. R
 | `Backspace` | Cancel scrub and return to original position |
 | `` ` `` | Toggle HW/SW decode mode in title bar |
 
-Frameless windowed mode is remembered in `%APPDATA%\FastPlay\settings.txt`. After you enable it, every newly launched FastPlay instance starts frameless until you toggle it off again.
+Frameless windowed mode and the menu-bar On/Off choice are remembered in `%APPDATA%\FastPlay\settings.txt`. Newly launched FastPlay instances reuse both choices. The menu can also be toggled from **View → Show Menu Bar**; when hidden, press `Alt` to reveal it temporarily.
 
 Timeline scrubbing is available by hovering near the bottom of the window and clicking or dragging.
 
@@ -122,6 +123,7 @@ Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shif
 - fit-to-screen window sizing with no black padding
 - half native resolution window sizing
 - volume control with on-screen overlay
+- native application menu with a remembered On/Off toggle
 - hold-to-show keybind reference overlay
 
 ### Subtitles

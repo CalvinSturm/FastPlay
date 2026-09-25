@@ -129,7 +129,7 @@ pub(crate) fn command_for_key(
             (false, true) => Some(InputEvent::ClearOutPoint),
             (false, false) => Some(InputEvent::SetOutPoint),
         },
-        // Ctrl+Shift+M → cycle the menu bar: visible, hidden, auto-hide.
+        // Ctrl+Shift+M → toggle the menu bar on or off.
         // First press only, so holding the chord does not spin the cycle.
         vk::M => (ctrl && shift && !is_repeat).then_some(InputEvent::CycleMenuBarMode),
         // Ctrl+R → rotate clockwise, R → toggle loop/auto-replay.
@@ -140,8 +140,12 @@ pub(crate) fn command_for_key(
                 Some(InputEvent::ToggleLoopRange)
             }
         }
-        // Ctrl+E → rotate counter-clockwise.
-        vk::E => ctrl.then_some(InputEvent::RotateCounterClockwise),
+        // Ctrl+Shift+E → export marked range; Ctrl+E → rotate counter-clockwise.
+        vk::E => match (ctrl, shift, is_repeat) {
+            (true, true, false) => Some(InputEvent::ExportRange),
+            (true, false, _) => Some(InputEvent::RotateCounterClockwise),
+            _ => None,
+        },
         // Ctrl+F / Ctrl+B → step one frame forward / backward.
         vk::F => ctrl.then_some(InputEvent::StepFrameForward),
         vk::B => ctrl.then_some(InputEvent::StepFrameBackward),
@@ -203,6 +207,7 @@ pub enum InputEvent {
     TogglePause,
     ToggleSubtitles,
     SaveScreenshot,
+    ExportRange,
     SeekRelativeSeconds(i64),
     StepFrameForward,
     StepFrameBackward,
@@ -362,7 +367,7 @@ mod tests {
                 false,
                 Some(ToggleRecentOverlay),
             ),
-            // ── M: Ctrl+Shift+M cycles the menu bar, first press only ──
+            // ── M: Ctrl+Shift+M toggles the menu bar, first press only ──
             case(
                 "Ctrl+Shift+M",
                 vk::M,
@@ -661,6 +666,19 @@ mod tests {
             command_for_key(vk::S, true, true, false),
             Some(InputEvent::ToggleFramelessWindowed),
             "Ctrl+Shift+S toggles frameless windowed mode"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_e_exports_once_without_changing_ctrl_e() {
+        assert_eq!(
+            command_for_key(vk::E, true, true, false),
+            Some(InputEvent::ExportRange)
+        );
+        assert_eq!(command_for_key(vk::E, true, true, true), None);
+        assert_eq!(
+            command_for_key(vk::E, true, false, false),
+            Some(InputEvent::RotateCounterClockwise)
         );
     }
 

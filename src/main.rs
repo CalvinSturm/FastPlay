@@ -30,7 +30,7 @@ use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
 use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
 use platform::input::InputEvent;
-use platform::open_dialog::show_open_file_dialog;
+use platform::open_dialog::{show_export_save_dialog, show_open_file_dialog};
 use platform::window::NativeWindow;
 
 /// How long the UI loop blocks on the message queue when the player is
@@ -266,6 +266,20 @@ fn event_loop(
                         )?;
                     }
                 }
+                InputEvent::ExportRange => match session.export_range_request() {
+                    Ok(range) => {
+                        let suggested = media::export::suggested_filename(
+                            &range.source,
+                            range.start,
+                            range.end,
+                        );
+                        let hwnd = session.window().raw_window().hwnd();
+                        if let Some(destination) = show_export_save_dialog(hwnd, &suggested) {
+                            session.start_export(range, destination);
+                        }
+                    }
+                    Err(message) => session.show_status_message(message),
+                },
                 InputEvent::QueuePrevious => {
                     navigate_queue(
                         session,

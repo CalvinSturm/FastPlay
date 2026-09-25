@@ -13,6 +13,7 @@ pub(crate) const MEDIA_PREVIOUS: u16 = 1003;
 pub(crate) const MEDIA_NEXT: u16 = 1004;
 pub(crate) const MEDIA_SCREENSHOT: u16 = 1005;
 pub(crate) const MEDIA_EXIT: u16 = 1006;
+pub(crate) const MEDIA_EXPORT_RANGE: u16 = 1007;
 
 pub(crate) const PLAYBACK_TOGGLE_PAUSE: u16 = 1101;
 pub(crate) const PLAYBACK_SEEK_BACK: u16 = 1102;
@@ -46,24 +47,21 @@ pub(crate) const VIEW_MENU_BAR: u16 = 1505;
 
 pub(crate) const HELP_SHORTCUTS: u16 = 1601;
 
-/// How the menu bar behaves in the framed window. Frameless and fullscreen
+/// Whether the menu bar is shown in the framed window. Frameless and fullscreen
 /// never dock it; there it is only revealed while Alt is held.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MenuBarMode {
     #[default]
     Visible,
     Hidden,
-    /// Hidden until the cursor reaches the top edge of the client area.
-    AutoHide,
 }
 
 impl MenuBarMode {
-    /// Ctrl+Shift+M order: Visible → Hidden → Auto-hide → Visible.
+    /// Ctrl+Shift+M toggles the menu bar on and off.
     pub fn next(self) -> Self {
         match self {
             Self::Visible => Self::Hidden,
-            Self::Hidden => Self::AutoHide,
-            Self::AutoHide => Self::Visible,
+            Self::Hidden => Self::Visible,
         }
     }
 
@@ -71,7 +69,6 @@ impl MenuBarMode {
         match self {
             Self::Visible => "visible",
             Self::Hidden => "hidden",
-            Self::AutoHide => "autohide",
         }
     }
 
@@ -79,7 +76,8 @@ impl MenuBarMode {
         match value {
             "visible" => Some(Self::Visible),
             "hidden" => Some(Self::Hidden),
-            "autohide" => Some(Self::AutoHide),
+            // Migrate the removed hover option to Off.
+            "autohide" => Some(Self::Hidden),
             _ => None,
         }
     }
@@ -100,6 +98,7 @@ pub(crate) fn action_for_id(id: u16) -> Option<MenuAction> {
         MEDIA_NEXT => InputEvent::QueueNext,
         MEDIA_SCREENSHOT => InputEvent::SaveScreenshot,
         MEDIA_EXIT => return Some(MenuAction::Close),
+        MEDIA_EXPORT_RANGE => InputEvent::ExportRange,
         PLAYBACK_TOGGLE_PAUSE => InputEvent::TogglePause,
         PLAYBACK_SEEK_BACK => InputEvent::SeekRelativeSeconds(-5),
         PLAYBACK_SEEK_FORWARD => InputEvent::SeekRelativeSeconds(5),
@@ -150,25 +149,26 @@ mod tests {
             Some(MenuAction::Input(InputEvent::ToggleFramelessWindowed))
         );
         assert_eq!(action_for_id(MEDIA_EXIT), Some(MenuAction::Close));
+        assert_eq!(
+            action_for_id(MEDIA_EXPORT_RANGE),
+            Some(MenuAction::Input(InputEvent::ExportRange))
+        );
         assert_eq!(action_for_id(u16::MAX), None);
     }
 
     #[test]
-    fn menu_bar_mode_cycles_through_all_three_and_round_trips() {
+    fn menu_bar_mode_toggles_and_round_trips() {
         let mut mode = MenuBarMode::Visible;
         let mut seen = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..2 {
             mode = mode.next();
             seen.push(mode);
             assert_eq!(MenuBarMode::from_setting(mode.as_setting()), Some(mode));
         }
+        assert_eq!(seen, [MenuBarMode::Hidden, MenuBarMode::Visible]);
         assert_eq!(
-            seen,
-            [
-                MenuBarMode::Hidden,
-                MenuBarMode::AutoHide,
-                MenuBarMode::Visible
-            ]
+            MenuBarMode::from_setting("autohide"),
+            Some(MenuBarMode::Hidden)
         );
         assert_eq!(MenuBarMode::from_setting("sometimes"), None);
     }

@@ -3448,7 +3448,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
         ("Ctrl+Shift+S", "Toggle frameless window"),
-        ("Ctrl+Shift+M", "Menu bar: hide / auto-hide"),
+        ("Ctrl+Shift+M", "Menu bar: on / off"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
         ("Shift+I / O", "Clear in / out point"),

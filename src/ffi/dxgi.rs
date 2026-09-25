@@ -20,7 +20,9 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
-        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
+        Foundation::{
+            BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM,
+        },
         Graphics::{
             Direct3D11::{ID3D11Texture2D, ID3D11VideoContext1},
             Dxgi::{
@@ -37,8 +39,11 @@ use windows::{
                 DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
             Gdi::{
-                GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO,
-                MONITOR_DEFAULTTONEAREST,
+                ClientToScreen, DrawTextW, FillRect, FrameRect, GetMonitorInfoW, GetSysColor,
+                GetSysColorBrush, MonitorFromWindow, ScreenToClient, SetBkMode, SetTextColor,
+                COLOR_3DSHADOW, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT,
+                DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, MONITORINFO,
+                MONITOR_DEFAULTTONEAREST, TRANSPARENT,
             },
         },
         System::{
@@ -51,31 +56,33 @@ use windows::{
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
+            Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_SELECTED, ODT_MENU},
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
             },
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
-                AdjustWindowRectEx, AppendMenuW, CreateMenu, CreatePopupMenu, CreateWindowExW,
-                DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar, GetClientRect,
-                GetCursorPos, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsZoomed,
-                LoadCursorW, LoadImageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage,
-                RegisterClassExW, SetMenu, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
-                SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS,
-                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HICON, HMENU,
-                HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, HWND_TOP, IDC_ARROW, IMAGE_ICON, MF_POPUP, MF_SEPARATOR, MF_STRING,
-                MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXPADDEDBORDER,
+                AdjustWindowRectEx, AppendMenuW, CheckMenuItem, CreateMenu, CreatePopupMenu,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar,
+                GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
+                IsZoomed, LoadCursorW, LoadImageW, MsgWaitForMultipleObjects, PeekMessageW,
+                PostQuitMessage, RegisterClassExW, SetMenu, SetWindowLongPtrW, SetWindowPlacement,
+                SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW,
+                CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HICON,
+                HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+                HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, IMAGE_ICON, MF_BYCOMMAND, MF_CHECKED,
+                MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
+                MNC_EXECUTE, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXPADDEDBORDER,
                 SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED,
-                WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP,
-                WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN,
-                WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING,
-                WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP,
-                WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
-                WS_POPUP, WS_VISIBLE,
+                WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
+                WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+                WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MEASUREITEM,
+                WM_MENUCHAR, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING, WM_NCCALCSIZE, WM_NCCREATE,
+                WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND,
+                WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -115,6 +122,27 @@ const MIN_CLIENT_WIDTH: u32 = 640;
 /// Minimum client area height in pixels.
 const MIN_CLIENT_HEIGHT: u32 = 360;
 
+const MENU_BUTTON_MEDIA: usize = 1;
+const MENU_BUTTON_PLAYBACK: usize = 2;
+const MENU_BUTTON_AUDIO: usize = 3;
+const MENU_BUTTON_VIDEO: usize = 4;
+const MENU_BUTTON_SUBTITLES: usize = 5;
+const MENU_BUTTON_VIEW: usize = 6;
+const MENU_BUTTON_HELP: usize = 7;
+
+fn menu_button_label(id: usize) -> Option<&'static str> {
+    match id {
+        MENU_BUTTON_MEDIA => Some("Media  ▾"),
+        MENU_BUTTON_PLAYBACK => Some("Playback  ▾"),
+        MENU_BUTTON_AUDIO => Some("Audio  ▾"),
+        MENU_BUTTON_VIDEO => Some("Video  ▾"),
+        MENU_BUTTON_SUBTITLES => Some("Subtitles  ▾"),
+        MENU_BUTTON_VIEW => Some("View  ▾"),
+        MENU_BUTTON_HELP => Some("Help  ▾"),
+        _ => None,
+    }
+}
+
 /// Build the native menu once. Item labels include the canonical shortcuts,
 /// while command dispatch itself reuses the existing `InputEvent` path.
 unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
@@ -129,9 +157,13 @@ unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
         AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
     }
 
-    unsafe fn popup(root: HMENU, menu: HMENU, label: &str) -> Result<(), windows::core::Error> {
-        let wide = to_wide(label);
-        AppendMenuW(root, MF_POPUP, menu.0 as usize, PCWSTR(wide.as_ptr()))
+    unsafe fn popup(root: HMENU, menu: HMENU, button: usize) -> Result<(), windows::core::Error> {
+        AppendMenuW(
+            root,
+            MF_POPUP | MF_OWNERDRAW,
+            menu.0 as usize,
+            PCWSTR(button as *const u16),
+        )
     }
 
     let root = CreateMenu()?;
@@ -144,9 +176,14 @@ unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
     item(media, MEDIA_NEXT, "&Next\tPage Down")?;
     separator(media)?;
     item(media, MEDIA_SCREENSHOT, "Save &Screenshot\tCtrl+S")?;
+    item(
+        media,
+        MEDIA_EXPORT_RANGE,
+        "&Export In/Out Range...\tCtrl+Shift+E",
+    )?;
     separator(media)?;
     item(media, MEDIA_EXIT, "E&xit")?;
-    popup(root, media, "&Media")?;
+    popup(root, media, MENU_BUTTON_MEDIA)?;
 
     let playback = CreatePopupMenu()?;
     item(playback, PLAYBACK_TOGGLE_PAUSE, "&Play / Pause\tSpace")?;
@@ -173,12 +210,12 @@ unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
         PLAYBACK_TOGGLE_LOOP,
         "&Loop Range / Auto-Replay\tR",
     )?;
-    popup(root, playback, "&Playback")?;
+    popup(root, playback, MENU_BUTTON_PLAYBACK)?;
 
     let audio = CreatePopupMenu()?;
     item(audio, AUDIO_VOLUME_UP, "Volume &Up\tWheel Up")?;
     item(audio, AUDIO_VOLUME_DOWN, "Volume &Down\tWheel Down")?;
-    popup(root, audio, "&Audio")?;
+    popup(root, audio, MENU_BUTTON_AUDIO)?;
 
     let video = CreatePopupMenu()?;
     item(video, VIDEO_ROTATE_CW, "Rotate &Clockwise\tCtrl+R")?;
@@ -186,11 +223,11 @@ unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
     item(video, VIDEO_RESET_VIEW, "&Reset View\tCtrl+0")?;
     separator(video)?;
     item(video, VIDEO_DECODE_INFO, "Decode &Info\t`")?;
-    popup(root, video, "&Video")?;
+    popup(root, video, MENU_BUTTON_VIDEO)?;
 
     let subtitles = CreatePopupMenu()?;
     item(subtitles, SUBTITLES_TOGGLE, "&Show Subtitles\tS")?;
-    popup(root, subtitles, "&Subtitles")?;
+    popup(root, subtitles, MENU_BUTTON_SUBTITLES)?;
 
     let view = CreatePopupMenu()?;
     item(view, VIEW_FULLSCREEN, "&Fullscreen\tCtrl+H")?;
@@ -199,16 +236,12 @@ unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
     item(view, VIEW_FIT, "&Fit Window to Video\tCtrl+W")?;
     item(view, VIEW_HALF_SIZE, "&Half Size\tCtrl+Q")?;
     separator(view)?;
-    item(
-        view,
-        VIEW_MENU_BAR,
-        "Cycle &Menu Bar (Hide / Auto-hide)\tCtrl+Shift+M",
-    )?;
-    popup(root, view, "&View")?;
+    item(view, VIEW_MENU_BAR, "Show &Menu Bar\tCtrl+Shift+M")?;
+    popup(root, view, MENU_BUTTON_VIEW)?;
 
     let help = CreatePopupMenu()?;
     item(help, HELP_SHORTCUTS, "&Keyboard Shortcuts\tHold H")?;
-    popup(root, help, "&Help")?;
+    popup(root, help, MENU_BUTTON_HELP)?;
 
     Ok(root)
 }
@@ -218,17 +251,7 @@ unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
 enum MenuReveal {
     /// Alt was pressed; ends when the menu loop exits or focus leaves.
     Alt,
-    /// Auto-hide mode and the cursor reached the top edge; ends when the
-    /// cursor moves back down into the video.
-    Hover,
 }
-
-/// Height, in 96-DPI pixels, of the strip along the top of the client area
-/// that reveals an auto-hidden menu bar. It must stay shorter than the menu
-/// bar itself: once the bar hides again the client area shifts down by the
-/// bar's height, which carries the cursor out of the strip instead of
-/// re-triggering it.
-const MENU_REVEAL_ZONE_96DPI: i32 = 8;
 
 /// Whether the menu bar is docked in the steady state (framed window, mode
 /// `Visible`), ignoring any transient reveal. Window sizing uses this, so fit
@@ -244,20 +267,103 @@ fn menu_docked(state: &WindowState) -> bool {
 /// changed, to avoid needless swap-chain resizes.
 unsafe fn sync_app_menu(hwnd: HWND, state: &WindowState) {
     let want = menu_docked(state) || state.menu_reveal.get().is_some();
+    let checked = if state.menu_bar_mode.get() == MenuBarMode::Visible {
+        MF_CHECKED
+    } else {
+        MF_UNCHECKED
+    };
+    let _ = CheckMenuItem(
+        state.menu,
+        crate::platform::menu::VIEW_MENU_BAR as u32,
+        (MF_BYCOMMAND | checked).0,
+    );
     if want == state.menu_attached.get() {
         return;
     }
+    let mut client_before = RECT::default();
+    let mut window_before = RECT::default();
+    let mut client_origin_before = POINT { x: 0, y: 0 };
+    let preserve_client = GetClientRect(hwnd, &mut client_before).is_ok()
+        && GetWindowRect(hwnd, &mut window_before).is_ok()
+        && ClientToScreen(hwnd, &mut client_origin_before).as_bool();
     // Update first: SetMenu re-enters window_proc (WM_GETMINMAXINFO, WM_SIZE)
     // and those handlers read the attached state.
     state.menu_attached.set(want);
     let menu = if want { state.menu } else { HMENU(null_mut()) };
     let _ = SetMenu(hwnd, menu);
+
+    // A native menu is non-client UI, so attaching it normally shortens the
+    // video client area and detaching it lengthens the area. Keep both the
+    // client dimensions and its screen origin stable by applying those deltas
+    // to the outer window instead.
+    // Windows remains in charge of painting and hit-testing the menu.
+    if preserve_client {
+        let mut client_after = RECT::default();
+        let mut client_origin_after = POINT { x: 0, y: 0 };
+        if GetClientRect(hwnd, &mut client_after).is_ok()
+            && ClientToScreen(hwnd, &mut client_origin_after).as_bool()
+        {
+            let before_width = client_before.right - client_before.left;
+            let before_height = client_before.bottom - client_before.top;
+            let after_width = client_after.right - client_after.left;
+            let after_height = client_after.bottom - client_after.top;
+            let window_width = window_before.right - window_before.left;
+            let window_height = window_before.bottom - window_before.top;
+            let (width, height) = window_size_preserving_client(
+                window_width,
+                window_height,
+                (before_width, before_height),
+                (after_width, after_height),
+            );
+            let (x, y) = window_position_preserving_client(
+                (window_before.left, window_before.top),
+                (client_origin_before.x, client_origin_before.y),
+                (client_origin_after.x, client_origin_after.y),
+            );
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    }
     let _ = DrawMenuBar(hwnd);
 }
 
 unsafe fn set_menu_reveal(hwnd: HWND, state: &WindowState, reveal: Option<MenuReveal>) {
     state.menu_reveal.set(reveal);
     sync_app_menu(hwnd, state);
+}
+
+fn window_size_preserving_client(
+    window_width: i32,
+    window_height: i32,
+    client_before: (i32, i32),
+    client_after: (i32, i32),
+) -> (i32, i32) {
+    (
+        window_width.saturating_add(client_before.0.saturating_sub(client_after.0)),
+        window_height.saturating_add(client_before.1.saturating_sub(client_after.1)),
+    )
+}
+
+fn window_position_preserving_client(
+    window_before: (i32, i32),
+    client_origin_before: (i32, i32),
+    client_origin_after: (i32, i32),
+) -> (i32, i32) {
+    (
+        window_before
+            .0
+            .saturating_add(client_origin_before.0.saturating_sub(client_origin_after.0)),
+        window_before
+            .1
+            .saturating_add(client_origin_before.1.saturating_sub(client_origin_after.1)),
+    )
 }
 
 /// Scale `(width, height)` up uniformly so both dimensions meet the enforced
@@ -365,6 +471,15 @@ impl NativeWindowInner {
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
         let docked = menu_docked(&state);
+        if docked {
+            unsafe {
+                let _ = CheckMenuItem(
+                    menu,
+                    crate::platform::menu::VIEW_MENU_BAR as u32,
+                    (MF_BYCOMMAND | MF_CHECKED).0,
+                );
+            }
+        }
         let (window_width, window_height) =
             window_size_for_client(width, height, frameless_windowed, docked)?;
 
@@ -913,7 +1028,7 @@ impl NativeWindowInner {
         changed
     }
 
-    /// Advance the menu bar mode (visible, hidden, auto-hide) and apply it.
+    /// Toggle the menu bar mode (visible or hidden) and apply it.
     /// Frameless and fullscreen keep the menu detached regardless; the mode
     /// takes effect when the window returns to its framed presentation.
     pub fn cycle_menu_bar_mode(&self) -> MenuBarMode {
@@ -1960,35 +2075,67 @@ fn middle_click_closes(frameless: bool, borderless: bool, in_timeline: bool) -> 
     frameless && !borderless && !in_timeline
 }
 
-/// Auto-hide menu bar: reveal it when the cursor reaches the top strip of the
-/// client area, and hide it again once the cursor moves back down into the
-/// video. A held left button (scrub, pan, frameless drag) never reveals it.
-unsafe fn update_menu_hover(hwnd: HWND, state: &WindowState, y: i32, left_button: bool) {
-    if state.menu_bar_mode.get() != MenuBarMode::AutoHide
-        || state.is_frameless_windowed.get()
-        || state.is_borderless.get()
-        || state.in_modal_loop.get()
-    {
-        return;
-    }
-    let zone = MENU_REVEAL_ZONE_96DPI * GetDpiForWindow(hwnd).max(96) as i32 / 96;
-    match state.menu_reveal.get() {
-        None if !left_button && y < zone => {
-            set_menu_reveal(hwnd, state, Some(MenuReveal::Hover));
-        }
-        Some(MenuReveal::Hover) if y >= zone => {
-            set_menu_reveal(hwnd, state, None);
-        }
-        _ => {}
-    }
-}
-
 unsafe fn point_is_in_timeline(hwnd: HWND, y: i32) -> bool {
     let mut rect = RECT::default();
     GetClientRect(hwnd, &mut rect).is_ok() && {
         let height = rect.bottom - rect.top;
         height > 0 && y >= height - crate::render::timeline::TIMELINE_ACTIVATION_ZONE_PX
     }
+}
+
+unsafe fn measure_menu_button(hwnd: HWND, measure: *mut MEASUREITEMSTRUCT) -> bool {
+    if measure.is_null() || (*measure).CtlType != ODT_MENU {
+        return false;
+    }
+    let Some(label) = menu_button_label((*measure).itemData) else {
+        return false;
+    };
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    (*measure).itemWidth = ((label.chars().count() as u32 * 8 + 22) * dpi / 96).max(48);
+    (*measure).itemHeight = (26 * dpi / 96).max(24);
+    true
+}
+
+unsafe fn draw_menu_button(draw: *const DRAWITEMSTRUCT) -> bool {
+    if draw.is_null() || (*draw).CtlType != ODT_MENU {
+        return false;
+    }
+    let Some(label) = menu_button_label((*draw).itemData) else {
+        return false;
+    };
+    let selected = ((*draw).itemState.0 & ODS_SELECTED.0) != 0;
+    let background = if selected {
+        COLOR_HIGHLIGHT
+    } else {
+        COLOR_MENU
+    };
+    let text_color = if selected {
+        COLOR_HIGHLIGHTTEXT
+    } else {
+        COLOR_MENUTEXT
+    };
+    let rect = (*draw).rcItem;
+    let _ = FillRect((*draw).hDC, &rect, GetSysColorBrush(background));
+    let _ = FrameRect(
+        (*draw).hDC,
+        &rect,
+        GetSysColorBrush(if selected {
+            COLOR_HIGHLIGHT
+        } else {
+            COLOR_3DSHADOW
+        }),
+    );
+    let _ = SetBkMode((*draw).hDC, TRANSPARENT);
+    let _ = SetTextColor((*draw).hDC, COLORREF(GetSysColor(text_color)));
+    let mut text: Vec<u16> = label.encode_utf16().collect();
+    let mut text_rect = rect;
+    let _ = DrawTextW(
+        (*draw).hDC,
+        &mut text,
+        &mut text_rect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    true
 }
 
 fn request_close(state: &WindowState) {
@@ -2224,6 +2371,39 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_MEASUREITEM => {
+            if measure_menu_button(hwnd, lparam.0 as *mut MEASUREITEMSTRUCT) {
+                LRESULT(1)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_DRAWITEM => {
+            if draw_menu_button(lparam.0 as *const DRAWITEMSTRUCT) {
+                LRESULT(1)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_MENUCHAR => {
+            let key = char::from_u32((wparam.0 & 0xFFFF) as u32)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let index = match key {
+                'm' => Some(0usize),
+                'p' => Some(1),
+                'a' => Some(2),
+                'v' => Some(3),
+                's' => Some(4),
+                'h' => Some(6),
+                _ => None,
+            };
+            if let Some(index) = index {
+                LRESULT(((MNC_EXECUTE as usize) << 16 | index) as isize)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as u16;
             match crate::platform::menu::action_for_id(id) {
@@ -2243,7 +2423,7 @@ unsafe extern "system" fn window_proc(
             }
         }
         WM_SYSKEYDOWN => {
-            // Alt reveals a menu bar that is not attached (hidden, auto-hide,
+            // Alt reveals a menu bar that is not attached (hidden,
             // frameless, fullscreen). The attached check also swallows the
             // key's auto-repeat.
             if wparam.0 as u16 == VK_MENU.0 {
@@ -2394,8 +2574,6 @@ unsafe extern "system" fn window_proc(
             if let Some(state) = window_state(hwnd) {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                // MK_LBUTTON (0x0001): a scrub, pan or drag is in progress.
-                update_menu_hover(hwnd, state, y, (wparam.0 as u32 & 0x0001) != 0);
                 if state.left_button_down_owned.get() && (wparam.0 as u32 & 0x0001) == 0 {
                     state.left_button_down_owned.set(false);
                     state.ctrl_pan_active.set(false);
@@ -2601,8 +2779,6 @@ unsafe extern "system" fn window_proc(
         WM_EXITMENULOOP => {
             if let Some(state) = window_state(hwnd) {
                 state.in_modal_loop.set(false);
-                // A hover reveal outlives the menu loop: it ends when the
-                // cursor moves back down into the video.
                 if state.menu_reveal.get() == Some(MenuReveal::Alt) {
                     set_menu_reveal(hwnd, state, None);
                 }
@@ -2707,6 +2883,30 @@ mod frameless_tests {
         right: 900,
         bottom: 650,
     };
+
+    #[test]
+    fn menu_attach_and_detach_preserve_client_dimensions() {
+        assert_eq!(
+            window_size_preserving_client(800, 600, (784, 561), (784, 542)),
+            (800, 619)
+        );
+        assert_eq!(
+            window_size_preserving_client(800, 619, (784, 542), (784, 561)),
+            (800, 600)
+        );
+    }
+
+    #[test]
+    fn menu_attach_and_detach_preserve_client_screen_origin() {
+        assert_eq!(
+            window_position_preserving_client((100, 100), (108, 131), (108, 150)),
+            (100, 81)
+        );
+        assert_eq!(
+            window_position_preserving_client((100, 81), (108, 150), (108, 131)),
+            (100, 100)
+        );
+    }
 
     #[test]
     fn frameless_hit_test_keeps_interior_in_the_client_area() {

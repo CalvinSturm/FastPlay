@@ -132,10 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_persisted_menu_bar_mode() {
+    fn migrates_removed_hover_menu_mode_to_hidden() {
         assert_eq!(
             parse("volume=1\nframeless_windowed=false\nmenu_bar=autohide\n").menu_bar_mode,
-            MenuBarMode::AutoHide
+            MenuBarMode::Hidden
         );
     }
 }

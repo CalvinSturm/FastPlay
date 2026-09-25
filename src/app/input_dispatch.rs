@@ -66,6 +66,7 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         | InputEvent::BackspaceKey
         | InputEvent::FilesDropped(_)
         | InputEvent::OpenFileDialog
+        | InputEvent::ExportRange
         // Play-queue navigation is handled by the event loop, which owns the queue.
         | InputEvent::QueuePrevious
         | InputEvent::QueueNext
