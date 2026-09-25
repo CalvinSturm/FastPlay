@@ -112,7 +112,7 @@ $launchTime = Get-Date
 
 $proc = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
 $hwnd = [IntPtr]::Zero
-$bmpPath = $null
+$screenshotPath = $null
 try {
     foreach ($attempt in 1..30) {
         Start-Sleep -Milliseconds 500
@@ -123,19 +123,19 @@ try {
     Start-Sleep -Seconds $SettleSeconds
 
     # Trigger the backbuffer readback (post-Blt, pre-Present) and wait for
-    # the BMP the app writes to the screenshot directory.
+    # the PNG the app writes to the screenshot directory.
     [FpWin]::PostMessageW($hwnd, $WM_APP_SAVE_SCREENSHOT, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     foreach ($attempt in 1..40) {
         Start-Sleep -Milliseconds 250
-        $candidate = Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.bmp" -ErrorAction SilentlyContinue |
+        $candidate = Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.png" -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -gt $launchTime } |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($candidate) { $bmpPath = $candidate.FullName; break }
+        if ($candidate) { $screenshotPath = $candidate.FullName; break }
     }
-    if (-not $bmpPath) { throw "no screenshot BMP appeared in $screenshotDir" }
+    if (-not $screenshotPath) { throw "no screenshot PNG appeared in $screenshotDir" }
 
     # --- Sample the 7 top bars in the captured backbuffer -------------------
-    $bmp = New-Object System.Drawing.Bitmap $bmpPath
+    $bmp = New-Object System.Drawing.Bitmap $screenshotPath
     $refImg = New-Object System.Drawing.Bitmap $ref
     try {
         # Aspect-fit rect of the 1280x720 video inside the backbuffer.
@@ -179,6 +179,6 @@ finally {
         [FpWin]::PostMessageW($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     }
     if ($proc -and -not $proc.WaitForExit(5000)) { $proc.Kill() }
-    if ($bmpPath -and (Test-Path $bmpPath)) { Remove-Item $bmpPath -Force }
+    if ($screenshotPath -and (Test-Path $screenshotPath)) { Remove-Item $screenshotPath -Force }
 }
 exit $script:exitCode

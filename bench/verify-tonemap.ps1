@@ -128,7 +128,7 @@ function Capture-Backbuffer([string]$Clip) {
         [FpToneMapWin]::PostMessageW($hwnd, $WM_APP_SAVE_SCREENSHOT, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
         foreach ($attempt in 1..40) {
             Start-Sleep -Milliseconds 250
-            $shot = Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.bmp" -ErrorAction SilentlyContinue |
+            $shot = Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.png" -ErrorAction SilentlyContinue |
                 Where-Object { $_.LastWriteTime -gt $launchTime } |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if ($shot) {
