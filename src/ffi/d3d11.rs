@@ -3448,6 +3448,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
         ("Ctrl+Shift+S", "Toggle frameless window"),
+        ("Ctrl+Shift+M", "Menu bar: hide / auto-hide"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
         ("Shift+I / O", "Clear in / out point"),
@@ -3465,6 +3466,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("Ctrl+0", "Reset view"),
         ("`", "Toggle HW/SW decode"),
         ("Mousewheel", "Volume"),
+        ("Middle-click", "Close  (frameless)"),
     ];
 
     const PAD_X: i32 = 20;

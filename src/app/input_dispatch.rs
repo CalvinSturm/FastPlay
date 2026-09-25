@@ -30,6 +30,7 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         InputEvent::RotateCounterClockwise => SessionCommand::RotateCounterClockwise,
         InputEvent::ToggleBorderlessFullscreen => SessionCommand::ToggleBorderlessFullscreen,
         InputEvent::ToggleFramelessWindowed => SessionCommand::ToggleFramelessWindowed,
+        InputEvent::CycleMenuBarMode => SessionCommand::CycleMenuBarMode,
         InputEvent::ZoomAtCursor {
             delta,
             cursor_x,

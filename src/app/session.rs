@@ -510,6 +510,11 @@ impl PlaybackSession {
                     flog!("frameless_windowed={enabled}");
                 }
             }
+            SessionCommand::CycleMenuBarMode => {
+                let mode = self.window.cycle_menu_bar_mode();
+                super::settings::save_menu_bar_mode(mode);
+                flog!("menu_bar_mode={}", mode.as_setting());
+            }
             SessionCommand::ZoomAtCursor {
                 delta,
                 cursor_x,

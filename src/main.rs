@@ -112,11 +112,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let media_path = parse_media_source_from_args()?;
     let settings = app::settings::load();
-    let window = NativeWindow::create_with_frameless_windowed(
+    let window = NativeWindow::create_with_preferences(
         "FastPlay",
         1280,
         720,
         settings.frameless_windowed,
+        settings.menu_bar_mode,
     )?;
     let mut session = PlaybackSession::new(window, settings.volume)?;
     let mut timeline_ui = TimelineUiState::new();

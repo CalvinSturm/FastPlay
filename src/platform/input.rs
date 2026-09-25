@@ -37,6 +37,7 @@ mod vk {
     pub const F: u32 = 0x46;
     pub const H: u32 = 0x48;
     pub const I: u32 = 0x49;
+    pub const M: u32 = 0x4D;
     pub const O: u32 = 0x4F;
     pub const Q: u32 = 0x51;
     pub const R: u32 = 0x52;
@@ -128,6 +129,9 @@ pub(crate) fn command_for_key(
             (false, true) => Some(InputEvent::ClearOutPoint),
             (false, false) => Some(InputEvent::SetOutPoint),
         },
+        // Ctrl+Shift+M → cycle the menu bar: visible, hidden, auto-hide.
+        // First press only, so holding the chord does not spin the cycle.
+        vk::M => (ctrl && shift && !is_repeat).then_some(InputEvent::CycleMenuBarMode),
         // Ctrl+R → rotate clockwise, R → toggle loop/auto-replay.
         vk::R => {
             if ctrl {
@@ -207,6 +211,7 @@ pub enum InputEvent {
     RotateCounterClockwise,
     ToggleBorderlessFullscreen,
     ToggleFramelessWindowed,
+    CycleMenuBarMode,
     ZoomAtCursor {
         delta: i16,
         cursor_x: i32,
@@ -357,6 +362,18 @@ mod tests {
                 false,
                 Some(ToggleRecentOverlay),
             ),
+            // ── M: Ctrl+Shift+M cycles the menu bar, first press only ──
+            case(
+                "Ctrl+Shift+M",
+                vk::M,
+                true,
+                true,
+                false,
+                Some(CycleMenuBarMode),
+            ),
+            case("Ctrl+Shift+M (repeat)", vk::M, true, true, true, None),
+            case("Ctrl+M", vk::M, true, false, false, None),
+            case("M", vk::M, false, false, false, None),
             case(
                 "Ctrl+O (repeat)",
                 vk::O,

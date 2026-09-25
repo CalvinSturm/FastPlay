@@ -52,27 +52,30 @@ use windows::{
         },
         UI::{
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_SHIFT},
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
+            },
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
-                AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW,
-                GetWindowPlacement, GetWindowRect, IsZoomed, LoadCursorW, LoadImageW,
-                MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
-                SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
-                TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-                GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-                HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW,
-                IMAGE_ICON, MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
-                SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT,
-                WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
-                WM_DPICHANGED, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
-                WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
-                WM_MOUSEWHEEL, WM_MOVING, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
-                WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW,
-                WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+                AdjustWindowRectEx, AppendMenuW, CreateMenu, CreatePopupMenu, CreateWindowExW,
+                DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar, GetClientRect,
+                GetCursorPos, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsZoomed,
+                LoadCursorW, LoadImageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage,
+                RegisterClassExW, SetMenu, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
+                SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS,
+                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HICON, HMENU,
+                HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT, HWND_TOP, IDC_ARROW, IMAGE_ICON, MF_POPUP, MF_SEPARATOR, MF_STRING,
+                MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXPADDEDBORDER,
+                SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED,
+                WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP,
+                WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN,
+                WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING,
+                WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP,
+                WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+                WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -83,7 +86,7 @@ use crate::{
         BgraFrameCapture, D3D11Device, HdrToneMapRenderer, RenderTargetView, SubtitleOverlay,
         SubtitleRenderer, VideoProcessorCache, VideoSurface,
     },
-    platform::input::InputEvent,
+    platform::{input::InputEvent, menu::MenuBarMode},
     render::hdr::{
         display_hdr_state_from_descriptor, swapchain_format_for_path,
         verified_hdr10_swapchain_color_space, ContentColorInfo, HdrDisplayDescriptor, HdrError,
@@ -111,6 +114,151 @@ const MODAL_TICK_INTERVAL_MS: u32 = 8;
 const MIN_CLIENT_WIDTH: u32 = 640;
 /// Minimum client area height in pixels.
 const MIN_CLIENT_HEIGHT: u32 = 360;
+
+/// Build the native menu once. Item labels include the canonical shortcuts,
+/// while command dispatch itself reuses the existing `InputEvent` path.
+unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
+    use crate::platform::menu::*;
+
+    unsafe fn item(menu: HMENU, id: u16, label: &str) -> Result<(), windows::core::Error> {
+        let wide = to_wide(label);
+        AppendMenuW(menu, MF_STRING, id as usize, PCWSTR(wide.as_ptr()))
+    }
+
+    unsafe fn separator(menu: HMENU) -> Result<(), windows::core::Error> {
+        AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
+    }
+
+    unsafe fn popup(root: HMENU, menu: HMENU, label: &str) -> Result<(), windows::core::Error> {
+        let wide = to_wide(label);
+        AppendMenuW(root, MF_POPUP, menu.0 as usize, PCWSTR(wide.as_ptr()))
+    }
+
+    let root = CreateMenu()?;
+
+    let media = CreatePopupMenu()?;
+    item(media, MEDIA_OPEN, "&Open...\tCtrl+O")?;
+    item(media, MEDIA_RECENT, "Open &Recent\tCtrl+Shift+O")?;
+    separator(media)?;
+    item(media, MEDIA_PREVIOUS, "Pre&vious\tPage Up")?;
+    item(media, MEDIA_NEXT, "&Next\tPage Down")?;
+    separator(media)?;
+    item(media, MEDIA_SCREENSHOT, "Save &Screenshot\tCtrl+S")?;
+    separator(media)?;
+    item(media, MEDIA_EXIT, "E&xit")?;
+    popup(root, media, "&Media")?;
+
+    let playback = CreatePopupMenu()?;
+    item(playback, PLAYBACK_TOGGLE_PAUSE, "&Play / Pause\tSpace")?;
+    separator(playback)?;
+    item(playback, PLAYBACK_SEEK_BACK, "Seek &Back 5 Seconds\tLeft")?;
+    item(
+        playback,
+        PLAYBACK_SEEK_FORWARD,
+        "Seek &Forward 5 Seconds\tRight",
+    )?;
+    item(playback, PLAYBACK_FRAME_BACK, "Previous Fra&me\tCtrl+B")?;
+    item(playback, PLAYBACK_FRAME_FORWARD, "Next Fram&e\tCtrl+F")?;
+    separator(playback)?;
+    item(playback, PLAYBACK_SLOWER, "S&lower\t[")?;
+    item(playback, PLAYBACK_FASTER, "F&aster\t]")?;
+    item(playback, PLAYBACK_NORMAL_SPEED, "&Normal Speed\t\\")?;
+    separator(playback)?;
+    item(playback, PLAYBACK_SET_IN, "Set &In Point\tI")?;
+    item(playback, PLAYBACK_CLEAR_IN, "Clear In Point\tShift+I")?;
+    item(playback, PLAYBACK_SET_OUT, "Set &Out Point\tO")?;
+    item(playback, PLAYBACK_CLEAR_OUT, "Clear Out Point\tShift+O")?;
+    item(
+        playback,
+        PLAYBACK_TOGGLE_LOOP,
+        "&Loop Range / Auto-Replay\tR",
+    )?;
+    popup(root, playback, "&Playback")?;
+
+    let audio = CreatePopupMenu()?;
+    item(audio, AUDIO_VOLUME_UP, "Volume &Up\tWheel Up")?;
+    item(audio, AUDIO_VOLUME_DOWN, "Volume &Down\tWheel Down")?;
+    popup(root, audio, "&Audio")?;
+
+    let video = CreatePopupMenu()?;
+    item(video, VIDEO_ROTATE_CW, "Rotate &Clockwise\tCtrl+R")?;
+    item(video, VIDEO_ROTATE_CCW, "Rotate Counter-Clockwise\tCtrl+E")?;
+    item(video, VIDEO_RESET_VIEW, "&Reset View\tCtrl+0")?;
+    separator(video)?;
+    item(video, VIDEO_DECODE_INFO, "Decode &Info\t`")?;
+    popup(root, video, "&Video")?;
+
+    let subtitles = CreatePopupMenu()?;
+    item(subtitles, SUBTITLES_TOGGLE, "&Show Subtitles\tS")?;
+    popup(root, subtitles, "&Subtitles")?;
+
+    let view = CreatePopupMenu()?;
+    item(view, VIEW_FULLSCREEN, "&Fullscreen\tCtrl+H")?;
+    item(view, VIEW_FRAMELESS, "&Frameless Window\tCtrl+Shift+S")?;
+    separator(view)?;
+    item(view, VIEW_FIT, "&Fit Window to Video\tCtrl+W")?;
+    item(view, VIEW_HALF_SIZE, "&Half Size\tCtrl+Q")?;
+    separator(view)?;
+    item(
+        view,
+        VIEW_MENU_BAR,
+        "Cycle &Menu Bar (Hide / Auto-hide)\tCtrl+Shift+M",
+    )?;
+    popup(root, view, "&View")?;
+
+    let help = CreatePopupMenu()?;
+    item(help, HELP_SHORTCUTS, "&Keyboard Shortcuts\tHold H")?;
+    popup(root, help, "&Help")?;
+
+    Ok(root)
+}
+
+/// Why a menu bar that is not docked is currently shown anyway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuReveal {
+    /// Alt was pressed; ends when the menu loop exits or focus leaves.
+    Alt,
+    /// Auto-hide mode and the cursor reached the top edge; ends when the
+    /// cursor moves back down into the video.
+    Hover,
+}
+
+/// Height, in 96-DPI pixels, of the strip along the top of the client area
+/// that reveals an auto-hidden menu bar. It must stay shorter than the menu
+/// bar itself: once the bar hides again the client area shifts down by the
+/// bar's height, which carries the cursor out of the strip instead of
+/// re-triggering it.
+const MENU_REVEAL_ZONE_96DPI: i32 = 8;
+
+/// Whether the menu bar is docked in the steady state (framed window, mode
+/// `Visible`), ignoring any transient reveal. Window sizing uses this, so fit
+/// and resize commands never bake a momentary reveal into the window size.
+fn menu_docked(state: &WindowState) -> bool {
+    !state.is_frameless_windowed.get()
+        && !state.is_borderless.get()
+        && state.menu_bar_mode.get() == MenuBarMode::Visible
+}
+
+/// Attach or detach the menu to match the current mode and reveal state.
+/// Attaching changes the client height, so this is a no-op when nothing
+/// changed, to avoid needless swap-chain resizes.
+unsafe fn sync_app_menu(hwnd: HWND, state: &WindowState) {
+    let want = menu_docked(state) || state.menu_reveal.get().is_some();
+    if want == state.menu_attached.get() {
+        return;
+    }
+    // Update first: SetMenu re-enters window_proc (WM_GETMINMAXINFO, WM_SIZE)
+    // and those handlers read the attached state.
+    state.menu_attached.set(want);
+    let menu = if want { state.menu } else { HMENU(null_mut()) };
+    let _ = SetMenu(hwnd, menu);
+    let _ = DrawMenuBar(hwnd);
+}
+
+unsafe fn set_menu_reveal(hwnd: HWND, state: &WindowState, reveal: Option<MenuReveal>) {
+    state.menu_reveal.set(reveal);
+    sync_app_menu(hwnd, state);
+}
 
 /// Scale `(width, height)` up uniformly so both dimensions meet the enforced
 /// minimum client size (`WM_GETMINMAXINFO` / `ptMinTrackSize`), preserving
@@ -152,6 +300,10 @@ struct WindowState {
     is_open: Cell<bool>,
     is_borderless: Cell<bool>,
     is_frameless_windowed: Cell<bool>,
+    menu: HMENU,
+    menu_bar_mode: Cell<MenuBarMode>,
+    menu_reveal: Cell<Option<MenuReveal>>,
+    menu_attached: Cell<bool>,
     resize_request: Cell<Option<ResizeRequest>>,
     input_events: RefCell<Vec<InputEvent>>,
     modal_tick_fn: Cell<Option<unsafe fn(*mut c_void)>>,
@@ -183,16 +335,22 @@ impl NativeWindowInner {
         width: u32,
         height: u32,
         frameless_windowed: bool,
+        menu_bar_mode: MenuBarMode,
     ) -> Result<Self, Box<dyn Error>> {
         let instance = module_handle()?;
         let class_name = w!("FastPlayWindowClass");
         register_window_class(instance, class_name)?;
 
         let title_wide = to_wide(title);
+        let menu = unsafe { create_app_menu()? };
         let state = Rc::new(WindowState {
             is_open: Cell::new(true),
             is_borderless: Cell::new(false),
             is_frameless_windowed: Cell::new(frameless_windowed),
+            menu,
+            menu_bar_mode: Cell::new(menu_bar_mode),
+            menu_reveal: Cell::new(None),
+            menu_attached: Cell::new(false),
             resize_request: Cell::new(None),
             input_events: RefCell::new(Vec::new()),
             modal_tick_fn: Cell::new(None),
@@ -206,8 +364,9 @@ impl NativeWindowInner {
         });
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
+        let docked = menu_docked(&state);
         let (window_width, window_height) =
-            window_size_for_client(width, height, frameless_windowed)?;
+            window_size_for_client(width, height, frameless_windowed, docked)?;
 
         // SAFETY:
         // - class name and title pointers stay alive for the duration of the call
@@ -238,6 +397,13 @@ impl NativeWindowInner {
                 return Err(Box::new(error));
             }
         };
+
+        if docked {
+            state.menu_attached.set(true);
+            unsafe {
+                SetMenu(hwnd, menu)?;
+            }
+        }
 
         // SAFETY: `hwnd` is a live top-level window created above.
         unsafe {
@@ -423,9 +589,12 @@ impl NativeWindowInner {
             }
 
             // Convert client size to window size (accounts for title bar / borders).
-            let Ok((win_w, win_h)) =
-                window_size_for_client(w, h, self.state.is_frameless_windowed.get())
-            else {
+            let Ok((win_w, win_h)) = window_size_for_client(
+                w,
+                h,
+                self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
+            ) else {
                 return;
             };
 
@@ -477,9 +646,10 @@ impl NativeWindowInner {
             }
             let work = info.rcWork;
 
-            let Ok((chrome_w, chrome_h)) =
-                window_chrome_size(self.state.is_frameless_windowed.get())
-            else {
+            let Ok((chrome_w, chrome_h)) = window_chrome_size(
+                self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
+            ) else {
                 return;
             };
             let max_client_w = ((work.right - work.left) - chrome_w).max(1) as u32;
@@ -499,9 +669,12 @@ impl NativeWindowInner {
                 max_client_h
             };
 
-            let Ok((win_w, win_h)) =
-                window_size_for_client(w, h, self.state.is_frameless_windowed.get())
-            else {
+            let Ok((win_w, win_h)) = window_size_for_client(
+                w,
+                h,
+                self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
+            ) else {
                 return;
             };
 
@@ -554,6 +727,7 @@ impl NativeWindowInner {
                 content_width,
                 content_height,
                 self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
             ) else {
                 return;
             };
@@ -603,6 +777,7 @@ impl NativeWindowInner {
                         | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
                 );
                 self.state.is_borderless.set(false);
+                set_menu_reveal(self.hwnd, &self.state, None);
             } else {
                 // Save current placement and style.
                 let mut placement = WINDOWPLACEMENT::default();
@@ -636,6 +811,7 @@ impl NativeWindowInner {
                     );
                 }
                 self.state.is_borderless.set(true);
+                set_menu_reveal(self.hwnd, &self.state, None);
             }
         }
     }
@@ -665,9 +841,14 @@ impl NativeWindowInner {
 
         let was_frameless = self.state.is_frameless_windowed.get();
         let will_be_frameless = !was_frameless;
-        let Ok((mut window_width, mut window_height)) =
-            window_size_for_client(client_width, client_height, will_be_frameless)
-        else {
+        let will_dock_menu =
+            !will_be_frameless && self.state.menu_bar_mode.get() == MenuBarMode::Visible;
+        let Ok((mut window_width, mut window_height)) = window_size_for_client(
+            client_width,
+            client_height,
+            will_be_frameless,
+            will_dock_menu,
+        ) else {
             return false;
         };
 
@@ -695,6 +876,9 @@ impl NativeWindowInner {
         // Set the state before SWP_FRAMECHANGED: Windows synchronously asks
         // WM_NCCALCSIZE for the new client geometry during SetWindowPos.
         self.state.is_frameless_windowed.set(will_be_frameless);
+        unsafe {
+            set_menu_reveal(self.hwnd, &self.state, None);
+        }
         let changed = unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -710,6 +894,7 @@ impl NativeWindowInner {
         if !changed {
             self.state.is_frameless_windowed.set(was_frameless);
             unsafe {
+                sync_app_menu(self.hwnd, &self.state);
                 let _ = SetWindowPos(
                     self.hwnd,
                     HWND_TOP,
@@ -726,6 +911,18 @@ impl NativeWindowInner {
             }
         }
         changed
+    }
+
+    /// Advance the menu bar mode (visible, hidden, auto-hide) and apply it.
+    /// Frameless and fullscreen keep the menu detached regardless; the mode
+    /// takes effect when the window returns to its framed presentation.
+    pub fn cycle_menu_bar_mode(&self) -> MenuBarMode {
+        let mode = self.state.menu_bar_mode.get().next();
+        self.state.menu_bar_mode.set(mode);
+        unsafe {
+            set_menu_reveal(self.hwnd, &self.state, None);
+        }
+        mode
     }
 
     pub(crate) fn hwnd(&self) -> HWND {
@@ -751,6 +948,10 @@ impl Drop for NativeWindowInner {
             // SAFETY: `hwnd` belongs to this wrapper and is no longer used after drop.
             unsafe {
                 let _ = RevokeDragDrop(self.hwnd);
+                // Ensure the window owns the menu at destruction. Windows then
+                // destroys the complete menu hierarchy with the HWND, including
+                // when it was detached for frameless/fullscreen presentation.
+                let _ = SetMenu(self.hwnd, self.state.menu);
                 let _ = DestroyWindow(self.hwnd);
             }
         }
@@ -1655,7 +1856,7 @@ fn load_fastplay_icon(width: i32, height: i32) -> HICON {
     }
 }
 
-fn adjust_window_size(width: u32, height: u32) -> Result<(i32, i32), Box<dyn Error>> {
+fn adjust_window_size(width: u32, height: u32, menu: bool) -> Result<(i32, i32), Box<dyn Error>> {
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -1665,9 +1866,9 @@ fn adjust_window_size(width: u32, height: u32) -> Result<(i32, i32), Box<dyn Err
 
     // SAFETY:
     // - `rect` points to writable storage
-    // - style matches the one used in CreateWindowExW
+    // - style matches the framed window; `menu` says whether the bar is attached
     unsafe {
-        AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0))?;
+        AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, menu, WINDOW_EX_STYLE(0))?;
     }
 
     Ok((rect.right - rect.left, rect.bottom - rect.top))
@@ -1677,6 +1878,7 @@ fn window_size_for_client(
     width: u32,
     height: u32,
     frameless: bool,
+    menu: bool,
 ) -> Result<(i32, i32), Box<dyn Error>> {
     if frameless {
         Ok((
@@ -1684,25 +1886,39 @@ fn window_size_for_client(
             height.min(i32::MAX as u32) as i32,
         ))
     } else {
-        adjust_window_size(width, height)
+        adjust_window_size(width, height, menu)
     }
 }
 
-fn window_chrome_size(frameless: bool) -> Result<(i32, i32), Box<dyn Error>> {
+fn window_chrome_size(frameless: bool, menu: bool) -> Result<(i32, i32), Box<dyn Error>> {
     if frameless {
         Ok((0, 0))
     } else {
-        adjust_window_size(0, 0)
+        adjust_window_size(0, 0, menu)
     }
 }
 
+/// Resolve `WM_NCHITTEST` for a frameless window. `zoomed` reports whether the
+/// window currently carries `WS_MAXIMIZE`.
+///
+/// A maximized window has no resize border — its edges belong to the work area
+/// — so every point is client area. Returning `HTCLIENT` here is also what
+/// keeps `DefWindowProcW` out of the frameless hit test entirely: the style is
+/// still `WS_OVERLAPPEDWINDOW`, so `DefWindowProcW` would report the stock
+/// caption and the close/minimize/maximize buttons over the video, and
+/// `WM_NCLBUTTONDOWN` forwards everything but `HTCAPTION` straight back to it.
 fn frameless_resize_hit_test(
     rect: RECT,
     screen_x: i32,
     screen_y: i32,
     border_x: i32,
     border_y: i32,
+    zoomed: bool,
 ) -> u32 {
+    if zoomed {
+        return HTCLIENT;
+    }
+
     let on_left = screen_x >= rect.left && screen_x < rect.left + border_x;
     let on_right = screen_x < rect.right && screen_x >= rect.right - border_x;
     let on_top = screen_y >= rect.top && screen_y < rect.top + border_y;
@@ -1728,6 +1944,43 @@ unsafe fn frameless_resize_border(hwnd: HWND) -> (i32, i32) {
         (GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + padded).max(1),
         (GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + padded).max(1),
     )
+}
+
+/// Whether a middle click should close the window.
+///
+/// Frameless mode hides the stock caption, so middle click stands in for the
+/// close button that is no longer there. That reasoning does not extend to the
+/// other two presentations: a framed window has a real close button, and
+/// borderless fullscreen has Esc and Ctrl+H. Firing there turns a stray middle
+/// click — a reflex from browser autoscroll — into an unannounced quit.
+///
+/// The timeline activation zone is excluded for the same reason the frameless
+/// caption drag excludes it: that strip belongs to scrubbing.
+fn middle_click_closes(frameless: bool, borderless: bool, in_timeline: bool) -> bool {
+    frameless && !borderless && !in_timeline
+}
+
+/// Auto-hide menu bar: reveal it when the cursor reaches the top strip of the
+/// client area, and hide it again once the cursor moves back down into the
+/// video. A held left button (scrub, pan, frameless drag) never reveals it.
+unsafe fn update_menu_hover(hwnd: HWND, state: &WindowState, y: i32, left_button: bool) {
+    if state.menu_bar_mode.get() != MenuBarMode::AutoHide
+        || state.is_frameless_windowed.get()
+        || state.is_borderless.get()
+        || state.in_modal_loop.get()
+    {
+        return;
+    }
+    let zone = MENU_REVEAL_ZONE_96DPI * GetDpiForWindow(hwnd).max(96) as i32 / 96;
+    match state.menu_reveal.get() {
+        None if !left_button && y < zone => {
+            set_menu_reveal(hwnd, state, Some(MenuReveal::Hover));
+        }
+        Some(MenuReveal::Hover) if y >= zone => {
+            set_menu_reveal(hwnd, state, None);
+        }
+        _ => {}
+    }
 }
 
 unsafe fn point_is_in_timeline(hwnd: HWND, y: i32) -> bool {
@@ -1920,17 +2173,26 @@ unsafe extern "system" fn window_proc(
         WM_NCHITTEST => {
             let frameless_windowed = window_state(hwnd).is_some_and(|state| {
                 state.is_frameless_windowed.get() && !state.is_borderless.get()
-            }) && !IsZoomed(hwnd).as_bool();
+            });
             if frameless_windowed {
+                // Frameless owns this message in every window state, maximized
+                // included — see `frameless_resize_hit_test` for why falling
+                // through to DefWindowProcW puts an invisible close button over
+                // the video.
+                let zoomed = IsZoomed(hwnd).as_bool();
                 let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let mut rect = RECT::default();
-                if GetWindowRect(hwnd, &mut rect).is_ok() {
-                    let (border_x, border_y) = frameless_resize_border(hwnd);
-                    return LRESULT(frameless_resize_hit_test(
-                        rect, screen_x, screen_y, border_x, border_y,
-                    ) as isize);
+                if zoomed || GetWindowRect(hwnd, &mut rect).is_err() {
+                    // No border to test against: either the window is maximized,
+                    // or its rect is unavailable and the resize edges cannot be
+                    // located. Either way the safe answer is client area.
+                    return LRESULT(HTCLIENT as isize);
                 }
+                let (border_x, border_y) = frameless_resize_border(hwnd);
+                return LRESULT(frameless_resize_hit_test(
+                    rect, screen_x, screen_y, border_x, border_y, zoomed,
+                ) as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
@@ -1961,6 +2223,47 @@ unsafe extern "system" fn window_proc(
                 request_close(state);
             }
             LRESULT(0)
+        }
+        WM_COMMAND => {
+            let id = (wparam.0 & 0xFFFF) as u16;
+            match crate::platform::menu::action_for_id(id) {
+                Some(crate::platform::menu::MenuAction::Input(event)) => {
+                    if let Some(state) = window_state(hwnd) {
+                        state.input_events.borrow_mut().push(event);
+                    }
+                    LRESULT(0)
+                }
+                Some(crate::platform::menu::MenuAction::Close) => {
+                    if let Some(state) = window_state(hwnd) {
+                        request_close(state);
+                    }
+                    LRESULT(0)
+                }
+                None => DefWindowProcW(hwnd, message, wparam, lparam),
+            }
+        }
+        WM_SYSKEYDOWN => {
+            // Alt reveals a menu bar that is not attached (hidden, auto-hide,
+            // frameless, fullscreen). The attached check also swallows the
+            // key's auto-repeat.
+            if wparam.0 as u16 == VK_MENU.0 {
+                if let Some(state) = window_state(hwnd) {
+                    if !state.menu_attached.get() {
+                        set_menu_reveal(hwnd, state, Some(MenuReveal::Alt));
+                    }
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_KILLFOCUS => {
+            // Alt+Tab (and any other Alt chord that leaves the window) never
+            // enters the menu loop, so WM_EXITMENULOOP cannot end the reveal.
+            if let Some(state) = window_state(hwnd) {
+                if state.menu_reveal.get().is_some() && !state.in_modal_loop.get() {
+                    set_menu_reveal(hwnd, state, None);
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
         }
         WM_KEYDOWN => {
             if let Some(state) = window_state(hwnd) {
@@ -2037,7 +2340,17 @@ unsafe extern "system" fn window_proc(
         WM_MBUTTONDOWN => LRESULT(0),
         WM_MBUTTONUP => {
             if let Some(state) = window_state(hwnd) {
-                request_close(state);
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if middle_click_closes(
+                    state.is_frameless_windowed.get(),
+                    state.is_borderless.get(),
+                    point_is_in_timeline(hwnd, y),
+                ) {
+                    // Same signal as WM_CLOSE, and deliberately the same
+                    // mechanism: set is_open and let the main loop run the
+                    // teardown ordering documented on that handler.
+                    request_close(state);
+                }
             }
             LRESULT(0)
         }
@@ -2081,6 +2394,8 @@ unsafe extern "system" fn window_proc(
             if let Some(state) = window_state(hwnd) {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                // MK_LBUTTON (0x0001): a scrub, pan or drag is in progress.
+                update_menu_hover(hwnd, state, y, (wparam.0 as u32 & 0x0001) != 0);
                 if state.left_button_down_owned.get() && (wparam.0 as u32 & 0x0001) == 0 {
                     state.left_button_down_owned.set(false);
                     state.ctrl_pan_active.set(false);
@@ -2286,6 +2601,11 @@ unsafe extern "system" fn window_proc(
         WM_EXITMENULOOP => {
             if let Some(state) = window_state(hwnd) {
                 state.in_modal_loop.set(false);
+                // A hover reveal outlives the menu loop: it ends when the
+                // cursor moves back down into the video.
+                if state.menu_reveal.get() == Some(MenuReveal::Alt) {
+                    set_menu_reveal(hwnd, state, None);
+                }
             }
             unsafe {
                 let _ =
@@ -2320,11 +2640,12 @@ unsafe extern "system" fn window_proc(
             // resize or aspect-ratio calculations.
             let mmi = lparam.0 as *mut MINMAXINFO;
             if !mmi.is_null() {
-                let frameless =
-                    window_state(hwnd).is_some_and(|state| state.is_frameless_windowed.get());
+                let (frameless, menu) = window_state(hwnd).map_or((false, false), |state| {
+                    (state.is_frameless_windowed.get(), state.menu_attached.get())
+                });
                 // Convert the minimum client size to the active window shape.
                 let (min_w, min_h) =
-                    window_size_for_client(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT, frameless)
+                    window_size_for_client(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT, frameless, menu)
                         .unwrap_or((640, 360));
                 unsafe {
                     (*mmi).ptMinTrackSize = POINT { x: min_w, y: min_h };
@@ -2389,7 +2710,10 @@ mod frameless_tests {
 
     #[test]
     fn frameless_hit_test_keeps_interior_in_the_client_area() {
-        assert_eq!(frameless_resize_hit_test(WINDOW, 500, 400, 8, 8), HTCLIENT);
+        assert_eq!(
+            frameless_resize_hit_test(WINDOW, 500, 400, 8, 8, false),
+            HTCLIENT
+        );
     }
 
     #[test]
@@ -2406,19 +2730,67 @@ mod frameless_tests {
         ];
         for ((x, y), expected) in cases {
             assert_eq!(
-                frameless_resize_hit_test(WINDOW, x, y, 8, 8),
+                frameless_resize_hit_test(WINDOW, x, y, 8, 8, false),
                 expected,
                 "unexpected hit result at ({x}, {y})"
             );
         }
     }
 
+    /// A maximized frameless window must report client area everywhere. Any
+    /// non-client result here means `DefWindowProcW` gets the message, and it
+    /// hit-tests from the intact `WS_OVERLAPPEDWINDOW` style — placing an
+    /// invisible close button over the top-right of the video.
+    #[test]
+    fn maximized_frameless_hit_test_is_client_area_everywhere() {
+        let edges_and_corners = [
+            (100, 300),
+            (899, 300),
+            (500, 200),
+            (500, 649),
+            (100, 200),
+            (899, 200),
+            (100, 649),
+            (899, 649),
+            (500, 400),
+        ];
+        for (x, y) in edges_and_corners {
+            assert_eq!(
+                frameless_resize_hit_test(WINDOW, x, y, 8, 8, true),
+                HTCLIENT,
+                "maximized frameless window must not expose non-client area at ({x}, {y})"
+            );
+        }
+    }
+
+    /// Middle click is the frameless stand-in for the close button. It must not
+    /// reach the presentations that still have one, or the timeline.
+    #[test]
+    fn middle_click_closes_only_a_frameless_window_outside_the_timeline() {
+        assert!(
+            middle_click_closes(true, false, false),
+            "frameless mode has no close button; middle click is its stand-in"
+        );
+        assert!(
+            !middle_click_closes(false, false, false),
+            "a framed window has a real close button"
+        );
+        assert!(
+            !middle_click_closes(true, true, false),
+            "borderless fullscreen exits with Esc / Ctrl+H"
+        );
+        assert!(
+            !middle_click_closes(true, false, true),
+            "the timeline strip belongs to scrubbing, not to closing"
+        );
+    }
+
     #[test]
     fn frameless_client_size_has_no_chrome_overhead() {
         assert_eq!(
-            window_size_for_client(1280, 720, true).unwrap(),
+            window_size_for_client(1280, 720, true, false).unwrap(),
             (1280, 720)
         );
-        assert_eq!(window_chrome_size(true).unwrap(), (0, 0));
+        assert_eq!(window_chrome_size(true, false).unwrap(), (0, 0));
     }
 }
