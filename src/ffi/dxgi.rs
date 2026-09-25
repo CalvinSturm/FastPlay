@@ -39,11 +39,11 @@ use windows::{
                 DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
             Gdi::{
-                ClientToScreen, DrawTextW, FillRect, FrameRect, GetMonitorInfoW, GetSysColor,
+                ClientToScreen, DrawTextW, FillRect, GetMonitorInfoW, GetSysColor,
                 GetSysColorBrush, MonitorFromWindow, ScreenToClient, SetBkMode, SetTextColor,
-                COLOR_3DSHADOW, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT,
-                DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, MONITORINFO,
-                MONITOR_DEFAULTTONEAREST, TRANSPARENT,
+                COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT, DT_CENTER,
+                DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+                TRANSPARENT,
             },
         },
         System::{
@@ -132,13 +132,13 @@ const MENU_BUTTON_HELP: usize = 7;
 
 fn menu_button_label(id: usize) -> Option<&'static str> {
     match id {
-        MENU_BUTTON_MEDIA => Some("Media  ▾"),
-        MENU_BUTTON_PLAYBACK => Some("Playback  ▾"),
-        MENU_BUTTON_AUDIO => Some("Audio  ▾"),
-        MENU_BUTTON_VIDEO => Some("Video  ▾"),
-        MENU_BUTTON_SUBTITLES => Some("Subtitles  ▾"),
-        MENU_BUTTON_VIEW => Some("View  ▾"),
-        MENU_BUTTON_HELP => Some("Help  ▾"),
+        MENU_BUTTON_MEDIA => Some("Media"),
+        MENU_BUTTON_PLAYBACK => Some("Playback"),
+        MENU_BUTTON_AUDIO => Some("Audio"),
+        MENU_BUTTON_VIDEO => Some("Video"),
+        MENU_BUTTON_SUBTITLES => Some("Subtitles"),
+        MENU_BUTTON_VIEW => Some("View"),
+        MENU_BUTTON_HELP => Some("Help"),
         _ => None,
     }
 }
@@ -2091,8 +2091,11 @@ unsafe fn measure_menu_button(hwnd: HWND, measure: *mut MEASUREITEMSTRUCT) -> bo
         return false;
     };
     let dpi = GetDpiForWindow(hwnd).max(96);
-    (*measure).itemWidth = ((label.chars().count() as u32 * 8 + 22) * dpi / 96).max(48);
-    (*measure).itemHeight = (26 * dpi / 96).max(24);
+    // Windows adds its own menu-bar margins around this width. Keep the
+    // requested content compact so the complete menu remains on one row even
+    // at FastPlay's minimum window width.
+    (*measure).itemWidth = ((label.chars().count() as u32 * 7 + 10) * dpi / 96).max(36);
+    (*measure).itemHeight = (22 * dpi / 96).max(20);
     true
 }
 
@@ -2116,15 +2119,6 @@ unsafe fn draw_menu_button(draw: *const DRAWITEMSTRUCT) -> bool {
     };
     let rect = (*draw).rcItem;
     let _ = FillRect((*draw).hDC, &rect, GetSysColorBrush(background));
-    let _ = FrameRect(
-        (*draw).hDC,
-        &rect,
-        GetSysColorBrush(if selected {
-            COLOR_HIGHLIGHT
-        } else {
-            COLOR_3DSHADOW
-        }),
-    );
     let _ = SetBkMode((*draw).hDC, TRANSPARENT);
     let _ = SetTextColor((*draw).hDC, COLORREF(GetSysColor(text_color)));
     let mut text: Vec<u16> = label.encode_utf16().collect();
