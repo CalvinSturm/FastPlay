@@ -91,8 +91,10 @@ impl AudioSink {
         // pass — avoids the extra full-buffer memcpy of a copy-then-scale.
         for (out, sample) in self
             .volume_scratch
-            .chunks_exact_mut(4)
-            .zip(data.chunks_exact(4))
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(data.as_chunks::<4>().0.iter())
         {
             let value = f32::from_ne_bytes([sample[0], sample[1], sample[2], sample[3]]);
             let scaled_value = (value * self.volume).clamp(-1.0, 1.0);
