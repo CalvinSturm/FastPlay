@@ -321,6 +321,11 @@ impl PlaybackSession {
         &self.window
     }
 
+    /// The open file, including its decode preference (e.g. `--force-sw`).
+    pub fn current_source(&self) -> Option<MediaSource> {
+        self.current_source.as_deref().cloned()
+    }
+
     pub fn snapshot(&self, now: Instant) -> PlaybackSnapshot {
         if let Some(target) = self.pending_seek_target {
             return PlaybackSnapshot {
@@ -444,6 +449,12 @@ impl PlaybackSession {
         let open_gen = self.generations.bump_open();
         let seek_gen = self.generations.seek();
         let op_id = self.operation_clock.next();
+        flog!(
+            "[open] open={} start_ms={} decode_preference={:?}",
+            open_gen.0,
+            start_position.unwrap_or_default().as_millis(),
+            source.decode_preference()
+        );
         // A freshly opened file is not ended: discard any unconsumed signal so a
         // stale latch can never auto-advance the new file.
         self.ended_signal.take();
@@ -967,7 +978,10 @@ impl PlaybackSession {
             self.metrics.disable_open_audio_metric();
         }
 
-        if self.metrics.pending_seek_first_frame && self.presenter.has_selected_surface() {
+        // Gate on a frame of the *new* seek generation having been presented:
+        // the pre-seek surface stays selected until then, so
+        // `has_selected_surface()` alone would log ~0 ms for every seek.
+        if self.metrics.pending_seek_first_frame && self.seek_frame_presented_since_request {
             if let Some(elapsed) = self.metrics.note_seek_first_frame_presented(now) {
                 flog!("seek_to_first_frame_ms={}", elapsed.as_millis());
             }

@@ -43,12 +43,17 @@ evidence-driven rather than pursued solely to reduce line count.
 A repeatable harness that turns the metrics the app already logs to
 the session log into reportable percentiles, matching `ARCHITECTURE.md §24`. It is
 Windows-only, drives the real release build via `PostMessageW`, and does not
-touch the steady-state hot path or app code. See [`bench/README.md`](../bench/README.md).
+touch the steady-state hot path. App-side support is limited to two automation
+messages (`WM_APP+3` absolute seek, `WM_APP+4` in-process reopen) and one-shot
+log lines. See [`bench/README.md`](../bench/README.md).
 
-- `bench/gen-corpus.ps1` — generates a synthetic ffmpeg corpus (no media in repo).
-- `bench/run-bench.ps1` — drives open → seeks → pause/resume → playthrough →
-  graceful close per clip/iteration, parses that run's session log, and emits a p50/p95
-  console table plus `bench/results/*.json` and `*.csv`.
+- `bench/gen-corpus.ps1` — generates a synthetic ffmpeg corpus (no media in repo)
+  spanning H.264/HEVC, 1080p/2160p, SDR/PQ/HLG.
+- `bench/run-bench.ps1` — per clip × hw/sw variant × iteration: launch → in-process
+  reopens → absolute seeks at fixed fractions → pause/resume → optional playthrough
+  → graceful close, under an isolated `%APPDATA%`. Parses each run's session log
+  in order, attributing every metric to its open/seek with a status, and emits
+  median/p95 per slice to `bench/results/<stamp>/` (events/runs/summary CSV + JSON).
 
 It is intentionally **not** wired into `cargo`/CI yet (local/optional first, per
 the note below); promote it once it has proven stable across machines.

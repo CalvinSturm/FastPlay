@@ -209,6 +209,12 @@ pub enum InputEvent {
     SaveScreenshot,
     ExportRange,
     SeekRelativeSeconds(i64),
+    /// Absolute seek to a media position in milliseconds. Only produced by the
+    /// benchmark automation hook (`WM_APP_SEEK_TO_MS`); no key maps to it.
+    SeekToMillis(u64),
+    /// Reopen the current file in-process through the normal open path. Only
+    /// produced by the benchmark automation hook (`WM_APP_REOPEN_CURRENT`).
+    ReopenCurrent,
     StepFrameForward,
     StepFrameBackward,
     AdjustVolumeSteps(i16),

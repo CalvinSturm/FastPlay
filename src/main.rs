@@ -39,7 +39,13 @@ use platform::window::NativeWindow;
 /// idle player does not busy-spin.
 const IDLE_MESSAGE_WAIT_MS: u32 = 100;
 
+/// Captured first thing in `main`, so the launch-open metric covers window,
+/// D3D11, and WASAPI initialization — cost a cold launch pays before
+/// `open_to_first_frame_ms` starts counting.
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 fn main() {
+    PROCESS_START.get_or_init(Instant::now);
     // Fix this run's log identity and sweep stale files before anything can
     // panic or fault, so neither the panic hook nor the crash handler has to
     // allocate a run id while the process is already failing.
@@ -171,7 +177,14 @@ fn event_loop(
     let mut recent_selected: Option<usize> = None;
 
     if let Some(source) = media_path {
-        open_single_file(session, recent, current, play_queue, source, Instant::now())?;
+        let now = Instant::now();
+        if let Some(started) = PROCESS_START.get() {
+            flog!(
+                "startup_to_open_ms={}",
+                now.duration_since(*started).as_millis()
+            );
+        }
+        open_single_file(session, recent, current, play_queue, source, now)?;
     }
 
     let mut input_events: Vec<InputEvent> = Vec::new();
@@ -264,6 +277,11 @@ fn event_loop(
                             MediaSource::new(path),
                             now,
                         )?;
+                    }
+                }
+                InputEvent::ReopenCurrent => {
+                    if let Some(source) = session.current_source() {
+                        open_single_file(session, recent, current, play_queue, source, now)?;
                     }
                 }
                 InputEvent::ExportRange => match session.export_range_request() {

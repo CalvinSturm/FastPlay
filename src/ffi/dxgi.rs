@@ -2241,6 +2241,18 @@ pub(crate) const WM_APP_SAVE_SCREENSHOT: u32 = WM_APP + 1;
 /// directly from the foreign process.
 pub(crate) const WM_APP_TOGGLE_FRAMELESS: u32 = WM_APP + 2;
 
+/// Automation hook for the latency benchmark (`bench/run-bench.ps1`): seeks to
+/// the absolute media position in `wparam` milliseconds through the same
+/// `SessionCommand::Seek` path the arrow keys use. The keyboard only offers
+/// relative seeks from a moving playhead, which cannot target repeatable
+/// positions.
+pub(crate) const WM_APP_SEEK_TO_MS: u32 = WM_APP + 3;
+
+/// Automation hook for the latency benchmark: reopens the current file
+/// in-process through the same open path as a Recent pick, so warm-process
+/// reopen latency can be measured without cross-process drag-and-drop.
+pub(crate) const WM_APP_REOPEN_CURRENT: u32 = WM_APP + 4;
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -2263,6 +2275,24 @@ unsafe extern "system" fn window_proc(
                     .input_events
                     .borrow_mut()
                     .push(InputEvent::ToggleFramelessWindowed);
+            }
+            LRESULT(0)
+        }
+        WM_APP_SEEK_TO_MS => {
+            if let Some(state) = window_state(hwnd) {
+                state
+                    .input_events
+                    .borrow_mut()
+                    .push(InputEvent::SeekToMillis(wparam.0 as u64));
+            }
+            LRESULT(0)
+        }
+        WM_APP_REOPEN_CURRENT => {
+            if let Some(state) = window_state(hwnd) {
+                state
+                    .input_events
+                    .borrow_mut()
+                    .push(InputEvent::ReopenCurrent);
             }
             LRESULT(0)
         }
