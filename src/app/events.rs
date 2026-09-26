@@ -82,4 +82,10 @@ pub enum SessionEvent {
         seek_gen: SeekGeneration,
         op_id: OperationId,
     },
+    /// The clip-export worker finished: the written file, or why it failed.
+    /// Not generation-scoped — an export works on its own copy of the source
+    /// and outlives opens and seeks of the playing file.
+    ClipExportFinished {
+        result: Result<std::path::PathBuf, String>,
+    },
 }

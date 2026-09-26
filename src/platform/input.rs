@@ -136,8 +136,17 @@ pub(crate) fn command_for_key(
                 Some(InputEvent::ToggleLoopRange)
             }
         }
-        // Ctrl+E → rotate counter-clockwise.
-        vk::E => ctrl.then_some(InputEvent::RotateCounterClockwise),
+        // Ctrl+E → rotate counter-clockwise, E → export the in/out clip
+        // (first press only, so a held key cannot queue repeat exports).
+        vk::E => {
+            if ctrl {
+                Some(InputEvent::RotateCounterClockwise)
+            } else if is_repeat {
+                None
+            } else {
+                Some(InputEvent::ExportClip)
+            }
+        }
         // Ctrl+F / Ctrl+B → step one frame forward / backward.
         vk::F => ctrl.then_some(InputEvent::StepFrameForward),
         vk::B => ctrl.then_some(InputEvent::StepFrameBackward),
@@ -218,6 +227,7 @@ pub enum InputEvent {
     SetOutPoint,
     ClearOutPoint,
     ToggleLoopRange,
+    ExportClip,
     FitWindow,
     HalfSizeWindow,
     ToggleDecodeInfo,
@@ -377,7 +387,7 @@ mod tests {
             ),
             case("R", vk::R, false, false, false, Some(ToggleLoopRange)),
             case("Shift+R", vk::R, false, true, false, Some(ToggleLoopRange)),
-            // ── Ctrl-only shortcuts: unmodified key is unbound ──
+            // ── E: Ctrl+E rotate, E export clip (first press only) ──
             case(
                 "Ctrl+E",
                 vk::E,
@@ -386,7 +396,10 @@ mod tests {
                 false,
                 Some(RotateCounterClockwise),
             ),
-            case("E", vk::E, false, false, false, None),
+            case("E", vk::E, false, false, false, Some(ExportClip)),
+            case("E (repeat)", vk::E, false, false, true, None),
+            case("Shift+E", vk::E, false, true, false, Some(ExportClip)),
+            // ── Ctrl-only shortcuts: unmodified key is unbound ──
             case("Ctrl+F", vk::F, true, false, false, Some(StepFrameForward)),
             case(
                 "Ctrl+F (repeat)",

@@ -149,6 +149,7 @@ Use FastPlay when you want to double-click a local file and start watching it wi
 | `O`                   | Set out-point                                |
 | `Shift+O`             | Clear out-point                              |
 | `R`                   | Loop active range or toggle auto-replay      |
+| `E`                   | Export the in/out range as a new clip file   |
 | `MouseWheel`          | Adjust volume                                |
 | `Esc`                 | Exit borderless fullscreen                   |
 | `Ctrl+H`              | Toggle borderless fullscreen                 |
@@ -189,6 +190,14 @@ Press `I` to mark where playback begins and `O` to mark where it ends.
 Press `R` while a range is active to loop it continuously.
 
 Use `Shift+I` and `Shift+O` to clear individual points.
+
+Press `E` to export the marked range as a new file next to the source, named
+like `movie_clip_00-01-23.500_00-02-10.000.mp4` (an existing file is never
+overwritten). A missing in-point exports from the start of the file and a
+missing out-point exports to its end. Export is a lossless stream copy in the
+background, so it is fast and playback continues; because nothing is
+re-encoded, the clip starts on the video keyframe at or before the in-point
+and may begin slightly early.
 
 In/out points reset when a new file is opened.
 

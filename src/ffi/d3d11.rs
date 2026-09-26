@@ -3447,6 +3447,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("I / O", "Set in / out point"),
         ("Shift+I / O", "Clear in / out point"),
         ("R", "Loop range \u{00B7} auto-replay"),
+        ("E", "Export in/out clip"),
         ("[ / ]", "Speed \u{2212} / +"),
         ("\\", "Reset speed"),
         ("Backspace", "Cancel scrub"),

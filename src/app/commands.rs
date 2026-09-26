@@ -25,6 +25,7 @@ pub enum SessionCommand {
     SetOutPoint,
     ClearOutPoint,
     ToggleLoopRange,
+    ExportClip,
     FitWindow,
     HalfSizeWindow,
     ToggleDecodeInfo,

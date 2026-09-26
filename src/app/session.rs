@@ -15,6 +15,7 @@ use std::{
 use crate::{
     app::{
         audio_controller::AudioController,
+        clip_export::{self, ClipExporter},
         clip_range::ClipRangeState,
         commands::SessionCommand,
         decode_thread::{DecodeThreadHandle, SeekDelivery},
@@ -58,6 +59,8 @@ const MAX_OBSERVED_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_FRAME_STEP: Duration = Duration::from_nanos(33_333_333);
 const WORKER_CANCELLED: &str = "fastplay operation cancelled";
 const VOLUME_OVERLAY_TIMEOUT: Duration = Duration::from_millis(900);
+/// Clip-export feedback names a file, so it stays up long enough to read.
+const CLIP_EXPORT_MESSAGE_TIMEOUT: Duration = Duration::from_millis(3000);
 
 /// Decrements a live decode-worker counter on every exit path (normal, error,
 /// or panic), so a blocking teardown can wait for the worker to fully release
@@ -150,6 +153,9 @@ pub struct PlaybackSession {
     pause_after_seek: bool,
     playback_rate: f64,
     clip_range: ClipRangeState,
+    /// Background export of the in/out range; completions arrive as
+    /// `SessionEvent::ClipExportFinished` on its own channel.
+    clip_exporter: ClipExporter,
     /// One-shot "playback just reached its natural end" signal, consumed by the
     /// event loop to drive play-queue auto-advance. See [`EndedSignal`].
     ended_signal: EndedSignal,
@@ -262,6 +268,7 @@ impl PlaybackSession {
             pause_after_seek: false,
             playback_rate: 1.0,
             clip_range: ClipRangeState::new(),
+            clip_exporter: ClipExporter::new(),
             ended_signal: EndedSignal::default(),
             idle_pace_requested: false,
             cached_buffered_frames: Cell::new(None),
@@ -373,6 +380,10 @@ impl PlaybackSession {
     /// play-queue navigation feedback. This is a render-only convenience (like
     /// [`Self::show_recent_overlay`]); it adds no queue state to the coordinator.
     pub fn show_status_message(&mut self, text: &str) {
+        self.show_status_message_for(text, VOLUME_OVERLAY_TIMEOUT);
+    }
+
+    fn show_status_message_for(&mut self, text: &str, timeout: Duration) {
         if let Ok((viewport_width, viewport_height)) = self.presenter.viewport_size() {
             if self
                 .presenter
@@ -382,7 +393,7 @@ impl PlaybackSession {
                 self.present_needed = true;
             }
         }
-        self.overlay.volume_overlay_until = Some(Instant::now() + VOLUME_OVERLAY_TIMEOUT);
+        self.overlay.volume_overlay_until = Some(Instant::now() + timeout);
     }
 
     /// Consume the edge-triggered "playback reached its natural end" signal.
@@ -537,6 +548,7 @@ impl PlaybackSession {
                     self.overlay.replay_indicator_until = Some(now + Duration::from_millis(1500));
                 }
             }
+            SessionCommand::ExportClip => self.start_clip_export(),
             SessionCommand::FitWindow => {
                 self.fit_window();
             }
@@ -577,6 +589,56 @@ impl PlaybackSession {
             }
         }
         Ok(())
+    }
+
+    /// Export the marked in/out range of the current file next to it. The
+    /// marks are normalized timeline positions; the exporter works in source
+    /// timestamps, so they are mapped back through the media-time origin.
+    fn start_clip_export(&mut self) {
+        let Some(source) = self.current_source.clone() else {
+            return;
+        };
+        if self.clip_exporter.is_running() {
+            self.show_status_message_for(
+                "Clip export already running",
+                CLIP_EXPORT_MESSAGE_TIMEOUT,
+            );
+            return;
+        }
+        let Some((start, end)) =
+            clip_export::export_range(self.clip_range.in_point(), self.clip_range.out_point())
+        else {
+            self.show_status_message_for(
+                "Set an in (I) or out (O) point to export a clip",
+                CLIP_EXPORT_MESSAGE_TIMEOUT,
+            );
+            return;
+        };
+        let destination =
+            clip_export::export_destination(source.path(), start, end, |path| path.exists());
+        flog!(
+            "clip_export_started path={} start_ms={} end_ms={}",
+            destination.display(),
+            start.as_millis(),
+            end.map(|end| end.as_millis().to_string())
+                .unwrap_or_else(|| "eof".into())
+        );
+        let source_start = self.absolute_media_position(start);
+        let source_end = end.map(|end| self.absolute_media_position(end));
+        match self.clip_exporter.start(
+            source.path().to_path_buf(),
+            destination,
+            source_start,
+            source_end,
+        ) {
+            Ok(()) => {
+                self.show_status_message_for("Exporting clip\u{2026}", CLIP_EXPORT_MESSAGE_TIMEOUT)
+            }
+            Err(error) => {
+                flog!("clip_export_failed error={error}");
+                self.show_status_message_for("Clip export failed", CLIP_EXPORT_MESSAGE_TIMEOUT);
+            }
+        }
     }
 
     fn adjust_volume_steps(&mut self, steps: i16) {
@@ -747,6 +809,7 @@ impl PlaybackSession {
     /// process, letting the OS reclaim every GPU resource instantly and
     /// crash-free.
     pub fn shutdown(&mut self) {
+        self.clip_exporter.shutdown();
         self.decode_thread.teardown(true);
         self.audio_decode_thread.teardown(true);
         self.clear_video_queue();
@@ -763,6 +826,13 @@ impl PlaybackSession {
         // Invalidate the per-tick audio-buffer cache; it is repopulated by the
         // first WASAPI query within this tick and reused thereafter.
         self.cached_buffered_frames.set(None);
+
+        // Clip exports are independent of playback state (including Error)
+        // and of video-queue backpressure, so their completion is polled
+        // before either gate.
+        if let Some(event) = self.clip_exporter.poll() {
+            self.handle_event(event, now)?;
+        }
 
         if self.state == PlaybackState::Error {
             self.show_error_idle_overlay()?;
@@ -1249,6 +1319,22 @@ impl PlaybackSession {
                 );
                 self.recover_device(now, "worker reported device-lost".to_string())?;
             }
+            SessionEvent::ClipExportFinished { result } => match result {
+                Ok(path) => {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.show_status_message_for(
+                        &format!("Clip saved: {name}"),
+                        CLIP_EXPORT_MESSAGE_TIMEOUT,
+                    );
+                }
+                Err(error) => {
+                    flog!("clip_export_failed error={error}");
+                    self.show_status_message_for("Clip export failed", CLIP_EXPORT_MESSAGE_TIMEOUT);
+                }
+            },
         }
 
         Ok(())

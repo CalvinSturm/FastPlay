@@ -39,6 +39,9 @@ use crate::{
 };
 include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
 
+mod clip_export;
+pub(crate) use clip_export::export_clip;
+
 const SWS_BILINEAR_FLAGS: i32 = 2;
 const AV_NOPTS_SENTINEL: i64 = i64::MIN;
 const AV_TIME_BASE_MICROS: i128 = 1_000_000;

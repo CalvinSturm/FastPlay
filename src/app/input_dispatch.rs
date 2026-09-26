@@ -45,6 +45,7 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         InputEvent::SetOutPoint => SessionCommand::SetOutPoint,
         InputEvent::ClearOutPoint => SessionCommand::ClearOutPoint,
         InputEvent::ToggleLoopRange => SessionCommand::ToggleLoopRange,
+        InputEvent::ExportClip => SessionCommand::ExportClip,
         InputEvent::FitWindow => SessionCommand::FitWindow,
         InputEvent::HalfSizeWindow => SessionCommand::HalfSizeWindow,
         InputEvent::ToggleDecodeInfo => SessionCommand::ToggleDecodeInfo,
@@ -136,6 +137,10 @@ mod tests {
         assert_eq!(
             command_for(&InputEvent::ToggleLoopRange),
             Some(SessionCommand::ToggleLoopRange)
+        );
+        assert_eq!(
+            command_for(&InputEvent::ExportClip),
+            Some(SessionCommand::ExportClip)
         );
         assert_eq!(
             command_for(&InputEvent::FitWindow),

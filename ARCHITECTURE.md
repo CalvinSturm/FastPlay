@@ -126,6 +126,7 @@ fastplay/
     app/
       mod.rs
       audio_controller.rs
+      clip_export.rs
       clip_range.rs
       commands.rs
       decode_thread.rs
@@ -184,6 +185,8 @@ fastplay/
       d3d11.rs
       dxgi.rs
       ffmpeg.rs
+      ffmpeg/
+        clip_export.rs
       ffmpeg_shim.c
       ffmpeg_shim.h
       runtime.rs
@@ -1083,6 +1086,7 @@ Implemented:
 * local p50/p95 benchmark harness with JSON/CSV output
 * playback speed control
 * in/out point markers
+* in/out clip export (background stream-copy remux, `E`)
 * help overlay (H key)
 * Ctrl+drag pan with clamping (content stays visible)
 * auto-rotation from stream display matrix metadata (CCW→CW corrected)

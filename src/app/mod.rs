@@ -1,4 +1,5 @@
 pub mod audio_controller;
+pub mod clip_export;
 pub mod clip_range;
 pub mod commands;
 pub mod decode_thread;
