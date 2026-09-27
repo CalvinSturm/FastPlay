@@ -4,7 +4,7 @@ FastPlay is a keyboard-first Windows video player for fast local playback, smoot
 
 It is intentionally focused on **local playback**. No media library. No plugin maze. No feature sprawl. Just fast open, clean playback, responsive controls, and a tighter Windows-native experience.
 
-**[Download FastPlay v0.4.6 for Windows x64 (MSI)](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.6/fastplay-0.4.6-x86_64.msi)** • **[Portable ZIP](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.6/fastplay-0.4.6-windows-x86_64-portable.zip)** • [All releases](../../releases) • [Report an issue](../../issues)
+**[Download the latest FastPlay release for Windows x64](../../releases/latest)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** early release, actively improving playback speed, seek feel, and UI polish on Windows x64.
 
@@ -56,6 +56,7 @@ Use VLC or MPC-HC when you need format coverage, streaming, or platform reach. R
 | `Shift+I` | Clear in-point |
 | `O` | Set out-point at current position |
 | `Shift+O` | Clear out-point |
+| `Ctrl+Shift+E` | Export the marked In/Out range as MP4 |
 | `R` | Toggle loop range (if in/out set) · toggle auto-replay (if no range) |
 | `MouseWheel` | Adjust volume |
 | `Esc` | Exit borderless fullscreen |
@@ -90,6 +91,8 @@ Press `I` to mark where playback starts and `O` to mark where it ends. The range
 | ✓ | ✓ | in-point → out-point | in-point |
 
 Press `R` while a range is active to loop it continuously. Use `Shift+I` / `Shift+O` to clear individual points. In/out points reset when a new file is opened.
+
+With both marks set, press `Ctrl+Shift+E` or choose **Media → Export Marked Range**. FastPlay uses stream copy for safe MP4-family keyframe cuts and accurate H.264/AAC transcoding otherwise. Release packages include the required FFmpeg tools.
 
 ## Features
 

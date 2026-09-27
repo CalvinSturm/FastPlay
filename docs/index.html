@@ -32,11 +32,11 @@
         "applicationCategory": "MultimediaApplication",
         "applicationSubCategory": "Video Player",
         "description": "A fast, free, open-source Windows video player with hardware-accelerated decode, responsive seek, per-file resume, a lightweight play queue, and GPU-resident presentation.",
-        "softwareVersion": "0.4.6",
+        "softwareVersion": "0.5.0",
         "license": "https://opensource.org/licenses/MIT",
         "url": "https://calvinsturm.github.io/FastPlay/",
         "downloadUrl": "https://github.com/CalvinSturm/FastPlay/releases/latest",
-        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.4.6.md",
+        "releaseNotes": "https://github.com/CalvinSturm/FastPlay/blob/main/docs/release-notes-v0.5.0.md",
         "author": {
             "@type": "Person",
             "name": "Calvin Sturm",
@@ -476,7 +476,7 @@
     <div class="container">
         <a class="nav-brand" href="#">FastPlay</a>
         <ul class="nav-links">
-            <li><a href="#release">v0.4.6</a></li>
+            <li><a href="#release">v0.5.0</a></li>
             <li><a href="#features">Features</a></li>
             <li><a href="#architecture">Architecture</a></li>
             <li><a href="#controls">Controls</a></li>
@@ -493,7 +493,7 @@
             <a class="btn btn-primary" href="https://github.com/CalvinSturm/FastPlay/releases/latest">Download for Windows</a>
             <a class="btn btn-secondary" href="https://github.com/CalvinSturm/FastPlay">View Source</a>
         </div>
-        <span class="version-badge">v0.4.6 &middot; Windows 10+ &middot; MIT License</span>
+        <span class="version-badge">v0.5.0 &middot; Windows 10+ &middot; MIT License</span>
         <span class="hero-note">Windows x64 local playback. No streaming, media library, or plugin system.</span>
 
         <div class="demo">
@@ -505,13 +505,13 @@
 <section id="release">
     <div class="container">
         <div class="release-panel">
-            <h2>New in v0.4.6: frameless windows that stay that way</h2>
-            <p>Switch between framed and frameless windowed modes without changing the playback path. Move a frameless player from the video surface, resize it from the edges, and let newly launched instances remember your choice.</p>
+            <h2>New in v0.5.0: native controls and fast marked exports</h2>
+            <p>Use a compact native menu when you want discoverable controls, hide it when you do not, and export a precise In/Out range without turning FastPlay into an editor.</p>
             <ul class="release-list">
-                <li><strong>Framed / frameless toggle</strong>Press Ctrl+Shift+S without interfering with the existing Ctrl+S screenshot shortcut.</li>
-                <li><strong>Move and resize naturally</strong>Drag outside the timeline to move the window, or use any edge and corner to resize it.</li>
-                <li><strong>Remembered for new instances</strong>Your selected window style is saved and applied when another FastPlay process starts.</li>
-                <li><strong>Reproducible portable builds</strong>The in-repo packager keeps the no-installer ZIP aligned with the MSI runtime files.</li>
+                <li><strong>Compact native menu</strong>Reach media, playback, view, and help commands from a single Windows-native row.</li>
+                <li><strong>Visible or hidden</strong>Toggle the menu with Ctrl+Shift+M; the choice is remembered for new instances.</li>
+                <li><strong>Marked-range export</strong>Set In and Out, then press Ctrl+Shift+E to save an MP4 clip.</li>
+                <li><strong>Fast when safe, accurate when needed</strong>Keyframe-safe MP4 cuts use stream copy; other cuts transcode for accurate boundaries.</li>
             </ul>
         </div>
     </div>

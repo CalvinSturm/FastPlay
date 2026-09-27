@@ -1,6 +1,6 @@
 # Roadmap
 
-Status: 2026-08-14 · FastPlay v0.4.5
+Status: 2026-09-27 · FastPlay v0.5.0 release candidate
 
 Practical, prioritized plan for maintaining FastPlay before new features land.
 This complements (does not replace) `ARCHITECTURE.md`, which stays the locked
@@ -94,8 +94,9 @@ library or sprawl.
   step with `PageUp` / `PageDown`, and auto-advance at the natural end of each
   file. No persistent playlists, recursive scanning, shuffle, or repeat.
 - **Optional file associations** — already partially present via MSI; make it an
-  explicit, optional toggle.
-- **Portable ZIP artifact** — ship a no-installer build alongside the MSI.
+  explicit, optional toggle in a later packaging pass.
+- ✅ **Portable ZIP artifact** — shipped in v0.4.6 and kept in lockstep with
+  the MSI runtime manifest.
 
 ---
 
@@ -111,6 +112,9 @@ overlay controllers from §1. None of these change the playback hot path.
 - export marks as JSON / CSV
 - screenshot current frame (already present; fold into review export)
 - timeline hover thumbnails
+
+Marked In/Out MP4 export shipped in v0.5.0. The next creator-facing work waits
+until the performance baseline and Windows robustness passes below are closed.
 
 ---
 
@@ -142,7 +146,10 @@ this roadmap:
 4. ✅ first product basics: recent files and resume playback (§3).
 5. ✅ lightweight play queue: next/previous + folder playback + auto-advance
    (§3), shipped in v0.4.0.
-6. **Next:** choose among the remaining product basics (portable ZIP artifact,
-   optional file-association toggle) based on measured user value and
-   architecture fit.
-7. **Later:** creator review mode (§4).
+6. ✅ native menu and marked-range export release closure (v0.5.0).
+7. **Next:** establish a benchmark baseline that records p50, p95, p99, and max
+   and cannot silently accept incomplete scenarios.
+8. **Then:** reduce measured seek-tail latency and validate Windows device,
+   endpoint, resize, reopen, fullscreen, sleep/wake, and HDR/SDR transitions.
+9. **Later:** lightweight next-item preview, followed by creator review notes
+   and sidecar export (§4).

@@ -121,6 +121,12 @@
                                 Source='$(var.CargoTargetBinDir)\fastplay.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='ffmpeg_tool' Guid='*'>
+                            <File Id='ffmpeg_exe' Name='ffmpeg.exe' DiskId='1' Source='$(var.CargoTargetBinDir)\ffmpeg.exe' KeyPath='yes'/>
+                        </Component>
+                        <Component Id='ffprobe_tool' Guid='*'>
+                            <File Id='ffprobe_exe' Name='ffprobe.exe' DiskId='1' Source='$(var.CargoTargetBinDir)\ffprobe.exe' KeyPath='yes'/>
+                        </Component>
                         <Component Id='association_icon' Guid='*'>
                             <File
                                 Id='association_icon_file'
@@ -199,6 +205,8 @@
             Absent='disallow'>
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='ffmpeg_tool'/>
+            <ComponentRef Id='ffprobe_tool'/>
             <ComponentRef Id='association_icon'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='FileAssociations'/>
