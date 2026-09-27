@@ -7,11 +7,14 @@
 use std::{
     ffi::OsString,
     fs,
+    os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -155,7 +158,7 @@ pub fn export_range(range: &ExportRange, destination: &Path) -> Result<(), Strin
         "FFmpeg was not found. Install FFmpeg or place ffmpeg.exe beside FastPlay.".to_string()
     })?;
     let strategy = choose_strategy(range);
-    let output = Command::new(ffmpeg)
+    let output = hidden_tool_command(&ffmpeg)
         .args(ffmpeg_arguments(range, &temporary, strategy))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -182,6 +185,12 @@ pub fn export_range(range: &ExportRange, destination: &Path) -> Result<(), Strin
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn hidden_tool_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn find_tool(name: &str) -> Option<PathBuf> {
@@ -226,7 +235,7 @@ fn in_point_is_keyframe(range: &ExportRange) -> bool {
         return false;
     };
     let interval = format!("{}%+0.250000", ffmpeg_timestamp(range.start));
-    let output = Command::new(ffprobe)
+    let output = hidden_tool_command(&ffprobe)
         .args([
             OsString::from("-v"),
             OsString::from("error"),
