@@ -873,10 +873,19 @@ impl NativeWindowInner {
         // - GetWindowLongPtrW / SetWindowLongPtrW / SetWindowPos are safe with valid HWND
         // - MonitorFromWindow / GetMonitorInfoW use system-provided handles
         unsafe {
+            // The native menu is attached/detached *before* the geometry is
+            // applied: `sync_app_menu` preserves the client rect by moving the
+            // outer window, so running it afterwards would push a fullscreen
+            // window down by the menu height (and grow the restored window up
+            // by it on exit).
             if self.state.is_borderless.get() {
                 // Restore windowed mode.
                 let style = self.saved_style.get();
                 SetWindowLongPtrW(self.hwnd, GWL_STYLE, style as isize);
+                self.state.is_borderless.set(false);
+                set_menu_reveal(self.hwnd, &self.state, None);
+                // The saved placement was captured with the menu in this same
+                // state, so restoring it after re-docking is exact.
                 let _ = SetWindowPlacement(self.hwnd, &self.saved_placement.get());
                 let _ = SetWindowPos(
                     self.hwnd,
@@ -891,8 +900,6 @@ impl NativeWindowInner {
                         | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
                         | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
                 );
-                self.state.is_borderless.set(false);
-                set_menu_reveal(self.hwnd, &self.state, None);
             } else {
                 // Save current placement and style.
                 let mut placement = WINDOWPLACEMENT::default();
@@ -902,6 +909,9 @@ impl NativeWindowInner {
 
                 let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32;
                 self.saved_style.set(style);
+
+                self.state.is_borderless.set(true);
+                set_menu_reveal(self.hwnd, &self.state, None);
 
                 // Remove window chrome, apply popup style.
                 let borderless_style = (style & !WS_OVERLAPPEDWINDOW.0) | WS_POPUP.0;
@@ -925,8 +935,6 @@ impl NativeWindowInner {
                         SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     );
                 }
-                self.state.is_borderless.set(true);
-                set_menu_reveal(self.hwnd, &self.state, None);
             }
         }
     }
