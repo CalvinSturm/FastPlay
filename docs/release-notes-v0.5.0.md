@@ -28,6 +28,8 @@ while preserving the single-player architecture and GPU-resident playback path.
 
 - Screenshots are saved as PNG.
 - Frameless hit testing and middle-click input behavior are corrected.
+- Borderless fullscreen covers the whole monitor with the menu docked, and
+  leaving fullscreen restores the exact previous window size.
 - The local benchmark harness can run reproducible open/seek baselines over
   multiple corpus directories.
 
