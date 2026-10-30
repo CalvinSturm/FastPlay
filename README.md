@@ -4,7 +4,7 @@
 
 No media library. No plugin maze. No feature sprawl. Just fast local playback, responsive controls, and a focused Windows-native experience.
 
-**[Download FastPlay v0.4.6 for Windows x64 (MSI)](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.6/fastplay-0.4.6-x86_64.msi)** • **[Portable ZIP](https://github.com/CalvinSturm/FastPlay/releases/download/v0.4.6/fastplay-0.4.6-windows-x86_64-portable.zip)** • [All releases](../../releases) • [Report an issue](../../issues)
+**[Download the latest FastPlay release for Windows x64](../../releases/latest)** • [All releases](../../releases) • [Report an issue](../../issues)
 
 **Current status:** FastPlay is stable for everyday local playback on Windows x64. Development is now focused on maintenance, bug fixes, and useful feature requests.
 
@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/460ffc36-5a44-4030-bfc2-c05cfc38a724
 
 ## Get started
 
-1. Install FastPlay using the MSI above, or download the portable ZIP.
+1. Install FastPlay using the MSI from the latest release above, or download the portable ZIP.
 2. Open a video directly, drag a file onto FastPlay, or set FastPlay as your default Windows media app.
 3. Drop multiple files or a folder onto the window to create a temporary play queue.
 4. Use the keyboard for fast seeking, playback control, zoom, rotation, screenshots, and more.
@@ -93,11 +93,14 @@ It is a focused Windows player for people who want a snappy, no-friction window 
 * move and resize frameless windows normally
 * maximize frameless windows
 * borderless fullscreen
+* native application menu with a remembered On/Off toggle
 * per-monitor DPI awareness
 * minimum window size enforcement
 * device-loss and resize recovery
 
 Press `Ctrl+Shift+S` to switch between framed and frameless windowed modes. FastPlay remembers your preference for future instances.
+
+Press `Ctrl+Shift+M` or choose **View → Show Menu Bar** to toggle the native menu bar. The choice is remembered in `%APPDATA%\FastPlay\settings.txt` alongside frameless mode; when the menu is hidden, press `Alt` to reveal it temporarily.
 
 ### Subtitles
 
@@ -143,11 +146,13 @@ Use FastPlay when you want to double-click a local file and start watching it wi
 | `PageUp` / `PageDown` | Previous / next queued file                  |
 | `Ctrl+S`              | Save screenshot                              |
 | `Ctrl+Shift+S`        | Toggle framed / frameless windowed mode      |
+| `Ctrl+Shift+M`        | Toggle the native menu bar                   |
 | `S`                   | Toggle subtitles                             |
 | `I`                   | Set in-point                                 |
 | `Shift+I`             | Clear in-point                               |
 | `O`                   | Set out-point                                |
 | `Shift+O`             | Clear out-point                              |
+| `Ctrl+Shift+E`        | Export the marked In/Out range as MP4        |
 | `R`                   | Loop active range or toggle auto-replay      |
 | `MouseWheel`          | Adjust volume                                |
 | `Esc`                 | Exit borderless fullscreen                   |
@@ -191,6 +196,8 @@ Press `R` while a range is active to loop it continuously.
 Use `Shift+I` and `Shift+O` to clear individual points.
 
 In/out points reset when a new file is opened.
+
+With both marks set, press `Ctrl+Shift+E` or choose **Media → Export Marked Range**. FastPlay uses stream copy for safe MP4-family keyframe cuts and accurate H.264/AAC transcoding otherwise. Release packages include the required FFmpeg tools.
 
 ## Goals
 

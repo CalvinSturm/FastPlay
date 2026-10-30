@@ -30,7 +30,7 @@ use app::session::PlaybackSession;
 use app::timeline_ui::TimelineUiState;
 use media::{seek::SeekTarget, source::MediaSource, video::VideoDecodePreference};
 use platform::input::InputEvent;
-use platform::open_dialog::show_open_file_dialog;
+use platform::open_dialog::{show_export_save_dialog, show_open_file_dialog};
 use platform::window::NativeWindow;
 
 /// How long the UI loop blocks on the message queue when the player is
@@ -39,7 +39,13 @@ use platform::window::NativeWindow;
 /// idle player does not busy-spin.
 const IDLE_MESSAGE_WAIT_MS: u32 = 100;
 
+/// Captured first thing in `main`, so the launch-open metric covers window,
+/// D3D11, and WASAPI initialization — cost a cold launch pays before
+/// `open_to_first_frame_ms` starts counting.
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 fn main() {
+    PROCESS_START.get_or_init(Instant::now);
     // Fix this run's log identity and sweep stale files before anything can
     // panic or fault, so neither the panic hook nor the crash handler has to
     // allocate a run id while the process is already failing.
@@ -112,11 +118,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let media_path = parse_media_source_from_args()?;
     let settings = app::settings::load();
-    let window = NativeWindow::create_with_frameless_windowed(
+    let window = NativeWindow::create_with_preferences(
         "FastPlay",
         1280,
         720,
         settings.frameless_windowed,
+        settings.menu_bar_mode,
     )?;
     let mut session = PlaybackSession::new(window, settings.volume)?;
     let mut timeline_ui = TimelineUiState::new();
@@ -170,7 +177,14 @@ fn event_loop(
     let mut recent_selected: Option<usize> = None;
 
     if let Some(source) = media_path {
-        open_single_file(session, recent, current, play_queue, source, Instant::now())?;
+        let now = Instant::now();
+        if let Some(started) = PROCESS_START.get() {
+            flog!(
+                "startup_to_open_ms={}",
+                now.duration_since(*started).as_millis()
+            );
+        }
+        open_single_file(session, recent, current, play_queue, source, now)?;
     }
 
     let mut input_events: Vec<InputEvent> = Vec::new();
@@ -265,6 +279,25 @@ fn event_loop(
                         )?;
                     }
                 }
+                InputEvent::ReopenCurrent => {
+                    if let Some(source) = session.current_source() {
+                        open_single_file(session, recent, current, play_queue, source, now)?;
+                    }
+                }
+                InputEvent::ExportRange => match session.export_range_request() {
+                    Ok(range) => {
+                        let suggested = media::export::suggested_filename(
+                            &range.source,
+                            range.start,
+                            range.end,
+                        );
+                        let hwnd = session.window().raw_window().hwnd();
+                        if let Some(destination) = show_export_save_dialog(hwnd, &suggested) {
+                            session.start_export(range, destination);
+                        }
+                    }
+                    Err(message) => session.show_status_message(message),
+                },
                 InputEvent::QueuePrevious => {
                     navigate_queue(
                         session,

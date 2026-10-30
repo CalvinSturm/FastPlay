@@ -132,7 +132,7 @@ function Trigger-Screenshot([IntPtr]$Hwnd, [DateTime]$After) {
     [FpPassWin]::PostMessageW($Hwnd, $WM_APP_SAVE_SCREENSHOT, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     foreach ($attempt in 1..40) {
         Start-Sleep -Milliseconds 250
-        $shot = Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.bmp" -ErrorAction SilentlyContinue |
+        $shot = Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.png" -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -gt $After } |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($shot) { return $shot.FullName }
@@ -140,8 +140,8 @@ function Trigger-Screenshot([IntPtr]$Hwnd, [DateTime]$After) {
     throw "no screenshot appeared"
 }
 
-function Sample-Bars([string]$BmpPath) {
-    $bmp = [System.Drawing.Bitmap]::FromFile($BmpPath)
+function Sample-Bars([string]$ImagePath) {
+    $bmp = [System.Drawing.Bitmap]::FromFile($ImagePath)
     $samples = @()
     foreach ($i in 0..6) {
         $sx = [int]($bmp.Width * ($i + 0.5) / 7.0); $sy = [int]($bmp.Height * 0.30)
@@ -201,7 +201,7 @@ finally {
     }
     $proc.WaitForExit(8000) | Out-Null
     if (-not $proc.HasExited) { $proc.Kill() }
-    Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.bmp" -ErrorAction SilentlyContinue |
+    Get-ChildItem $screenshotDir -Filter "fastplay-screenshot-*.png" -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-5) } |
         Remove-Item -Force -ErrorAction SilentlyContinue
 }

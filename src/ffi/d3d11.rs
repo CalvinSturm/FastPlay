@@ -3242,7 +3242,12 @@ fn render_subtitle_bitmap(
             (bitmap_width * bitmap_height * 4) as usize,
         );
         let mut pixels = vec![0u8; source.len()];
-        for (source_px, dest_px) in source.chunks_exact(4).zip(pixels.chunks_exact_mut(4)) {
+        for (source_px, dest_px) in source
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(pixels.as_chunks_mut::<4>().0.iter_mut())
+        {
             dest_px[0] = 0;
             dest_px[1] = 0;
             dest_px[2] = 0;
@@ -3409,7 +3414,7 @@ fn render_idle_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         );
         let mut pixels = vec![0u8; source.len()];
         pixels.copy_from_slice(source);
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let intensity = px[0].max(px[1]).max(px[2]);
             if intensity > 0 && px[3] == 0 {
                 px[0] = 255;
@@ -3443,6 +3448,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("PgUp / PgDn", "Previous / next in queue"),
         ("Ctrl+S", "Save screenshot"),
         ("Ctrl+Shift+S", "Toggle frameless window"),
+        ("Ctrl+Shift+M", "Menu bar: on / off"),
         ("S", "Toggle subtitles"),
         ("I / O", "Set in / out point"),
         ("Shift+I / O", "Clear in / out point"),
@@ -3460,6 +3466,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         ("Ctrl+0", "Reset view"),
         ("`", "Toggle HW/SW decode"),
         ("Mousewheel", "Volume"),
+        ("Middle-click", "Close  (frameless)"),
     ];
 
     const PAD_X: i32 = 20;
@@ -3587,7 +3594,7 @@ fn render_help_bitmap() -> Result<Option<SubtitleBitmap>, Box<dyn Error>> {
         // Post-process: GDI wrote RGB but left alpha=0.
         // Text pixels (non-zero channel) → bright white with alpha.
         // All other pixels → dark semi-transparent background.
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let intensity = px[0].max(px[1]).max(px[2]);
             if intensity > 4 {
                 // Text — make bright white, alpha proportional to intensity.
@@ -3803,7 +3810,7 @@ fn render_recent_bitmap(
         let mut pixels = vec![0u8; source.len()];
         pixels.copy_from_slice(source);
 
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let intensity = px[0].max(px[1]).max(px[2]);
             if intensity > 4 {
                 px[0] = 235;
@@ -3989,7 +3996,7 @@ fn render_volume_bitmap(text: &str) -> Result<Option<SubtitleBitmap>, Box<dyn Er
         );
         let mut pixels = vec![0u8; source.len()];
         pixels.copy_from_slice(source);
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let intensity = px[0].max(px[1]).max(px[2]);
             if intensity > 0 && px[3] == 0 {
                 px[0] = 255;
@@ -4097,8 +4104,10 @@ fn draw_timeline_label(
 
         let source = std::slice::from_raw_parts(bits.cast::<u8>(), (width * height * 4) as usize);
         for (source_px, dest_px) in source
-            .chunks_exact(4)
-            .zip(destination_pixels.chunks_exact_mut(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(destination_pixels.as_chunks_mut::<4>().0.iter_mut())
         {
             let intensity = source_px[0].max(source_px[1]).max(source_px[2]);
             if intensity == 0 {

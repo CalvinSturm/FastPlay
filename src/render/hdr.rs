@@ -622,7 +622,7 @@ pub(crate) fn pq10_capture_to_sdr_bgra(pixels: &[u8]) -> Vec<u8> {
     }
 
     let mut out = Vec::with_capacity(pixels.len());
-    for dword in pixels.chunks_exact(4) {
+    for dword in pixels.as_chunks::<4>().0 {
         let dw = u32::from_le_bytes([dword[0], dword[1], dword[2], dword[3]]);
         let signal = [
             f64::from(dw & 0x3FF) / 1023.0,

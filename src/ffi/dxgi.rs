@@ -20,7 +20,9 @@ use std::{
 use windows::{
     core::{w, Interface, PCWSTR},
     Win32::{
-        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
+        Foundation::{
+            BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM,
+        },
         Graphics::{
             Direct3D11::{ID3D11Texture2D, ID3D11VideoContext1},
             Dxgi::{
@@ -37,8 +39,11 @@ use windows::{
                 DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
             Gdi::{
-                GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO,
-                MONITOR_DEFAULTTONEAREST,
+                ClientToScreen, DrawTextW, FillRect, GetMonitorInfoW, GetSysColor,
+                GetSysColorBrush, MonitorFromWindow, ScreenToClient, SetBkMode, SetTextColor,
+                COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT, DT_CENTER,
+                DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+                TRANSPARENT,
             },
         },
         System::{
@@ -51,28 +56,33 @@ use windows::{
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
+            Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_SELECTED, ODT_MENU},
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_SHIFT},
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
+            },
             Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{
-                AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW,
-                GetWindowPlacement, GetWindowRect, IsZoomed, LoadCursorW, LoadImageW,
-                MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
-                SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
-                TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-                GWLP_USERDATA, GWL_STYLE, HICON, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-                HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW,
-                IMAGE_ICON, MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
-                SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT,
-                WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
-                WM_DPICHANGED, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
-                WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
-                WM_MOUSEWHEEL, WM_MOVING, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
-                WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW,
-                WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+                AdjustWindowRectEx, AppendMenuW, CheckMenuItem, CreateMenu, CreatePopupMenu,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar,
+                GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
+                IsZoomed, LoadCursorW, LoadImageW, MsgWaitForMultipleObjects, PeekMessageW,
+                PostQuitMessage, RegisterClassExW, SetMenu, SetWindowLongPtrW, SetWindowPlacement,
+                SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW,
+                CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HICON,
+                HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+                HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, IMAGE_ICON, MF_BYCOMMAND, MF_CHECKED,
+                MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
+                MNC_EXECUTE, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXPADDEDBORDER,
+                SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED,
+                WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
+                WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+                WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MEASUREITEM,
+                WM_MENUCHAR, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVING, WM_NCCALCSIZE, WM_NCCREATE,
+                WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WM_SIZE, WM_SYSCOMMAND,
+                WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -83,7 +93,7 @@ use crate::{
         BgraFrameCapture, D3D11Device, HdrToneMapRenderer, RenderTargetView, SubtitleOverlay,
         SubtitleRenderer, VideoProcessorCache, VideoSurface,
     },
-    platform::input::InputEvent,
+    platform::{input::InputEvent, menu::MenuBarMode},
     render::hdr::{
         display_hdr_state_from_descriptor, swapchain_format_for_path,
         verified_hdr10_swapchain_color_space, ContentColorInfo, HdrDisplayDescriptor, HdrError,
@@ -111,6 +121,250 @@ const MODAL_TICK_INTERVAL_MS: u32 = 8;
 const MIN_CLIENT_WIDTH: u32 = 640;
 /// Minimum client area height in pixels.
 const MIN_CLIENT_HEIGHT: u32 = 360;
+
+const MENU_BUTTON_MEDIA: usize = 1;
+const MENU_BUTTON_PLAYBACK: usize = 2;
+const MENU_BUTTON_AUDIO: usize = 3;
+const MENU_BUTTON_VIDEO: usize = 4;
+const MENU_BUTTON_SUBTITLES: usize = 5;
+const MENU_BUTTON_VIEW: usize = 6;
+const MENU_BUTTON_HELP: usize = 7;
+
+fn menu_button_label(id: usize) -> Option<&'static str> {
+    match id {
+        MENU_BUTTON_MEDIA => Some("Media"),
+        MENU_BUTTON_PLAYBACK => Some("Playback"),
+        MENU_BUTTON_AUDIO => Some("Audio"),
+        MENU_BUTTON_VIDEO => Some("Video"),
+        MENU_BUTTON_SUBTITLES => Some("Subtitles"),
+        MENU_BUTTON_VIEW => Some("View"),
+        MENU_BUTTON_HELP => Some("Help"),
+        _ => None,
+    }
+}
+
+/// Build the native menu once. Item labels include the canonical shortcuts,
+/// while command dispatch itself reuses the existing `InputEvent` path.
+unsafe fn create_app_menu() -> Result<HMENU, windows::core::Error> {
+    use crate::platform::menu::*;
+
+    unsafe fn item(menu: HMENU, id: u16, label: &str) -> Result<(), windows::core::Error> {
+        let wide = to_wide(label);
+        AppendMenuW(menu, MF_STRING, id as usize, PCWSTR(wide.as_ptr()))
+    }
+
+    unsafe fn separator(menu: HMENU) -> Result<(), windows::core::Error> {
+        AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
+    }
+
+    unsafe fn popup(root: HMENU, menu: HMENU, button: usize) -> Result<(), windows::core::Error> {
+        AppendMenuW(
+            root,
+            MF_POPUP | MF_OWNERDRAW,
+            menu.0 as usize,
+            PCWSTR(button as *const u16),
+        )
+    }
+
+    let root = CreateMenu()?;
+
+    let media = CreatePopupMenu()?;
+    item(media, MEDIA_OPEN, "&Open...\tCtrl+O")?;
+    item(media, MEDIA_RECENT, "Open &Recent\tCtrl+Shift+O")?;
+    separator(media)?;
+    item(media, MEDIA_PREVIOUS, "Pre&vious\tPage Up")?;
+    item(media, MEDIA_NEXT, "&Next\tPage Down")?;
+    separator(media)?;
+    item(media, MEDIA_SCREENSHOT, "Save &Screenshot\tCtrl+S")?;
+    item(
+        media,
+        MEDIA_EXPORT_RANGE,
+        "&Export In/Out Range...\tCtrl+Shift+E",
+    )?;
+    separator(media)?;
+    item(media, MEDIA_EXIT, "E&xit")?;
+    popup(root, media, MENU_BUTTON_MEDIA)?;
+
+    let playback = CreatePopupMenu()?;
+    item(playback, PLAYBACK_TOGGLE_PAUSE, "&Play / Pause\tSpace")?;
+    separator(playback)?;
+    item(playback, PLAYBACK_SEEK_BACK, "Seek &Back 5 Seconds\tLeft")?;
+    item(
+        playback,
+        PLAYBACK_SEEK_FORWARD,
+        "Seek &Forward 5 Seconds\tRight",
+    )?;
+    item(playback, PLAYBACK_FRAME_BACK, "Previous Fra&me\tCtrl+B")?;
+    item(playback, PLAYBACK_FRAME_FORWARD, "Next Fram&e\tCtrl+F")?;
+    separator(playback)?;
+    item(playback, PLAYBACK_SLOWER, "S&lower\t[")?;
+    item(playback, PLAYBACK_FASTER, "F&aster\t]")?;
+    item(playback, PLAYBACK_NORMAL_SPEED, "&Normal Speed\t\\")?;
+    separator(playback)?;
+    item(playback, PLAYBACK_SET_IN, "Set &In Point\tI")?;
+    item(playback, PLAYBACK_CLEAR_IN, "Clear In Point\tShift+I")?;
+    item(playback, PLAYBACK_SET_OUT, "Set &Out Point\tO")?;
+    item(playback, PLAYBACK_CLEAR_OUT, "Clear Out Point\tShift+O")?;
+    item(
+        playback,
+        PLAYBACK_TOGGLE_LOOP,
+        "&Loop Range / Auto-Replay\tR",
+    )?;
+    popup(root, playback, MENU_BUTTON_PLAYBACK)?;
+
+    let audio = CreatePopupMenu()?;
+    item(audio, AUDIO_VOLUME_UP, "Volume &Up\tWheel Up")?;
+    item(audio, AUDIO_VOLUME_DOWN, "Volume &Down\tWheel Down")?;
+    popup(root, audio, MENU_BUTTON_AUDIO)?;
+
+    let video = CreatePopupMenu()?;
+    item(video, VIDEO_ROTATE_CW, "Rotate &Clockwise\tCtrl+R")?;
+    item(video, VIDEO_ROTATE_CCW, "Rotate Counter-Clockwise\tCtrl+E")?;
+    item(video, VIDEO_RESET_VIEW, "&Reset View\tCtrl+0")?;
+    separator(video)?;
+    item(video, VIDEO_DECODE_INFO, "Decode &Info\t`")?;
+    popup(root, video, MENU_BUTTON_VIDEO)?;
+
+    let subtitles = CreatePopupMenu()?;
+    item(subtitles, SUBTITLES_TOGGLE, "&Show Subtitles\tS")?;
+    popup(root, subtitles, MENU_BUTTON_SUBTITLES)?;
+
+    let view = CreatePopupMenu()?;
+    item(view, VIEW_FULLSCREEN, "&Fullscreen\tCtrl+H")?;
+    item(view, VIEW_FRAMELESS, "&Frameless Window\tCtrl+Shift+S")?;
+    separator(view)?;
+    item(view, VIEW_FIT, "&Fit Window to Video\tCtrl+W")?;
+    item(view, VIEW_HALF_SIZE, "&Half Size\tCtrl+Q")?;
+    separator(view)?;
+    item(view, VIEW_MENU_BAR, "Show &Menu Bar\tCtrl+Shift+M")?;
+    popup(root, view, MENU_BUTTON_VIEW)?;
+
+    let help = CreatePopupMenu()?;
+    item(help, HELP_SHORTCUTS, "&Keyboard Shortcuts\tHold H")?;
+    popup(root, help, MENU_BUTTON_HELP)?;
+
+    Ok(root)
+}
+
+/// Why a menu bar that is not docked is currently shown anyway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuReveal {
+    /// Alt was pressed; ends when the menu loop exits or focus leaves.
+    Alt,
+}
+
+/// Whether the menu bar is docked in the steady state (framed window, mode
+/// `Visible`), ignoring any transient reveal. Window sizing uses this, so fit
+/// and resize commands never bake a momentary reveal into the window size.
+fn menu_docked(state: &WindowState) -> bool {
+    !state.is_frameless_windowed.get()
+        && !state.is_borderless.get()
+        && state.menu_bar_mode.get() == MenuBarMode::Visible
+}
+
+/// Attach or detach the menu to match the current mode and reveal state.
+/// Attaching changes the client height, so this is a no-op when nothing
+/// changed, to avoid needless swap-chain resizes.
+unsafe fn sync_app_menu(hwnd: HWND, state: &WindowState) {
+    let want = menu_docked(state) || state.menu_reveal.get().is_some();
+    let checked = if state.menu_bar_mode.get() == MenuBarMode::Visible {
+        MF_CHECKED
+    } else {
+        MF_UNCHECKED
+    };
+    let _ = CheckMenuItem(
+        state.menu,
+        crate::platform::menu::VIEW_MENU_BAR as u32,
+        (MF_BYCOMMAND | checked).0,
+    );
+    if want == state.menu_attached.get() {
+        return;
+    }
+    let mut client_before = RECT::default();
+    let mut window_before = RECT::default();
+    let mut client_origin_before = POINT { x: 0, y: 0 };
+    let preserve_client = GetClientRect(hwnd, &mut client_before).is_ok()
+        && GetWindowRect(hwnd, &mut window_before).is_ok()
+        && ClientToScreen(hwnd, &mut client_origin_before).as_bool();
+    // Update first: SetMenu re-enters window_proc (WM_GETMINMAXINFO, WM_SIZE)
+    // and those handlers read the attached state.
+    state.menu_attached.set(want);
+    let menu = if want { state.menu } else { HMENU(null_mut()) };
+    let _ = SetMenu(hwnd, menu);
+
+    // A native menu is non-client UI, so attaching it normally shortens the
+    // video client area and detaching it lengthens the area. Keep both the
+    // client dimensions and its screen origin stable by applying those deltas
+    // to the outer window instead.
+    // Windows remains in charge of painting and hit-testing the menu.
+    if preserve_client {
+        let mut client_after = RECT::default();
+        let mut client_origin_after = POINT { x: 0, y: 0 };
+        if GetClientRect(hwnd, &mut client_after).is_ok()
+            && ClientToScreen(hwnd, &mut client_origin_after).as_bool()
+        {
+            let before_width = client_before.right - client_before.left;
+            let before_height = client_before.bottom - client_before.top;
+            let after_width = client_after.right - client_after.left;
+            let after_height = client_after.bottom - client_after.top;
+            let window_width = window_before.right - window_before.left;
+            let window_height = window_before.bottom - window_before.top;
+            let (width, height) = window_size_preserving_client(
+                window_width,
+                window_height,
+                (before_width, before_height),
+                (after_width, after_height),
+            );
+            let (x, y) = window_position_preserving_client(
+                (window_before.left, window_before.top),
+                (client_origin_before.x, client_origin_before.y),
+                (client_origin_after.x, client_origin_after.y),
+            );
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    }
+    let _ = DrawMenuBar(hwnd);
+}
+
+unsafe fn set_menu_reveal(hwnd: HWND, state: &WindowState, reveal: Option<MenuReveal>) {
+    state.menu_reveal.set(reveal);
+    sync_app_menu(hwnd, state);
+}
+
+fn window_size_preserving_client(
+    window_width: i32,
+    window_height: i32,
+    client_before: (i32, i32),
+    client_after: (i32, i32),
+) -> (i32, i32) {
+    (
+        window_width.saturating_add(client_before.0.saturating_sub(client_after.0)),
+        window_height.saturating_add(client_before.1.saturating_sub(client_after.1)),
+    )
+}
+
+fn window_position_preserving_client(
+    window_before: (i32, i32),
+    client_origin_before: (i32, i32),
+    client_origin_after: (i32, i32),
+) -> (i32, i32) {
+    (
+        window_before
+            .0
+            .saturating_add(client_origin_before.0.saturating_sub(client_origin_after.0)),
+        window_before
+            .1
+            .saturating_add(client_origin_before.1.saturating_sub(client_origin_after.1)),
+    )
+}
 
 /// Scale `(width, height)` up uniformly so both dimensions meet the enforced
 /// minimum client size (`WM_GETMINMAXINFO` / `ptMinTrackSize`), preserving
@@ -152,6 +406,10 @@ struct WindowState {
     is_open: Cell<bool>,
     is_borderless: Cell<bool>,
     is_frameless_windowed: Cell<bool>,
+    menu: HMENU,
+    menu_bar_mode: Cell<MenuBarMode>,
+    menu_reveal: Cell<Option<MenuReveal>>,
+    menu_attached: Cell<bool>,
     resize_request: Cell<Option<ResizeRequest>>,
     input_events: RefCell<Vec<InputEvent>>,
     modal_tick_fn: Cell<Option<unsafe fn(*mut c_void)>>,
@@ -183,16 +441,22 @@ impl NativeWindowInner {
         width: u32,
         height: u32,
         frameless_windowed: bool,
+        menu_bar_mode: MenuBarMode,
     ) -> Result<Self, Box<dyn Error>> {
         let instance = module_handle()?;
         let class_name = w!("FastPlayWindowClass");
         register_window_class(instance, class_name)?;
 
         let title_wide = to_wide(title);
+        let menu = unsafe { create_app_menu()? };
         let state = Rc::new(WindowState {
             is_open: Cell::new(true),
             is_borderless: Cell::new(false),
             is_frameless_windowed: Cell::new(frameless_windowed),
+            menu,
+            menu_bar_mode: Cell::new(menu_bar_mode),
+            menu_reveal: Cell::new(None),
+            menu_attached: Cell::new(false),
             resize_request: Cell::new(None),
             input_events: RefCell::new(Vec::new()),
             modal_tick_fn: Cell::new(None),
@@ -206,8 +470,18 @@ impl NativeWindowInner {
         });
         let state_ptr = Rc::into_raw(state.clone()) as *mut WindowState;
 
+        let docked = menu_docked(&state);
+        if docked {
+            unsafe {
+                let _ = CheckMenuItem(
+                    menu,
+                    crate::platform::menu::VIEW_MENU_BAR as u32,
+                    (MF_BYCOMMAND | MF_CHECKED).0,
+                );
+            }
+        }
         let (window_width, window_height) =
-            window_size_for_client(width, height, frameless_windowed)?;
+            window_size_for_client(width, height, frameless_windowed, docked)?;
 
         // SAFETY:
         // - class name and title pointers stay alive for the duration of the call
@@ -238,6 +512,13 @@ impl NativeWindowInner {
                 return Err(Box::new(error));
             }
         };
+
+        if docked {
+            state.menu_attached.set(true);
+            unsafe {
+                SetMenu(hwnd, menu)?;
+            }
+        }
 
         // SAFETY: `hwnd` is a live top-level window created above.
         unsafe {
@@ -423,9 +704,12 @@ impl NativeWindowInner {
             }
 
             // Convert client size to window size (accounts for title bar / borders).
-            let Ok((win_w, win_h)) =
-                window_size_for_client(w, h, self.state.is_frameless_windowed.get())
-            else {
+            let Ok((win_w, win_h)) = window_size_for_client(
+                w,
+                h,
+                self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
+            ) else {
                 return;
             };
 
@@ -477,9 +761,10 @@ impl NativeWindowInner {
             }
             let work = info.rcWork;
 
-            let Ok((chrome_w, chrome_h)) =
-                window_chrome_size(self.state.is_frameless_windowed.get())
-            else {
+            let Ok((chrome_w, chrome_h)) = window_chrome_size(
+                self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
+            ) else {
                 return;
             };
             let max_client_w = ((work.right - work.left) - chrome_w).max(1) as u32;
@@ -499,9 +784,12 @@ impl NativeWindowInner {
                 max_client_h
             };
 
-            let Ok((win_w, win_h)) =
-                window_size_for_client(w, h, self.state.is_frameless_windowed.get())
-            else {
+            let Ok((win_w, win_h)) = window_size_for_client(
+                w,
+                h,
+                self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
+            ) else {
                 return;
             };
 
@@ -554,6 +842,7 @@ impl NativeWindowInner {
                 content_width,
                 content_height,
                 self.state.is_frameless_windowed.get(),
+                menu_docked(&self.state),
             ) else {
                 return;
             };
@@ -584,10 +873,19 @@ impl NativeWindowInner {
         // - GetWindowLongPtrW / SetWindowLongPtrW / SetWindowPos are safe with valid HWND
         // - MonitorFromWindow / GetMonitorInfoW use system-provided handles
         unsafe {
+            // The native menu is attached/detached *before* the geometry is
+            // applied: `sync_app_menu` preserves the client rect by moving the
+            // outer window, so running it afterwards would push a fullscreen
+            // window down by the menu height (and grow the restored window up
+            // by it on exit).
             if self.state.is_borderless.get() {
                 // Restore windowed mode.
                 let style = self.saved_style.get();
                 SetWindowLongPtrW(self.hwnd, GWL_STYLE, style as isize);
+                self.state.is_borderless.set(false);
+                set_menu_reveal(self.hwnd, &self.state, None);
+                // The saved placement was captured with the menu in this same
+                // state, so restoring it after re-docking is exact.
                 let _ = SetWindowPlacement(self.hwnd, &self.saved_placement.get());
                 let _ = SetWindowPos(
                     self.hwnd,
@@ -602,7 +900,6 @@ impl NativeWindowInner {
                         | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
                         | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
                 );
-                self.state.is_borderless.set(false);
             } else {
                 // Save current placement and style.
                 let mut placement = WINDOWPLACEMENT::default();
@@ -612,6 +909,9 @@ impl NativeWindowInner {
 
                 let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32;
                 self.saved_style.set(style);
+
+                self.state.is_borderless.set(true);
+                set_menu_reveal(self.hwnd, &self.state, None);
 
                 // Remove window chrome, apply popup style.
                 let borderless_style = (style & !WS_OVERLAPPEDWINDOW.0) | WS_POPUP.0;
@@ -635,7 +935,6 @@ impl NativeWindowInner {
                         SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     );
                 }
-                self.state.is_borderless.set(true);
             }
         }
     }
@@ -665,9 +964,14 @@ impl NativeWindowInner {
 
         let was_frameless = self.state.is_frameless_windowed.get();
         let will_be_frameless = !was_frameless;
-        let Ok((mut window_width, mut window_height)) =
-            window_size_for_client(client_width, client_height, will_be_frameless)
-        else {
+        let will_dock_menu =
+            !will_be_frameless && self.state.menu_bar_mode.get() == MenuBarMode::Visible;
+        let Ok((mut window_width, mut window_height)) = window_size_for_client(
+            client_width,
+            client_height,
+            will_be_frameless,
+            will_dock_menu,
+        ) else {
             return false;
         };
 
@@ -695,6 +999,9 @@ impl NativeWindowInner {
         // Set the state before SWP_FRAMECHANGED: Windows synchronously asks
         // WM_NCCALCSIZE for the new client geometry during SetWindowPos.
         self.state.is_frameless_windowed.set(will_be_frameless);
+        unsafe {
+            set_menu_reveal(self.hwnd, &self.state, None);
+        }
         let changed = unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -710,6 +1017,7 @@ impl NativeWindowInner {
         if !changed {
             self.state.is_frameless_windowed.set(was_frameless);
             unsafe {
+                sync_app_menu(self.hwnd, &self.state);
                 let _ = SetWindowPos(
                     self.hwnd,
                     HWND_TOP,
@@ -726,6 +1034,18 @@ impl NativeWindowInner {
             }
         }
         changed
+    }
+
+    /// Toggle the menu bar mode (visible or hidden) and apply it.
+    /// Frameless and fullscreen keep the menu detached regardless; the mode
+    /// takes effect when the window returns to its framed presentation.
+    pub fn cycle_menu_bar_mode(&self) -> MenuBarMode {
+        let mode = self.state.menu_bar_mode.get().next();
+        self.state.menu_bar_mode.set(mode);
+        unsafe {
+            set_menu_reveal(self.hwnd, &self.state, None);
+        }
+        mode
     }
 
     pub(crate) fn hwnd(&self) -> HWND {
@@ -751,6 +1071,10 @@ impl Drop for NativeWindowInner {
             // SAFETY: `hwnd` belongs to this wrapper and is no longer used after drop.
             unsafe {
                 let _ = RevokeDragDrop(self.hwnd);
+                // Ensure the window owns the menu at destruction. Windows then
+                // destroys the complete menu hierarchy with the HWND, including
+                // when it was detached for frameless/fullscreen presentation.
+                let _ = SetMenu(self.hwnd, self.state.menu);
                 let _ = DestroyWindow(self.hwnd);
             }
         }
@@ -1655,7 +1979,7 @@ fn load_fastplay_icon(width: i32, height: i32) -> HICON {
     }
 }
 
-fn adjust_window_size(width: u32, height: u32) -> Result<(i32, i32), Box<dyn Error>> {
+fn adjust_window_size(width: u32, height: u32, menu: bool) -> Result<(i32, i32), Box<dyn Error>> {
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -1665,9 +1989,9 @@ fn adjust_window_size(width: u32, height: u32) -> Result<(i32, i32), Box<dyn Err
 
     // SAFETY:
     // - `rect` points to writable storage
-    // - style matches the one used in CreateWindowExW
+    // - style matches the framed window; `menu` says whether the bar is attached
     unsafe {
-        AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0))?;
+        AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, menu, WINDOW_EX_STYLE(0))?;
     }
 
     Ok((rect.right - rect.left, rect.bottom - rect.top))
@@ -1677,6 +2001,7 @@ fn window_size_for_client(
     width: u32,
     height: u32,
     frameless: bool,
+    menu: bool,
 ) -> Result<(i32, i32), Box<dyn Error>> {
     if frameless {
         Ok((
@@ -1684,25 +2009,39 @@ fn window_size_for_client(
             height.min(i32::MAX as u32) as i32,
         ))
     } else {
-        adjust_window_size(width, height)
+        adjust_window_size(width, height, menu)
     }
 }
 
-fn window_chrome_size(frameless: bool) -> Result<(i32, i32), Box<dyn Error>> {
+fn window_chrome_size(frameless: bool, menu: bool) -> Result<(i32, i32), Box<dyn Error>> {
     if frameless {
         Ok((0, 0))
     } else {
-        adjust_window_size(0, 0)
+        adjust_window_size(0, 0, menu)
     }
 }
 
+/// Resolve `WM_NCHITTEST` for a frameless window. `zoomed` reports whether the
+/// window currently carries `WS_MAXIMIZE`.
+///
+/// A maximized window has no resize border — its edges belong to the work area
+/// — so every point is client area. Returning `HTCLIENT` here is also what
+/// keeps `DefWindowProcW` out of the frameless hit test entirely: the style is
+/// still `WS_OVERLAPPEDWINDOW`, so `DefWindowProcW` would report the stock
+/// caption and the close/minimize/maximize buttons over the video, and
+/// `WM_NCLBUTTONDOWN` forwards everything but `HTCAPTION` straight back to it.
 fn frameless_resize_hit_test(
     rect: RECT,
     screen_x: i32,
     screen_y: i32,
     border_x: i32,
     border_y: i32,
+    zoomed: bool,
 ) -> u32 {
+    if zoomed {
+        return HTCLIENT;
+    }
+
     let on_left = screen_x >= rect.left && screen_x < rect.left + border_x;
     let on_right = screen_x < rect.right && screen_x >= rect.right - border_x;
     let on_top = screen_y >= rect.top && screen_y < rect.top + border_y;
@@ -1730,12 +2069,75 @@ unsafe fn frameless_resize_border(hwnd: HWND) -> (i32, i32) {
     )
 }
 
+/// Whether a middle click should close the window.
+///
+/// Frameless mode hides the stock caption, so middle click stands in for the
+/// close button that is no longer there. That reasoning does not extend to the
+/// other two presentations: a framed window has a real close button, and
+/// borderless fullscreen has Esc and Ctrl+H. Firing there turns a stray middle
+/// click — a reflex from browser autoscroll — into an unannounced quit.
+///
+/// The timeline activation zone is excluded for the same reason the frameless
+/// caption drag excludes it: that strip belongs to scrubbing.
+fn middle_click_closes(frameless: bool, borderless: bool, in_timeline: bool) -> bool {
+    frameless && !borderless && !in_timeline
+}
+
 unsafe fn point_is_in_timeline(hwnd: HWND, y: i32) -> bool {
     let mut rect = RECT::default();
     GetClientRect(hwnd, &mut rect).is_ok() && {
         let height = rect.bottom - rect.top;
         height > 0 && y >= height - crate::render::timeline::TIMELINE_ACTIVATION_ZONE_PX
     }
+}
+
+unsafe fn measure_menu_button(hwnd: HWND, measure: *mut MEASUREITEMSTRUCT) -> bool {
+    if measure.is_null() || (*measure).CtlType != ODT_MENU {
+        return false;
+    }
+    let Some(label) = menu_button_label((*measure).itemData) else {
+        return false;
+    };
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    // Windows adds its own menu-bar margins around this width. Keep the
+    // requested content compact so the complete menu remains on one row even
+    // at FastPlay's minimum window width.
+    (*measure).itemWidth = ((label.chars().count() as u32 * 7 + 10) * dpi / 96).max(36);
+    (*measure).itemHeight = (22 * dpi / 96).max(20);
+    true
+}
+
+unsafe fn draw_menu_button(draw: *const DRAWITEMSTRUCT) -> bool {
+    if draw.is_null() || (*draw).CtlType != ODT_MENU {
+        return false;
+    }
+    let Some(label) = menu_button_label((*draw).itemData) else {
+        return false;
+    };
+    let selected = ((*draw).itemState.0 & ODS_SELECTED.0) != 0;
+    let background = if selected {
+        COLOR_HIGHLIGHT
+    } else {
+        COLOR_MENU
+    };
+    let text_color = if selected {
+        COLOR_HIGHLIGHTTEXT
+    } else {
+        COLOR_MENUTEXT
+    };
+    let rect = (*draw).rcItem;
+    let _ = FillRect((*draw).hDC, &rect, GetSysColorBrush(background));
+    let _ = SetBkMode((*draw).hDC, TRANSPARENT);
+    let _ = SetTextColor((*draw).hDC, COLORREF(GetSysColor(text_color)));
+    let mut text: Vec<u16> = label.encode_utf16().collect();
+    let mut text_rect = rect;
+    let _ = DrawTextW(
+        (*draw).hDC,
+        &mut text,
+        &mut text_rect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    true
 }
 
 fn request_close(state: &WindowState) {
@@ -1847,6 +2249,18 @@ pub(crate) const WM_APP_SAVE_SCREENSHOT: u32 = WM_APP + 1;
 /// directly from the foreign process.
 pub(crate) const WM_APP_TOGGLE_FRAMELESS: u32 = WM_APP + 2;
 
+/// Automation hook for the latency benchmark (`bench/run-bench.ps1`): seeks to
+/// the absolute media position in `wparam` milliseconds through the same
+/// `SessionCommand::Seek` path the arrow keys use. The keyboard only offers
+/// relative seeks from a moving playhead, which cannot target repeatable
+/// positions.
+pub(crate) const WM_APP_SEEK_TO_MS: u32 = WM_APP + 3;
+
+/// Automation hook for the latency benchmark: reopens the current file
+/// in-process through the same open path as a Recent pick, so warm-process
+/// reopen latency can be measured without cross-process drag-and-drop.
+pub(crate) const WM_APP_REOPEN_CURRENT: u32 = WM_APP + 4;
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -1869,6 +2283,24 @@ unsafe extern "system" fn window_proc(
                     .input_events
                     .borrow_mut()
                     .push(InputEvent::ToggleFramelessWindowed);
+            }
+            LRESULT(0)
+        }
+        WM_APP_SEEK_TO_MS => {
+            if let Some(state) = window_state(hwnd) {
+                state
+                    .input_events
+                    .borrow_mut()
+                    .push(InputEvent::SeekToMillis(wparam.0 as u64));
+            }
+            LRESULT(0)
+        }
+        WM_APP_REOPEN_CURRENT => {
+            if let Some(state) = window_state(hwnd) {
+                state
+                    .input_events
+                    .borrow_mut()
+                    .push(InputEvent::ReopenCurrent);
             }
             LRESULT(0)
         }
@@ -1920,17 +2352,26 @@ unsafe extern "system" fn window_proc(
         WM_NCHITTEST => {
             let frameless_windowed = window_state(hwnd).is_some_and(|state| {
                 state.is_frameless_windowed.get() && !state.is_borderless.get()
-            }) && !IsZoomed(hwnd).as_bool();
+            });
             if frameless_windowed {
+                // Frameless owns this message in every window state, maximized
+                // included — see `frameless_resize_hit_test` for why falling
+                // through to DefWindowProcW puts an invisible close button over
+                // the video.
+                let zoomed = IsZoomed(hwnd).as_bool();
                 let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let mut rect = RECT::default();
-                if GetWindowRect(hwnd, &mut rect).is_ok() {
-                    let (border_x, border_y) = frameless_resize_border(hwnd);
-                    return LRESULT(frameless_resize_hit_test(
-                        rect, screen_x, screen_y, border_x, border_y,
-                    ) as isize);
+                if zoomed || GetWindowRect(hwnd, &mut rect).is_err() {
+                    // No border to test against: either the window is maximized,
+                    // or its rect is unavailable and the resize edges cannot be
+                    // located. Either way the safe answer is client area.
+                    return LRESULT(HTCLIENT as isize);
                 }
+                let (border_x, border_y) = frameless_resize_border(hwnd);
+                return LRESULT(frameless_resize_hit_test(
+                    rect, screen_x, screen_y, border_x, border_y, zoomed,
+                ) as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
@@ -1961,6 +2402,80 @@ unsafe extern "system" fn window_proc(
                 request_close(state);
             }
             LRESULT(0)
+        }
+        WM_MEASUREITEM => {
+            if measure_menu_button(hwnd, lparam.0 as *mut MEASUREITEMSTRUCT) {
+                LRESULT(1)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_DRAWITEM => {
+            if draw_menu_button(lparam.0 as *const DRAWITEMSTRUCT) {
+                LRESULT(1)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_MENUCHAR => {
+            let key = char::from_u32((wparam.0 & 0xFFFF) as u32)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let index = match key {
+                'm' => Some(0usize),
+                'p' => Some(1),
+                'a' => Some(2),
+                'v' => Some(3),
+                's' => Some(4),
+                'h' => Some(6),
+                _ => None,
+            };
+            if let Some(index) = index {
+                LRESULT(((MNC_EXECUTE as usize) << 16 | index) as isize)
+            } else {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_COMMAND => {
+            let id = (wparam.0 & 0xFFFF) as u16;
+            match crate::platform::menu::action_for_id(id) {
+                Some(crate::platform::menu::MenuAction::Input(event)) => {
+                    if let Some(state) = window_state(hwnd) {
+                        state.input_events.borrow_mut().push(event);
+                    }
+                    LRESULT(0)
+                }
+                Some(crate::platform::menu::MenuAction::Close) => {
+                    if let Some(state) = window_state(hwnd) {
+                        request_close(state);
+                    }
+                    LRESULT(0)
+                }
+                None => DefWindowProcW(hwnd, message, wparam, lparam),
+            }
+        }
+        WM_SYSKEYDOWN => {
+            // Alt reveals a menu bar that is not attached (hidden,
+            // frameless, fullscreen). The attached check also swallows the
+            // key's auto-repeat.
+            if wparam.0 as u16 == VK_MENU.0 {
+                if let Some(state) = window_state(hwnd) {
+                    if !state.menu_attached.get() {
+                        set_menu_reveal(hwnd, state, Some(MenuReveal::Alt));
+                    }
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_KILLFOCUS => {
+            // Alt+Tab (and any other Alt chord that leaves the window) never
+            // enters the menu loop, so WM_EXITMENULOOP cannot end the reveal.
+            if let Some(state) = window_state(hwnd) {
+                if state.menu_reveal.get().is_some() && !state.in_modal_loop.get() {
+                    set_menu_reveal(hwnd, state, None);
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
         }
         WM_KEYDOWN => {
             if let Some(state) = window_state(hwnd) {
@@ -2037,7 +2552,17 @@ unsafe extern "system" fn window_proc(
         WM_MBUTTONDOWN => LRESULT(0),
         WM_MBUTTONUP => {
             if let Some(state) = window_state(hwnd) {
-                request_close(state);
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if middle_click_closes(
+                    state.is_frameless_windowed.get(),
+                    state.is_borderless.get(),
+                    point_is_in_timeline(hwnd, y),
+                ) {
+                    // Same signal as WM_CLOSE, and deliberately the same
+                    // mechanism: set is_open and let the main loop run the
+                    // teardown ordering documented on that handler.
+                    request_close(state);
+                }
             }
             LRESULT(0)
         }
@@ -2286,6 +2811,9 @@ unsafe extern "system" fn window_proc(
         WM_EXITMENULOOP => {
             if let Some(state) = window_state(hwnd) {
                 state.in_modal_loop.set(false);
+                if state.menu_reveal.get() == Some(MenuReveal::Alt) {
+                    set_menu_reveal(hwnd, state, None);
+                }
             }
             unsafe {
                 let _ =
@@ -2320,11 +2848,12 @@ unsafe extern "system" fn window_proc(
             // resize or aspect-ratio calculations.
             let mmi = lparam.0 as *mut MINMAXINFO;
             if !mmi.is_null() {
-                let frameless =
-                    window_state(hwnd).is_some_and(|state| state.is_frameless_windowed.get());
+                let (frameless, menu) = window_state(hwnd).map_or((false, false), |state| {
+                    (state.is_frameless_windowed.get(), state.menu_attached.get())
+                });
                 // Convert the minimum client size to the active window shape.
                 let (min_w, min_h) =
-                    window_size_for_client(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT, frameless)
+                    window_size_for_client(MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT, frameless, menu)
                         .unwrap_or((640, 360));
                 unsafe {
                     (*mmi).ptMinTrackSize = POINT { x: min_w, y: min_h };
@@ -2388,8 +2917,35 @@ mod frameless_tests {
     };
 
     #[test]
+    fn menu_attach_and_detach_preserve_client_dimensions() {
+        assert_eq!(
+            window_size_preserving_client(800, 600, (784, 561), (784, 542)),
+            (800, 619)
+        );
+        assert_eq!(
+            window_size_preserving_client(800, 619, (784, 542), (784, 561)),
+            (800, 600)
+        );
+    }
+
+    #[test]
+    fn menu_attach_and_detach_preserve_client_screen_origin() {
+        assert_eq!(
+            window_position_preserving_client((100, 100), (108, 131), (108, 150)),
+            (100, 81)
+        );
+        assert_eq!(
+            window_position_preserving_client((100, 81), (108, 150), (108, 131)),
+            (100, 100)
+        );
+    }
+
+    #[test]
     fn frameless_hit_test_keeps_interior_in_the_client_area() {
-        assert_eq!(frameless_resize_hit_test(WINDOW, 500, 400, 8, 8), HTCLIENT);
+        assert_eq!(
+            frameless_resize_hit_test(WINDOW, 500, 400, 8, 8, false),
+            HTCLIENT
+        );
     }
 
     #[test]
@@ -2406,19 +2962,67 @@ mod frameless_tests {
         ];
         for ((x, y), expected) in cases {
             assert_eq!(
-                frameless_resize_hit_test(WINDOW, x, y, 8, 8),
+                frameless_resize_hit_test(WINDOW, x, y, 8, 8, false),
                 expected,
                 "unexpected hit result at ({x}, {y})"
             );
         }
     }
 
+    /// A maximized frameless window must report client area everywhere. Any
+    /// non-client result here means `DefWindowProcW` gets the message, and it
+    /// hit-tests from the intact `WS_OVERLAPPEDWINDOW` style — placing an
+    /// invisible close button over the top-right of the video.
+    #[test]
+    fn maximized_frameless_hit_test_is_client_area_everywhere() {
+        let edges_and_corners = [
+            (100, 300),
+            (899, 300),
+            (500, 200),
+            (500, 649),
+            (100, 200),
+            (899, 200),
+            (100, 649),
+            (899, 649),
+            (500, 400),
+        ];
+        for (x, y) in edges_and_corners {
+            assert_eq!(
+                frameless_resize_hit_test(WINDOW, x, y, 8, 8, true),
+                HTCLIENT,
+                "maximized frameless window must not expose non-client area at ({x}, {y})"
+            );
+        }
+    }
+
+    /// Middle click is the frameless stand-in for the close button. It must not
+    /// reach the presentations that still have one, or the timeline.
+    #[test]
+    fn middle_click_closes_only_a_frameless_window_outside_the_timeline() {
+        assert!(
+            middle_click_closes(true, false, false),
+            "frameless mode has no close button; middle click is its stand-in"
+        );
+        assert!(
+            !middle_click_closes(false, false, false),
+            "a framed window has a real close button"
+        );
+        assert!(
+            !middle_click_closes(true, true, false),
+            "borderless fullscreen exits with Esc / Ctrl+H"
+        );
+        assert!(
+            !middle_click_closes(true, false, true),
+            "the timeline strip belongs to scrubbing, not to closing"
+        );
+    }
+
     #[test]
     fn frameless_client_size_has_no_chrome_overhead() {
         assert_eq!(
-            window_size_for_client(1280, 720, true).unwrap(),
+            window_size_for_client(1280, 720, true, false).unwrap(),
             (1280, 720)
         );
-        assert_eq!(window_chrome_size(true).unwrap(), (0, 0));
+        assert_eq!(window_chrome_size(true, false).unwrap(), (0, 0));
     }
 }

@@ -1063,7 +1063,7 @@ If not, it waits.
 
 **Architecture locked. Milestones M0–M6 complete.**
 
-Current release: v0.3.0
+Current release: v0.5.0
 
 Implemented:
 * single-crate Rust implementation with the module boundaries shown in §5
@@ -1091,3 +1091,5 @@ Implemented:
 * audio underrun recovery (clock re-anchor)
 * error state idle overlay for recovery
 * Start Menu shortcut and custom install directory in MSI
+* native menu bar with a remembered visible/hidden preference
+* asynchronous marked In/Out MP4 export through packaged FFmpeg tools

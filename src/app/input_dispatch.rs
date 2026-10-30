@@ -6,7 +6,10 @@
 //! pure function makes it unit-testable and keeps the event loop focused on the
 //! handful of events that genuinely need event-loop context.
 
+use std::time::Duration;
+
 use crate::app::commands::SessionCommand;
+use crate::media::seek::SeekTarget;
 use crate::platform::input::InputEvent;
 
 /// Map a context-free input event to the session command it triggers.
@@ -15,7 +18,7 @@ use crate::platform::input::InputEvent;
 /// current playback position ([`InputEvent::SeekRelativeSeconds`]), the
 /// timeline-scrub UI ([`InputEvent::BackspaceKey`]), window state
 /// ([`InputEvent::EscapeKey`]), file I/O ([`InputEvent::FilesDropped`],
-/// [`InputEvent::OpenFileDialog`]), play-queue navigation
+/// [`InputEvent::OpenFileDialog`], [`InputEvent::ReopenCurrent`]), play-queue navigation
 /// ([`InputEvent::QueuePrevious`]/[`InputEvent::QueueNext`]), or an accompanying
 /// overlay side effect
 /// ([`InputEvent::StepFrameForward`]/[`InputEvent::StepFrameBackward`]). Those
@@ -25,11 +28,15 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         InputEvent::TogglePause => SessionCommand::TogglePause,
         InputEvent::ToggleSubtitles => SessionCommand::ToggleSubtitles,
         InputEvent::SaveScreenshot => SessionCommand::SaveScreenshot,
+        InputEvent::SeekToMillis(ms) => {
+            SessionCommand::Seek(SeekTarget::new(Duration::from_millis(*ms)))
+        }
         InputEvent::AdjustVolumeSteps(steps) => SessionCommand::AdjustVolumeSteps(*steps),
         InputEvent::RotateClockwise => SessionCommand::RotateClockwise,
         InputEvent::RotateCounterClockwise => SessionCommand::RotateCounterClockwise,
         InputEvent::ToggleBorderlessFullscreen => SessionCommand::ToggleBorderlessFullscreen,
         InputEvent::ToggleFramelessWindowed => SessionCommand::ToggleFramelessWindowed,
+        InputEvent::CycleMenuBarMode => SessionCommand::CycleMenuBarMode,
         InputEvent::ZoomAtCursor {
             delta,
             cursor_x,
@@ -65,6 +72,8 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
         | InputEvent::BackspaceKey
         | InputEvent::FilesDropped(_)
         | InputEvent::OpenFileDialog
+        | InputEvent::ReopenCurrent
+        | InputEvent::ExportRange
         // Play-queue navigation is handled by the event loop, which owns the queue.
         | InputEvent::QueuePrevious
         | InputEvent::QueueNext
@@ -82,6 +91,16 @@ pub fn command_for(event: &InputEvent) -> Option<SessionCommand> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn absolute_seek_maps_to_seek_command() {
+        assert_eq!(
+            command_for(&InputEvent::SeekToMillis(12_345)),
+            Some(SessionCommand::Seek(SeekTarget::new(
+                Duration::from_millis(12_345)
+            )))
+        );
+    }
 
     #[test]
     fn direct_mappings_translate_one_to_one() {

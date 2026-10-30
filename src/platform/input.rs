@@ -37,6 +37,7 @@ mod vk {
     pub const F: u32 = 0x46;
     pub const H: u32 = 0x48;
     pub const I: u32 = 0x49;
+    pub const M: u32 = 0x4D;
     pub const O: u32 = 0x4F;
     pub const Q: u32 = 0x51;
     pub const R: u32 = 0x52;
@@ -128,6 +129,9 @@ pub(crate) fn command_for_key(
             (false, true) => Some(InputEvent::ClearOutPoint),
             (false, false) => Some(InputEvent::SetOutPoint),
         },
+        // Ctrl+Shift+M → toggle the menu bar on or off.
+        // First press only, so holding the chord does not spin the cycle.
+        vk::M => (ctrl && shift && !is_repeat).then_some(InputEvent::CycleMenuBarMode),
         // Ctrl+R → rotate clockwise, R → toggle loop/auto-replay.
         vk::R => {
             if ctrl {
@@ -136,8 +140,12 @@ pub(crate) fn command_for_key(
                 Some(InputEvent::ToggleLoopRange)
             }
         }
-        // Ctrl+E → rotate counter-clockwise.
-        vk::E => ctrl.then_some(InputEvent::RotateCounterClockwise),
+        // Ctrl+Shift+E → export marked range; Ctrl+E → rotate counter-clockwise.
+        vk::E => match (ctrl, shift, is_repeat) {
+            (true, true, false) => Some(InputEvent::ExportRange),
+            (true, false, _) => Some(InputEvent::RotateCounterClockwise),
+            _ => None,
+        },
         // Ctrl+F / Ctrl+B → step one frame forward / backward.
         vk::F => ctrl.then_some(InputEvent::StepFrameForward),
         vk::B => ctrl.then_some(InputEvent::StepFrameBackward),
@@ -199,7 +207,14 @@ pub enum InputEvent {
     TogglePause,
     ToggleSubtitles,
     SaveScreenshot,
+    ExportRange,
     SeekRelativeSeconds(i64),
+    /// Absolute seek to a media position in milliseconds. Only produced by the
+    /// benchmark automation hook (`WM_APP_SEEK_TO_MS`); no key maps to it.
+    SeekToMillis(u64),
+    /// Reopen the current file in-process through the normal open path. Only
+    /// produced by the benchmark automation hook (`WM_APP_REOPEN_CURRENT`).
+    ReopenCurrent,
     StepFrameForward,
     StepFrameBackward,
     AdjustVolumeSteps(i16),
@@ -207,6 +222,7 @@ pub enum InputEvent {
     RotateCounterClockwise,
     ToggleBorderlessFullscreen,
     ToggleFramelessWindowed,
+    CycleMenuBarMode,
     ZoomAtCursor {
         delta: i16,
         cursor_x: i32,
@@ -357,6 +373,18 @@ mod tests {
                 false,
                 Some(ToggleRecentOverlay),
             ),
+            // ── M: Ctrl+Shift+M toggles the menu bar, first press only ──
+            case(
+                "Ctrl+Shift+M",
+                vk::M,
+                true,
+                true,
+                false,
+                Some(CycleMenuBarMode),
+            ),
+            case("Ctrl+Shift+M (repeat)", vk::M, true, true, true, None),
+            case("Ctrl+M", vk::M, true, false, false, None),
+            case("M", vk::M, false, false, false, None),
             case(
                 "Ctrl+O (repeat)",
                 vk::O,
@@ -644,6 +672,19 @@ mod tests {
             command_for_key(vk::S, true, true, false),
             Some(InputEvent::ToggleFramelessWindowed),
             "Ctrl+Shift+S toggles frameless windowed mode"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_e_exports_once_without_changing_ctrl_e() {
+        assert_eq!(
+            command_for_key(vk::E, true, true, false),
+            Some(InputEvent::ExportRange)
+        );
+        assert_eq!(command_for_key(vk::E, true, true, true), None);
+        assert_eq!(
+            command_for_key(vk::E, true, false, false),
+            Some(InputEvent::RotateCounterClockwise)
         );
     }
 

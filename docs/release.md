@@ -18,6 +18,11 @@ FastPlay release prep is version-driven:
 cargo build --release
 ```
 
+   The release build must stage `ffmpeg.exe` and `ffprobe.exe` beside
+   `fastplay.exe`. If they are not in the FFmpeg development `bin` directory,
+   set `FASTPLAY_FFMPEG_TOOLS_DIR` to a directory containing both tools before
+   building.
+
 3. Build the MSI:
 
 ```powershell
@@ -32,14 +37,16 @@ cargo wix
 ```
 
 6. Verify the ZIP exists under `target\dist\` and contains one versioned
-   directory with `fastplay.exe`, the MSI's runtime DLL set, the portable
-   README, and license notices.
+   directory with `fastplay.exe`, `ffmpeg.exe`, `ffprobe.exe`, the MSI's
+   runtime DLL set, the portable README, and license notices.
 7. Smoke-test:
    - launch `target\release\fastplay.exe`
    - extract the portable ZIP to a clean directory and launch its
      `fastplay.exe` without installing FastPlay
    - open representative hardware- and software-decoded media from the
      extracted bundle
+   - export a marked In/Out range from the extracted bundle without relying on
+     FFmpeg from `PATH`
    - install/uninstall the MSI
    - confirm Start Menu shortcut
    - confirm file association open for `.mp4`

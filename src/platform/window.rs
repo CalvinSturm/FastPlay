@@ -1,6 +1,6 @@
 use crate::{
     ffi::dxgi::{NativeWindowInner, ResizeRequest},
-    platform::input::InputEvent,
+    platform::{input::InputEvent, menu::MenuBarMode},
 };
 
 pub struct NativeWindow {
@@ -13,17 +13,24 @@ impl NativeWindow {
         width: u32,
         height: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::create_with_frameless_windowed(title, width, height, false)
+        Self::create_with_preferences(title, width, height, false, MenuBarMode::Visible)
     }
 
-    pub fn create_with_frameless_windowed(
+    pub fn create_with_preferences(
         title: &str,
         width: u32,
         height: u32,
         frameless_windowed: bool,
+        menu_bar_mode: MenuBarMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
-            inner: NativeWindowInner::create(title, width, height, frameless_windowed)?,
+            inner: NativeWindowInner::create(
+                title,
+                width,
+                height,
+                frameless_windowed,
+                menu_bar_mode,
+            )?,
         })
     }
 
@@ -77,6 +84,11 @@ impl NativeWindow {
 
     pub fn toggle_frameless_windowed(&self) -> bool {
         self.inner.toggle_frameless_windowed()
+    }
+
+    /// Advance the menu bar to its next mode and return the new mode.
+    pub fn cycle_menu_bar_mode(&self) -> MenuBarMode {
+        self.inner.cycle_menu_bar_mode()
     }
 
     pub fn is_frameless_windowed(&self) -> bool {

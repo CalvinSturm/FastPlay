@@ -1,6 +1,6 @@
 # Roadmap
 
-Status: 2026-08-14 · FastPlay v0.4.5
+Status: 2026-10-30 · FastPlay v0.5.0
 
 Practical, prioritized plan for maintaining FastPlay before new features land.
 This complements (does not replace) `ARCHITECTURE.md`, which stays the locked
@@ -43,12 +43,17 @@ evidence-driven rather than pursued solely to reduce line count.
 A repeatable harness that turns the metrics the app already logs to
 the session log into reportable percentiles, matching `ARCHITECTURE.md §24`. It is
 Windows-only, drives the real release build via `PostMessageW`, and does not
-touch the steady-state hot path or app code. See [`bench/README.md`](../bench/README.md).
+touch the steady-state hot path. App-side support is limited to two automation
+messages (`WM_APP+3` absolute seek, `WM_APP+4` in-process reopen) and one-shot
+log lines. See [`bench/README.md`](../bench/README.md).
 
-- `bench/gen-corpus.ps1` — generates a synthetic ffmpeg corpus (no media in repo).
-- `bench/run-bench.ps1` — drives open → seeks → pause/resume → playthrough →
-  graceful close per clip/iteration, parses that run's session log, and emits a p50/p95
-  console table plus `bench/results/*.json` and `*.csv`.
+- `bench/gen-corpus.ps1` — generates a synthetic ffmpeg corpus (no media in repo)
+  spanning H.264/HEVC, 1080p/2160p, SDR/PQ/HLG.
+- `bench/run-bench.ps1` — per clip × hw/sw variant × iteration: launch → in-process
+  reopens → absolute seeks at fixed fractions → pause/resume → optional playthrough
+  → graceful close, under an isolated `%APPDATA%`. Parses each run's session log
+  in order, attributing every metric to its open/seek with a status, and emits
+  median/p95 per slice to `bench/results/<stamp>/` (events/runs/summary CSV + JSON).
 
 It is intentionally **not** wired into `cargo`/CI yet (local/optional first, per
 the note below); promote it once it has proven stable across machines.
@@ -89,8 +94,9 @@ library or sprawl.
   step with `PageUp` / `PageDown`, and auto-advance at the natural end of each
   file. No persistent playlists, recursive scanning, shuffle, or repeat.
 - **Optional file associations** — already partially present via MSI; make it an
-  explicit, optional toggle.
-- **Portable ZIP artifact** — ship a no-installer build alongside the MSI.
+  explicit, optional toggle in a later packaging pass.
+- ✅ **Portable ZIP artifact** — shipped in v0.4.6 and kept in lockstep with
+  the MSI runtime manifest.
 
 ---
 
@@ -106,6 +112,9 @@ overlay controllers from §1. None of these change the playback hot path.
 - export marks as JSON / CSV
 - screenshot current frame (already present; fold into review export)
 - timeline hover thumbnails
+
+Marked In/Out MP4 export shipped in v0.5.0. The next creator-facing work waits
+until the performance baseline and Windows robustness passes below are closed.
 
 ---
 
@@ -137,7 +146,10 @@ this roadmap:
 4. ✅ first product basics: recent files and resume playback (§3).
 5. ✅ lightweight play queue: next/previous + folder playback + auto-advance
    (§3), shipped in v0.4.0.
-6. **Next:** choose among the remaining product basics (portable ZIP artifact,
-   optional file-association toggle) based on measured user value and
-   architecture fit.
-7. **Later:** creator review mode (§4).
+6. ✅ native menu and marked-range export release closure (v0.5.0).
+7. **Next:** establish a benchmark baseline that records p50, p95, p99, and max
+   and cannot silently accept incomplete scenarios.
+8. **Then:** reduce measured seek-tail latency and validate Windows device,
+   endpoint, resize, reopen, fullscreen, sleep/wake, and HDR/SDR transitions.
+9. **Later:** lightweight next-item preview, followed by creator review notes
+   and sidecar export (§4).

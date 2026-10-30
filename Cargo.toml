@@ -1,12 +1,13 @@
 [package]
 name = "fastplay"
-version = "0.4.6"
+version = "0.5.0"
 edition = "2021"
 authors = ["Calvin"]
 license = "MIT"
 build = "build.rs"
 
 [dependencies]
+png = "0.17"
 windows-core = "0.58"
 windows = { version = "0.58", features = [
     "Win32_Foundation",

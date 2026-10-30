@@ -34,6 +34,7 @@ use crate::{
     },
     media::{
         audio::{AudioStreamFormat, DecodedAudioFrame},
+        export::{self, ExportRange},
         seek::{PlaybackSnapshot, PositionKind, SeekTarget},
         source::MediaSource,
         subtitle::SubtitleTrack,
@@ -170,6 +171,7 @@ pub struct PlaybackSession {
     /// on the UI thread, exactly like the window's resize request; the COM
     /// callback itself only sets a flag.
     audio_endpoint_watch: Option<DefaultRenderEndpointWatch>,
+    active_export: Option<(OpenGeneration, SeekGeneration, OperationId)>,
 }
 
 /// A one-shot, edge-triggered "playback just ended" latch.
@@ -276,11 +278,52 @@ impl PlaybackSession {
                     None
                 }
             },
+            active_export: None,
         })
+    }
+
+    pub fn export_range_request(&self) -> Result<ExportRange, &'static str> {
+        let source = self
+            .current_source
+            .as_ref()
+            .ok_or("Open media before exporting.")?;
+        ExportRange::new(
+            source.path(),
+            self.clip_range.in_point(),
+            self.clip_range.out_point(),
+        )
+    }
+
+    pub fn start_export(&mut self, range: ExportRange, destination: PathBuf) {
+        if self.active_export.is_some() {
+            self.show_status_message("A clip export is already running.");
+            return;
+        }
+        let open_gen = self.generations.open();
+        let seek_gen = self.generations.seek();
+        let op_id = self.operation_clock.next();
+        self.active_export = Some((open_gen, seek_gen, op_id));
+        self.show_status_message("Exporting clip…");
+        let sender = self.event_tx.clone();
+        thread::spawn(move || {
+            let result = export::export_range(&range, &destination);
+            let _ = sender.send(SessionEvent::ExportFinished {
+                open_gen,
+                seek_gen,
+                op_id,
+                destination,
+                result,
+            });
+        });
     }
 
     pub fn window(&self) -> &NativeWindow {
         &self.window
+    }
+
+    /// The open file, including its decode preference (e.g. `--force-sw`).
+    pub fn current_source(&self) -> Option<MediaSource> {
+        self.current_source.as_deref().cloned()
     }
 
     pub fn snapshot(&self, now: Instant) -> PlaybackSnapshot {
@@ -406,6 +449,12 @@ impl PlaybackSession {
         let open_gen = self.generations.bump_open();
         let seek_gen = self.generations.seek();
         let op_id = self.operation_clock.next();
+        flog!(
+            "[open] open={} start_ms={} decode_preference={:?}",
+            open_gen.0,
+            start_position.unwrap_or_default().as_millis(),
+            source.decode_preference()
+        );
         // A freshly opened file is not ended: discard any unconsumed signal so a
         // stale latch can never auto-advance the new file.
         self.ended_signal.take();
@@ -509,6 +558,15 @@ impl PlaybackSession {
                     super::settings::save_frameless_windowed(enabled);
                     flog!("frameless_windowed={enabled}");
                 }
+            }
+            SessionCommand::CycleMenuBarMode => {
+                let mode = self.window.cycle_menu_bar_mode();
+                super::settings::save_menu_bar_mode(mode);
+                flog!("menu_bar_mode={}", mode.as_setting());
+                self.show_status_message(match mode {
+                    crate::platform::menu::MenuBarMode::Visible => "Menu bar: On",
+                    crate::platform::menu::MenuBarMode::Hidden => "Menu bar: Off",
+                });
             }
             SessionCommand::ZoomAtCursor {
                 delta,
@@ -659,7 +717,7 @@ impl PlaybackSession {
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         // The HDR10 chain reads back packed 2:10:10:10 PQ dwords, not
         // BGRA8; tone-map them to SDR on the CPU (the audited shader model
-        // in double precision) so the BMP shows what an SDR viewer would
+        // in double precision) so the PNG shows what an SDR viewer would
         // have seen. Any other non-BGRA format is a typed error rather
         // than a garbage file.
         use windows::Win32::Graphics::Dxgi::Common::{
@@ -687,8 +745,8 @@ impl PlaybackSession {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let path = directory.join(format!("fastplay-screenshot-{stamp}.bmp"));
-        fs::write(&path, encode_bgra_bmp(&capture)?)?;
+        let path = directory.join(format!("fastplay-screenshot-{stamp}.png"));
+        fs::write(&path, encode_bgra_png(&capture)?)?;
         Ok(path)
     }
 
@@ -920,7 +978,10 @@ impl PlaybackSession {
             self.metrics.disable_open_audio_metric();
         }
 
-        if self.metrics.pending_seek_first_frame && self.presenter.has_selected_surface() {
+        // Gate on a frame of the *new* seek generation having been presented:
+        // the pre-seek surface stays selected until then, so
+        // `has_selected_surface()` alone would log ~0 ms for every seek.
+        if self.metrics.pending_seek_first_frame && self.seek_frame_presented_since_request {
             if let Some(elapsed) = self.metrics.note_seek_first_frame_presented(now) {
                 flog!("seek_to_first_frame_ms={}", elapsed.as_millis());
             }
@@ -978,6 +1039,28 @@ impl PlaybackSession {
         now: Instant,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match event {
+            SessionEvent::ExportFinished {
+                open_gen,
+                seek_gen,
+                op_id,
+                destination,
+                result,
+            } => {
+                if self.active_export != Some((open_gen, seek_gen, op_id)) {
+                    return Ok(());
+                }
+                self.active_export = None;
+                match result {
+                    Ok(()) => {
+                        let name = destination
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("clip");
+                        self.show_status_message(&format!("Exported {name}"));
+                    }
+                    Err(error) => self.show_status_message(&error),
+                }
+            }
             SessionEvent::DecodeModeSelected {
                 open_gen,
                 seek_gen,
@@ -2968,42 +3051,39 @@ fn screenshot_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(std::env::current_dir()?.join("FastPlay Screenshots"))
 }
 
-fn encode_bgra_bmp(capture: &BgraFrameCapture) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn encode_bgra_png(capture: &BgraFrameCapture) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let width = capture.width;
     let height = capture.height;
     let pixel_bytes = width
         .checked_mul(height)
         .and_then(|px| px.checked_mul(4))
-        .ok_or("screenshot dimensions overflowed BMP size")?;
+        .ok_or("screenshot dimensions overflowed PNG size")?;
     if capture.pixels.len() != pixel_bytes as usize {
         return Err("screenshot pixel buffer size did not match dimensions".into());
     }
 
-    let header_bytes = 14u32 + 40u32;
-    let file_size = header_bytes
-        .checked_add(pixel_bytes)
-        .ok_or("screenshot BMP file size overflowed")?;
-    let top_down_height = -(height as i32);
+    // Backbuffer readback is BGRA8. PNG has no BGRA color type, so write an
+    // opaque RGB image after swapping red and blue. Ignoring the backbuffer
+    // alpha preserves the BMP path's behavior even if a driver leaves alpha
+    // at zero for otherwise-visible pixels.
+    let rgb_bytes = width
+        .checked_mul(height)
+        .and_then(|px| px.checked_mul(3))
+        .ok_or("screenshot dimensions overflowed RGB buffer size")?;
+    let mut rgb = Vec::with_capacity(rgb_bytes as usize);
+    for pixel in capture.pixels.as_chunks::<4>().0 {
+        rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
 
-    let mut bytes = Vec::with_capacity(file_size as usize);
-    bytes.extend_from_slice(b"BM");
-    bytes.extend_from_slice(&file_size.to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    bytes.extend_from_slice(&header_bytes.to_le_bytes());
-
-    bytes.extend_from_slice(&40u32.to_le_bytes());
-    bytes.extend_from_slice(&(width as i32).to_le_bytes());
-    bytes.extend_from_slice(&top_down_height.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&32u16.to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(&pixel_bytes.to_le_bytes());
-    bytes.extend_from_slice(&0i32.to_le_bytes());
-    bytes.extend_from_slice(&0i32.to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(&capture.pixels);
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&rgb)?;
+    }
     Ok(bytes)
 }
 
@@ -3052,10 +3132,36 @@ fn video_starts_ended(video_stream_expected: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        endpoint_switch_for, media_time_origin, video_starts_ended, EndedSignal, EndpointSwitch,
+        encode_bgra_png, endpoint_switch_for, media_time_origin, video_starts_ended, EndedSignal,
+        EndpointSwitch,
     };
     use crate::app::state::PlaybackState;
-    use std::time::Duration;
+    use crate::ffi::d3d11::BgraFrameCapture;
+    use std::{io::Cursor, time::Duration};
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+
+    #[test]
+    fn screenshot_encoder_writes_rgb_png_from_bgra_capture() {
+        let capture = BgraFrameCapture {
+            width: 2,
+            height: 1,
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            pixels: vec![30, 20, 10, 0, 60, 50, 40, 255],
+        };
+
+        let encoded = encode_bgra_png(&capture).expect("encode screenshot PNG");
+        assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
+
+        let decoder = png::Decoder::new(Cursor::new(encoded));
+        let mut reader = decoder.read_info().expect("read screenshot PNG header");
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader
+            .next_frame(&mut pixels)
+            .expect("decode screenshot PNG pixels");
+        assert_eq!((info.width, info.height), (2, 1));
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        assert_eq!(&pixels[..info.buffer_size()], &[10, 20, 30, 40, 50, 60]);
+    }
 
     #[test]
     fn endpoint_switch_ignores_states_with_nothing_playing() {

@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/ffi/ffmpeg_shim.h");
     println!("cargo:rerun-if-changed=assets/fastplay.rc");
     println!("cargo:rerun-if-changed=assets/icon/fastplay.ico");
+    println!("cargo:rerun-if-env-changed=FASTPLAY_FFMPEG_TOOLS_DIR");
 
     let ffmpeg = discover_ffmpeg()?;
 
@@ -32,6 +33,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if let Some(bin_dir) = &ffmpeg.bin_dir {
         stage_ffmpeg_dlls(bin_dir)?;
+        stage_ffmpeg_tools(bin_dir, false)?;
+    }
+
+    if let Some(tools_dir) = env::var_os("FASTPLAY_FFMPEG_TOOLS_DIR") {
+        stage_ffmpeg_tools(&PathBuf::from(tools_dir), true)?;
     }
 
     compile_ffmpeg_shim(&ffmpeg.include_dir);
@@ -184,6 +190,27 @@ fn stage_ffmpeg_dlls(bin_dir: &Path) -> Result<(), Box<dyn Error>> {
         if path.extension().and_then(|value| value.to_str()) == Some("dll") {
             let dst = target_dir.join(entry.file_name());
             fs::copy(path, dst)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn stage_ffmpeg_tools(bin_dir: &Path, require_all: bool) -> Result<(), Box<dyn Error>> {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let profile = env::var("PROFILE")?;
+    let target_dir = manifest_dir.join("target").join(profile);
+
+    for file_name in ["ffmpeg.exe", "ffprobe.exe"] {
+        let source = bin_dir.join(file_name);
+        if source.is_file() {
+            fs::copy(source, target_dir.join(file_name))?;
+        } else if require_all {
+            return Err(format!(
+                "FASTPLAY_FFMPEG_TOOLS_DIR is missing required release tool: {}",
+                source.display()
+            )
+            .into());
         }
     }
 

@@ -9,6 +9,13 @@ use crate::{
 /// the only state owner.
 #[derive(Debug)]
 pub enum SessionEvent {
+    ExportFinished {
+        open_gen: OpenGeneration,
+        seek_gen: SeekGeneration,
+        op_id: OperationId,
+        destination: std::path::PathBuf,
+        result: Result<(), String>,
+    },
     DecodeModeSelected {
         open_gen: OpenGeneration,
         seek_gen: SeekGeneration,
